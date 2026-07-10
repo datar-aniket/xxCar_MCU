@@ -2,6 +2,16 @@
 
 Barebone NuttX → NSH shell over USB on the Holybro Pixhawk 6C (FMUv6C).
 
+## Status
+- ✅ **Builds & links** (`tools/build.sh`): `nuttx.bin` (~175 KB) linked at `0x08020000`,
+  packaged to `build/xxcar.px4` (board_id 56). Verified on host with NuttX 12.13.0 + arm-none-eabi-gcc.
+- ⏳ **On-hardware bring-up pending** (needs the physical board): flash, confirm USB CDC enumeration,
+  and the shell prompt.
+- ⚠️ **Placeholder pins:** the clock tree + USB clocking in `boards/fmuv6c/include/board.h` are the
+  *verified* FMUv6C values (from PX4). The peripheral **pin-mux is still nucleo-h743zi placeholder**
+  (search `TODO(hw)`), to be replaced from the FMUv6C schematic during bring-up. USB CDC works
+  regardless (fixed OTG_FS PA11/PA12). USART3 is the debug console (pins are TODO).
+
 ## 1. Host prerequisites
 
 | Tool | Notes |
