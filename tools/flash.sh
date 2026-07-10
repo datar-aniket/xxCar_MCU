@@ -12,4 +12,4 @@ PORTS="/dev/pixhawk_6c,/dev/serial/by-id/*,/dev/ttyACM*"
 
 echo ">> Ready to flash: $IMAGE"
 echo ">> Now UNPLUG and RE-PLUG the Pixhawk 6C USB to enter the bootloader window..."
-python3 "$REPO/tools/px4/px_uploader.py" --port "$PORTS" "$IMAGE"
+python3 "$REPO/tools/px4/px4_uploader.py" --port "$PORTS" "$IMAGE"
