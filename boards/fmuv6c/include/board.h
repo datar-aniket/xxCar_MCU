@@ -134,21 +134,25 @@
 #define STM32_PLL2Q_FREQUENCY    (STM32_VCO2_FREQUENCY / 2)
 #define STM32_PLL2R_FREQUENCY    (STM32_VCO2_FREQUENCY / 2)
 
-/* PLL3 (Q output = 48 MHz, used as the USB clock source) */
+/* PLL3 is DISABLED. FMUv6C/PX4 clock USB from PLL3Q, but NuttX's H7 RCC waits
+ * for PLL3RDY in an unbounded loop, so a mis-lock would hang boot before USB
+ * ever comes up. We instead clock USB from the internal HSI48 (see USBSRC
+ * below + CONFIG_STM32H7_HSI48), which always locks -- nucleo-h743zi does the
+ * same. Nothing else on this board uses PLL3. TODO: revisit if a peripheral
+ * needs a PLL3 output.
+ */
 
-#define STM32_PLLCFG_PLL3CFG    (RCC_PLLCFGR_PLL3VCOSEL_WIDE | \
-                                 RCC_PLLCFGR_PLL3RGE_4_8_MHZ | \
-                                 RCC_PLLCFGR_DIVQ3EN)
-#define STM32_PLLCFG_PLL3M      RCC_PLLCKSELR_DIVM3(4)
-#define STM32_PLLCFG_PLL3N      RCC_PLL3DIVR_N3(48)
-#define STM32_PLLCFG_PLL3P      RCC_PLL3DIVR_P3(2)
-#define STM32_PLLCFG_PLL3Q      RCC_PLL3DIVR_Q3(4)
-#define STM32_PLLCFG_PLL3R      RCC_PLL3DIVR_R3(2)
+#define STM32_PLLCFG_PLL3CFG 0
+#define STM32_PLLCFG_PLL3M   0
+#define STM32_PLLCFG_PLL3N   0
+#define STM32_PLLCFG_PLL3P   0
+#define STM32_PLLCFG_PLL3Q   0
+#define STM32_PLLCFG_PLL3R   0
 
-#define STM32_VCO3_FREQUENCY    ((STM32_HSE_FREQUENCY / 4) * 48)
-#define STM32_PLL3P_FREQUENCY   (STM32_VCO3_FREQUENCY / 2)
-#define STM32_PLL3Q_FREQUENCY   (STM32_VCO3_FREQUENCY / 4)
-#define STM32_PLL3R_FREQUENCY   (STM32_VCO3_FREQUENCY / 2)
+#define STM32_VCO3_FREQUENCY
+#define STM32_PLL3P_FREQUENCY
+#define STM32_PLL3Q_FREQUENCY
+#define STM32_PLL3R_FREQUENCY
 
 /* SYSCLK = PLL1P = 480 MHz
  * CPUCLK = SYSCLK / 1 = 480 MHz
@@ -236,9 +240,9 @@
 
 #define STM32_RCC_D3CCIPR_SPI6SRC    RCC_D3CCIPR_SPI6SEL_PLL2
 
-/* USB 1 and 2 clock source - PLL3Q (48 MHz) */
+/* USB 1 and 2 clock source - HSI48 (internal 48 MHz RC; see PLL3 note above) */
 
-#define STM32_RCC_D2CCIP2R_USBSRC    RCC_D2CCIP2R_USBSEL_PLL3
+#define STM32_RCC_D2CCIP2R_USBSRC    RCC_D2CCIP2R_USBSEL_HSI48
 
 /* UART clock selection - reset to default RCC (overwrite any bootloader change) */
 
