@@ -49,6 +49,7 @@ CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
 Makefile
+!/Makefile
 install_manifest.txt
 compile_commands.json
 
@@ -67,3 +68,8 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+# NuttX out-of-tree board build artifacts
+boards/*/src/.depend
+boards/*/src/Make.dep
+boards/*/src/*.o

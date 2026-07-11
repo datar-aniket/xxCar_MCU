@@ -1,0 +1,8 @@
+#
+# xxCar_MCU FMUv6C board configuration.
+#
+# For a description of the syntax of this configuration file, see
+# the file kconfig-language.txt in the NuttX tools repository.
+#
+# Stage 1 has no board-specific Kconfig options yet. Sensor-bus and
+# override/failsafe options will be added in later stages.
