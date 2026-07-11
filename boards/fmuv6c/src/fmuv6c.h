@@ -284,6 +284,18 @@ int stm32_bringup(void);
 int fmuv6c_sensor_probe(void);
 
 /****************************************************************************
+ * Name: fmuv6c_sensors_initialize
+ *
+ * Description:
+ *   Register the onboard sensors (starting with MS5611 baro) on the uorb
+ *   framework. Called from board bring-up under CONFIG_SENSORS.
+ ****************************************************************************/
+
+#ifdef CONFIG_SENSORS
+int fmuv6c_sensors_initialize(void);
+#endif
+
+/****************************************************************************
  * Name: stm32_spidev_initialize
  *
  * Description:

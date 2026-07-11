@@ -509,5 +509,11 @@ int stm32_bringup(void)
   fmuv6c_sensor_probe();
 #endif
 
+#ifdef CONFIG_SENSORS
+  /* Stage 2 - Task 2: register onboard sensors on the uorb framework */
+
+  fmuv6c_sensors_initialize();
+#endif
+
   return OK;
 }
