@@ -1,9 +1,11 @@
 #
 # xxCar_MCU / FMUv6C barebone NuttX config (Stage 1)
 # NSH console on TELEM1 (UART7, PE7/PE8) @115200 8N1.
-# USB CDC-ACM is enabled but NOT the console: connect it on demand from the
-# shell with `sercon` (and `serdis`) so we can watch USB trace while debugging
-# enumeration. VID 0x3162 / PID 0x0053 -> /dev/pixhawk_6c when it works.
+#
+# USB is intentionally DISABLED here: enabling OTG-FS destabilised boot (an OTG
+# IRQ storm at init overflowed the idle stack -> hardfault, and with a dedicated
+# interrupt stack it instead spun forever before NSH started). USB bring-up is
+# tracked separately; TELEM1 is the reliable Stage 1 console.
 #
 # Regenerate after menuconfig with:  make -C deps/nuttx savedefconfig
 # and copy nuttx/defconfig back here.
@@ -32,13 +34,6 @@ CONFIG_BOARDCTL_RESET=y
 CONFIG_BOARD_LATE_INITIALIZE=y
 CONFIG_BOARD_LOOPSPERMSEC=43103
 CONFIG_BUILTIN=y
-CONFIG_CDCACM=y
-CONFIG_CDCACM_PRODUCTID=0x0053
-CONFIG_CDCACM_PRODUCTSTR="Pixhawk6C xxCar"
-CONFIG_CDCACM_RXBUFSIZE=512
-CONFIG_CDCACM_TXBUFSIZE=512
-CONFIG_CDCACM_VENDORID=0x3162
-CONFIG_CDCACM_VENDORSTR="Holybro"
 CONFIG_DEBUG_ALERT=y
 CONFIG_DEBUG_ASSERTIONS=y
 CONFIG_DEBUG_FEATURES=y
@@ -69,20 +64,8 @@ CONFIG_SCHED_WAITPID=y
 CONFIG_START_DAY=6
 CONFIG_START_MONTH=12
 CONFIG_START_YEAR=2011
-CONFIG_STM32H7_HSI48=y
-CONFIG_STM32H7_OTGFS=y
 CONFIG_STM32H7_UART7=y
-CONFIG_SYSTEM_CDCACM=y
-CONFIG_SYSTEM_CDCACM_TRACECLASS=y
-CONFIG_SYSTEM_CDCACM_TRACECONTROLLER=y
-CONFIG_SYSTEM_CDCACM_TRACEINIT=y
-CONFIG_SYSTEM_CDCACM_TRACEINTERRUPTS=y
-CONFIG_SYSTEM_CDCACM_TRACETRANSFERS=y
 CONFIG_SYSTEM_NSH=y
 CONFIG_TASK_NAME_SIZE=24
 CONFIG_UART7_BAUD=115200
 CONFIG_UART7_SERIAL_CONSOLE=y
-CONFIG_USBDEV=y
-CONFIG_USBDEV_TRACE=y
-CONFIG_USBDEV_TRACE_NRECORDS=256
-CONFIG_USBDEV_TRACE_STRINGS=y
