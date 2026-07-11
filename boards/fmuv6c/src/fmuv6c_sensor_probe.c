@@ -18,6 +18,8 @@
 #include <errno.h>
 #include <syslog.h>
 
+#include <nuttx/signal.h>
+
 #include <nuttx/spi/spi.h>
 #include <nuttx/i2c/i2c_master.h>
 
@@ -39,9 +41,11 @@
 
 #define ICM42688_WHOAMI_REG   0x75
 #define ICM42688_WHOAMI_VAL   0x47
-#define BMI088_CHIPID_REG     0x00
-#define BMI088_ACC_CHIPID_VAL 0x1e
-#define BMI088_GYR_CHIPID_VAL 0x0f
+#define BMI_ACC_CHIPID_REG    0x00
+#define BMI088_ACC_CHIPID_VAL 0x1e   /* BMI088 accel: 0x1e, needs a dummy byte */
+#define BMI055_ACC_CHIPID_VAL 0xfa   /* BMI055 accel: 0xfa, no dummy byte      */
+#define BMI_GYR_CHIPID_REG    0x00
+#define BMI_GYR_CHIPID_VAL    0x0f   /* BMI055 and BMI088 gyro both report 0x0f */
 #define IST8310_WAI_REG       0x00
 #define IST8310_WAI_VAL       0x10
 #define MS5611_RESET_CMD      0x1e
@@ -141,25 +145,64 @@ int fmuv6c_sensor_probe(void)
              id, PF(id == ICM42688_WHOAMI_VAL));
       fail += (id != ICM42688_WHOAMI_VAL);
 
-      /* BMI088 accel (CS PC15), SPI mode 0. First read switches I2C->SPI mode
-       * (garbage), so read twice and check the second; needs the dummy byte.
+      /* 2nd-IMU accel (CS PC15). The FMUv6C ships one of two Bosch parts by
+       * board rev: BMI055 accel (chip-id 0xFA @reg0x00, NO dummy byte) on early
+       * revs, or BMI088 accel (chip-id 0x1E @reg0x00, WITH a dummy byte) on
+       * later revs. Read addr + 3 bytes and auto-detect which one is fitted.
        */
 
-      spi_read_id(spi, SPIDEV_ACCELEROMETER(FMUV6C_SPIDEV_BMI088_ACCEL),
-                  BMI088_CHIPID_REG, SPIDEV_MODE0, true);
-      id = spi_read_id(spi, SPIDEV_ACCELEROMETER(FMUV6C_SPIDEV_BMI088_ACCEL),
-                       BMI088_CHIPID_REG, SPIDEV_MODE0, true);
-      syslog(LOG_INFO, "[probe] BMI088-accel SPI1 CS PC15  CHIPID=0x%02x  %s\n",
-             id, PF(id == BMI088_ACC_CHIPID_VAL));
-      fail += (id != BMI088_ACC_CHIPID_VAL);
+      {
+        uint32_t adev = SPIDEV_ACCELEROMETER(FMUV6C_SPIDEV_BMI088_ACCEL);
+        uint8_t  buf[3] = {0};
+        FAR const char *part;
+        bool ok;
 
-      /* BMI088 gyro (CS PC14), SPI mode 0, no dummy byte */
+        /* First transaction switches the accel from I2C to SPI mode (invalid) */
+
+        spi_read_id(spi, adev, BMI_ACC_CHIPID_REG, SPIDEV_MODE0, false);
+        nxsig_usleep(1000);
+
+        SPI_LOCK(spi, true);
+        SPI_SETMODE(spi, SPIDEV_MODE0);
+        SPI_SETBITS(spi, 8);
+        SPI_SETFREQUENCY(spi, PROBE_SPI_FREQ);
+        SPI_SELECT(spi, adev, true);
+        SPI_SEND(spi, BMI_ACC_CHIPID_REG | SPI_READ_BIT);
+        SPI_RECVBLOCK(spi, buf, 3);
+        SPI_SELECT(spi, adev, false);
+        SPI_LOCK(spi, false);
+
+        if (buf[0] == BMI055_ACC_CHIPID_VAL)        /* no dummy byte */
+          {
+            part = "BMI055-accel";
+            ok   = true;
+          }
+        else if (buf[1] == BMI088_ACC_CHIPID_VAL)   /* one dummy byte */
+          {
+            part = "BMI088-accel";
+            ok   = true;
+          }
+        else
+          {
+            part = "2nd-accel?  ";
+            ok   = false;
+          }
+
+        syslog(LOG_INFO,
+               "[probe] %s SPI1 CS PC15  bytes=%02x %02x %02x  %s\n",
+               part, buf[0], buf[1], buf[2], PF(ok));
+        fail += !ok;
+      }
+
+      /* 2nd-IMU gyro (CS PC14), SPI mode 0, no dummy byte. BMI055 and BMI088
+       * gyros both report chip-id 0x0f.
+       */
 
       id = spi_read_id(spi, SPIDEV_ACCELEROMETER(FMUV6C_SPIDEV_BMI088_GYRO),
-                       BMI088_CHIPID_REG, SPIDEV_MODE0, false);
-      syslog(LOG_INFO, "[probe] BMI088-gyro  SPI1 CS PC14  CHIPID=0x%02x  %s\n",
-             id, PF(id == BMI088_GYR_CHIPID_VAL));
-      fail += (id != BMI088_GYR_CHIPID_VAL);
+                       BMI_GYR_CHIPID_REG, SPIDEV_MODE0, false);
+      syslog(LOG_INFO, "[probe] BMI0xx-gyro  SPI1 CS PC14  CHIPID=0x%02x  %s\n",
+             id, PF(id == BMI_GYR_CHIPID_VAL));
+      fail += (id != BMI_GYR_CHIPID_VAL);
     }
 
   /* ---- I2C4 internal sensor module ---- */
