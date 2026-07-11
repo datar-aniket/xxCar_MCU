@@ -1,11 +1,8 @@
 #
 # xxCar_MCU / FMUv6C barebone NuttX config (Stage 1)
-# NSH console on TELEM1 (UART7, PE7/PE8) @115200 8N1.
-#
-# USB is intentionally DISABLED here: enabling OTG-FS destabilised boot (an OTG
-# IRQ storm at init overflowed the idle stack -> hardfault, and with a dedicated
-# interrupt stack it instead spun forever before NSH started). USB bring-up is
-# tracked separately; TELEM1 is the reliable Stage 1 console.
+# Boots to an NSH shell on the TELEM1 serial port (UART7, PE7/PE8) @115200 8N1.
+# USB is disabled for now (bring-up diagnostic: a hardware UART console shows
+# boot/syslog output and does not depend on USB enumeration).
 #
 # Regenerate after menuconfig with:  make -C deps/nuttx savedefconfig
 # and copy nuttx/defconfig back here.
@@ -24,7 +21,6 @@ CONFIG_ARCH_CHIP="stm32h7"
 CONFIG_ARCH_CHIP_STM32H743VI=y
 CONFIG_ARCH_CHIP_STM32H7=y
 CONFIG_ARCH_CHIP_STM32H7_CORTEXM7=y
-CONFIG_ARCH_INTERRUPTSTACK=2048
 CONFIG_ARCH_STACKDUMP=y
 CONFIG_ARMV7M_DCACHE=y
 CONFIG_ARMV7M_DCACHE_WRITETHROUGH=y
@@ -34,10 +30,6 @@ CONFIG_BOARDCTL_RESET=y
 CONFIG_BOARD_LATE_INITIALIZE=y
 CONFIG_BOARD_LOOPSPERMSEC=43103
 CONFIG_BUILTIN=y
-CONFIG_DEBUG_ALERT=y
-CONFIG_DEBUG_ASSERTIONS=y
-CONFIG_DEBUG_FEATURES=y
-CONFIG_DEBUG_HARDFAULT_ALERT=y
 CONFIG_DEBUG_SYMBOLS=y
 CONFIG_DEV_CONSOLE=y
 CONFIG_EXPERIMENTAL=y
@@ -45,7 +37,6 @@ CONFIG_FS_PROCFS=y
 CONFIG_FS_PROCFS_REGISTER=y
 CONFIG_HAVE_CXX=y
 CONFIG_HAVE_CXXINITIALIZE=y
-CONFIG_IDLETHREAD_STACKSIZE=3072
 CONFIG_INIT_ENTRYPOINT="nsh_main"
 CONFIG_INTELHEX_BINARY=y
 CONFIG_LINE_MAX=64
