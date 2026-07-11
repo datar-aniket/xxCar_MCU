@@ -399,6 +399,14 @@
 #define DMAMAP_USART3_RX DMAMAP_DMA12_USART3RX_0
 #define DMAMAP_USART3_TX DMAMAP_DMA12_USART3TX_1
 
+/* UART7 = FMUv6C TELEM1 connector (PE7/PE8, AF7). Used as the NSH serial
+ * console during Stage 1 bring-up. No hardware flow control so a 3-wire
+ * (TX/RX/GND) USB-TTL adapter works. TELEM1 flow-control lines are PE9/PE10.
+ */
+
+#define GPIO_UART7_RX     (GPIO_UART7_RX_3 | GPIO_SPEED_100MHz) /* PE7 */
+#define GPIO_UART7_TX     (GPIO_UART7_TX_3 | GPIO_SPEED_100MHz) /* PE8 */
+
 /* USART6 (Arduino Serial Shield) */
 
 #define GPIO_USART6_RX    (GPIO_USART6_RX_2 | GPIO_SPEED_100MHz) /* PG9 */
