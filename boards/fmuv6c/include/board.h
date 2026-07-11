@@ -407,28 +407,35 @@
 #define GPIO_UART7_RX     (GPIO_UART7_RX_3 | GPIO_SPEED_100MHz) /* PE7 */
 #define GPIO_UART7_TX     (GPIO_UART7_TX_3 | GPIO_SPEED_100MHz) /* PE8 */
 
-/* USART6 (Arduino Serial Shield) */
+/* USART6 = FMUv6C link to the PX4IO co-processor (PC6/PC7, AF7). Not used yet. */
 
-#define GPIO_USART6_RX    (GPIO_USART6_RX_2 | GPIO_SPEED_100MHz) /* PG9 */
-#define GPIO_USART6_TX    (GPIO_USART6_TX_2 | GPIO_SPEED_100MHz) /* PG14 */
+#define GPIO_USART6_RX    (GPIO_USART6_RX_1 | GPIO_SPEED_100MHz) /* PC7 */
+#define GPIO_USART6_TX    (GPIO_USART6_TX_1 | GPIO_SPEED_100MHz) /* PC6 */
 
-/* I2C1 Use Nucleo I2C1 pins */
+/* I2C1 - external / expansion bus (PB8/PB7) */
 
-#define GPIO_I2C1_SCL     (GPIO_I2C1_SCL_2 | GPIO_SPEED_50MHz) /* PB8 - D15 */
-#define GPIO_I2C1_SDA     (GPIO_I2C1_SDA_2 | GPIO_SPEED_50MHz) /* PB9 - D14 */
+#define GPIO_I2C1_SCL     (GPIO_I2C1_SCL_2 | GPIO_SPEED_50MHz) /* PB8 */
+#define GPIO_I2C1_SDA     (GPIO_I2C1_SDA_1 | GPIO_SPEED_50MHz) /* PB7 */
 
-/* I2C2 Use Nucleo I2C2 pins */
+/* I2C2 - external I2C connector (PB10/PB11) */
 
-#define GPIO_I2C2_SCL     (GPIO_I2C2_SCL_2  | GPIO_SPEED_50MHz) /* PF1 - D69 */
-#define GPIO_I2C2_SDA     (GPIO_I2C2_SDA_2  | GPIO_SPEED_50MHz) /* PF0 - D68 */
-#define GPIO_I2C2_SMBA    (GPIO_I2C2_SMBA_2 | GPIO_SPEED_50MHz) /* PF2 - D70 */
+#define GPIO_I2C2_SCL     (GPIO_I2C2_SCL_1 | GPIO_SPEED_50MHz) /* PB10 */
+#define GPIO_I2C2_SDA     (GPIO_I2C2_SDA_1 | GPIO_SPEED_50MHz) /* PB11 */
 
-/* SPI3 */
+/* I2C4 - INTERNAL bus: onboard barometer (MS5611) + magnetometer (IST8310)
+ * + calibration EEPROM. This is where Task 1 sensor discovery scans.
+ */
 
-#define GPIO_SPI3_MISO    (GPIO_SPI3_MISO_1 | GPIO_SPEED_50MHz) /* PB4 */
-#define GPIO_SPI3_MOSI    (GPIO_SPI3_MOSI_4 | GPIO_SPEED_50MHz) /* PB5 */
-#define GPIO_SPI3_SCK     (GPIO_SPI3_SCK_1 | GPIO_SPEED_50MHz)  /* PB3 */
-#define GPIO_SPI3_NSS     (GPIO_SPI3_NSS_2 | GPIO_SPEED_50MHz)  /* PA4 */
+#define GPIO_I2C4_SCL     (GPIO_I2C4_SCL_1 | GPIO_SPEED_50MHz) /* PD12 */
+#define GPIO_I2C4_SDA     (GPIO_I2C4_SDA_1 | GPIO_SPEED_50MHz) /* PD13 */
+
+/* SPI1 - INTERNAL sensor bus: ICM-42688-P + BMI088 IMUs (PA5/PA6/PA7).
+ * Chip-select and DRDY GPIOs are in src/fmuv6c.h, driven by stm32_spi.c.
+ */
+
+#define GPIO_SPI1_SCK     (GPIO_SPI1_SCK_1  | GPIO_SPEED_50MHz) /* PA5 */
+#define GPIO_SPI1_MISO    (GPIO_SPI1_MISO_1 | GPIO_SPEED_50MHz) /* PA6 */
+#define GPIO_SPI1_MOSI    (GPIO_SPI1_MOSI_1 | GPIO_SPEED_50MHz) /* PA7 */
 
 /* TIM1 - Advanced Timer 16-bit (4 channels) */
 #define GPIO_TIM1_CH1IN   (GPIO_TIM1_CH1IN_2)   /* PE9  */

@@ -497,5 +497,17 @@ int stm32_bringup(void)
   stm32_iwdginitialize("/dev/watchdog0", STM32_LSI_FREQUENCY);
 #endif
 
+#ifdef CONFIG_STM32H7_SPI1
+  /* Configure the SPI1 (internal IMU bus) chip-select / DRDY GPIOs */
+
+  stm32_spidev_initialize();
+#endif
+
+#if defined(CONFIG_SPI) && defined(CONFIG_I2C)
+  /* Stage 2 - Task 1: synchronous sensor discovery (logs a PASS/FAIL table) */
+
+  fmuv6c_sensor_probe();
+#endif
+
   return OK;
 }

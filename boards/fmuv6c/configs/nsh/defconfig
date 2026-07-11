@@ -1,15 +1,14 @@
 #
-# xxCar_MCU / FMUv6C barebone NuttX config (Stage 1)
+# xxCar_MCU / FMUv6C config (Stage 2 - Task 1: buses + sensor discovery)
 #
 # Console : NSH shell on TELEM1 (UART7, PE7/PE8) @115200 8N1.
-# USB     : CDC-ACM auto-registered at boot as /dev/ttyACM0 (raw data port,
-#           NOT a shell) for the future ROS 2 / DDS / MAVLink link to the Jetson.
-#           Host sees VID 0x3162 / PID 0x0053 -> /dev/pixhawk_6c. Auto-connect is
-#           done in stm32_bringup.c (cdcacm_initialize) since CDCACM is not the
-#           console.
+# Logging : syslog -> BOTH the TELEM1 console (live) AND RAMLOG (/dev/ramlog),
+#           readable after boot with `cat /dev/ramlog` or `dmesg`.
+# Buses   : I2C4 (internal: MS5611+IST8310+EEPROM), I2C2 (external), SPI1 (IMUs).
+# USB     : CDC-ACM raw data port /dev/ttyACM0 (VID 0x3162/PID 0x0053).
+# Float/libc: full float + libc extension set enabled up front.
 #
 # Regenerate after menuconfig with:  make -C deps/nuttx savedefconfig
-# and copy nuttx/defconfig back here.
 #
 # CONFIG_ARCH_BOARD_COMMON is not set
 # CONFIG_NSH_DISABLE_IFCONFIG is not set
@@ -53,9 +52,17 @@ CONFIG_FS_PROCFS=y
 CONFIG_FS_PROCFS_REGISTER=y
 CONFIG_HAVE_CXX=y
 CONFIG_HAVE_CXXINITIALIZE=y
+CONFIG_I2C=y
+CONFIG_I2C_DRIVER=y
+CONFIG_I2CTOOL_MAXBUS=4
 CONFIG_IDLETHREAD_STACKSIZE=3072
 CONFIG_INIT_ENTRYPOINT="nsh_main"
 CONFIG_INTELHEX_BINARY=y
+CONFIG_LIBC_FLOATINGPOINT=y
+CONFIG_LIBC_LONG_LONG=y
+CONFIG_LIBC_NUMBERED_ARGS=y
+CONFIG_LIBC_SCANSET=y
+CONFIG_LIBM=y
 CONFIG_LINE_MAX=64
 CONFIG_MM_REGIONS=4
 CONFIG_NSH_ARCHINIT=y
@@ -64,17 +71,28 @@ CONFIG_NSH_CONSOLE=y
 CONFIG_NSH_FILEIOSIZE=512
 CONFIG_NSH_READLINE=y
 CONFIG_PREALLOC_TIMERS=4
+CONFIG_RAMLOG=y
+CONFIG_RAMLOG_BUFSIZE=8192
+CONFIG_RAMLOG_SYSLOG=y
 CONFIG_RAM_SIZE=245760
 CONFIG_RAM_START=0x20010000
 CONFIG_RAW_BINARY=y
 CONFIG_RR_INTERVAL=200
 CONFIG_SCHED_WAITPID=y
+CONFIG_SPI=y
 CONFIG_START_DAY=6
 CONFIG_START_MONTH=12
 CONFIG_START_YEAR=2011
 CONFIG_STM32H7_HSI48=y
+CONFIG_STM32H7_I2C2=y
+CONFIG_STM32H7_I2C4=y
 CONFIG_STM32H7_OTGFS=y
+CONFIG_STM32H7_SPI1=y
 CONFIG_STM32H7_UART7=y
+CONFIG_SYSLOG_CONSOLE=y
+CONFIG_SYSLOG_MAX_CHANNELS=2
+CONFIG_SYSTEM_DMESG=y
+CONFIG_SYSTEM_I2CTOOL=y
 CONFIG_SYSTEM_NSH=y
 CONFIG_TASK_NAME_SIZE=24
 CONFIG_UART7_BAUD=115200

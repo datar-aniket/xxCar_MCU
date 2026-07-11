@@ -222,6 +222,36 @@
 
 #define NUCLEOH743ZI_PWMTIMER 1
 
+/* SPI1 - internal IMU bus chip-selects (active-low) and DRDY inputs.
+ * Verified against PX4 fmu-v6c and live on the board.
+ *
+ *   ICM-42688-P  : CS PC13, DRDY PE6   (primary IMU)
+ *   BMI088 accel : CS PC15, DRDY PE4
+ *   BMI088 gyro  : CS PC14, DRDY PE5
+ */
+
+#define GPIO_SPI1_CS_ICM42688     (GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_SPEED_50MHz | \
+                                   GPIO_OUTPUT_SET | GPIO_PORTC | GPIO_PIN13)
+#define GPIO_SPI1_CS_BMI088_ACCEL (GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_SPEED_50MHz | \
+                                   GPIO_OUTPUT_SET | GPIO_PORTC | GPIO_PIN15)
+#define GPIO_SPI1_CS_BMI088_GYRO  (GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_SPEED_50MHz | \
+                                   GPIO_OUTPUT_SET | GPIO_PORTC | GPIO_PIN14)
+
+#define GPIO_DRDY_ICM42688        (GPIO_INPUT | GPIO_FLOAT | GPIO_PORTE | GPIO_PIN6)
+#define GPIO_DRDY_BMI088_ACCEL    (GPIO_INPUT | GPIO_FLOAT | GPIO_PORTE | GPIO_PIN4)
+#define GPIO_DRDY_BMI088_GYRO     (GPIO_INPUT | GPIO_FLOAT | GPIO_PORTE | GPIO_PIN5)
+
+/* SPIDEV_ACCELEROMETER(n) indices used by stm32_spi1select() */
+
+#define FMUV6C_SPIDEV_BMI088_ACCEL 0
+#define FMUV6C_SPIDEV_BMI088_GYRO  1
+#define FMUV6C_SPIDEV_ICM42688     0  /* SPIDEV_IMU(0) */
+
+/* I2C bus numbers */
+
+#define FMUV6C_I2C_INTERNAL 4   /* MS5611 baro + IST8310 mag + EEPROM */
+#define FMUV6C_I2C_EXTERNAL 2   /* external I2C connector */
+
 /****************************************************************************
  * Public Function Prototypes
  ****************************************************************************/
@@ -242,6 +272,16 @@
  ****************************************************************************/
 
 int stm32_bringup(void);
+
+/****************************************************************************
+ * Name: fmuv6c_sensor_probe
+ *
+ * Description:
+ *   Synchronously probe every onboard sensor (SPI1 IMUs + I2C4 baro/mag/EEPROM)
+ *   and log a PASS/FAIL table via syslog. No threads, no uorb, no float.
+ ****************************************************************************/
+
+int fmuv6c_sensor_probe(void);
 
 /****************************************************************************
  * Name: stm32_spidev_initialize
