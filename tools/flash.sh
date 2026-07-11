@@ -6,7 +6,7 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE="${1:-$REPO/build/xxcar.px4}"
-PORTS="/dev/pixhawk_6c,/dev/serial/by-id/*,/dev/ttyACM*"
+PORTS="/dev/pixhawk_6c,/dev/ttyACM*"
 
 [ -f "$IMAGE" ] || { echo "error: $IMAGE not found. run tools/build.sh first"; exit 1; }
 
