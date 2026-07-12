@@ -102,7 +102,7 @@ CONFIG_UORB=y
 CONFIG_UORB_LISTENER=y
 CONFIG_USBDEV=y
 CONFIG_USENSOR=y
-# CONFIG_DEBUG_UORB is not set
+# CONFIG_DEBUG_UORB=y is not set
 
 CONFIG_ENABLE_ALL_SIGNALS=y
 CONFIG_SIG_DEFAULT=y
@@ -113,8 +113,24 @@ CONFIG_SERIAL_TERMIOS=y
 CONFIG_TTY_SIGINT=y
 CONFIG_TTY_SIGINT_CHAR=0x03
 
+# System tick = 1 kHz (1000 us/tick). Raised from the NuttX default 100 Hz for
+# two reasons: (1) 1 ms usleep granularity for future higher-rate periodic tasks
+# (control loops, polled sensors); (2) it makes the SYSCLK CPU-load sampler 10x
+# finer, shrinking the tick-phase-locking artifact where periodic threads that
+# wake on a tick boundary get over-credited a whole tick of CPU. The H7 @480 MHz
+# handles a 1 kHz tick trivially (PX4 runs the same).
+CONFIG_USEC_PER_TICK=1000
+
+# CPU-load accounting via SYSCLK tick-sampling. TICKSPERSEC MUST equal the system
+# tick rate (1e6/USEC_PER_TICK = 1000 Hz): the sampler re-arms every
+# (TICK_PER_SEC/TICKSPERSEC) ticks, so any value > the tick rate floors that
+# period to 0 -> a 0-tick self-rearming watchdog that spins forever in the timer
+# ISR and HARD-HANGS the board. You cannot sample CPU load faster than the tick.
+# NOTE: even at 1 kHz this remains a sampling estimate, not exact per-thread
+# cycle accounting; treat single-thread % for tick-aligned periodic threads as
+# an upper bound (the DWT/CRITMONITOR alternative faulted at boot on this H7).
 CONFIG_SCHED_CPULOAD_SYSCLK=y
-CONFIG_SCHED_CPULOAD_TICKSPERSEC=100
+CONFIG_SCHED_CPULOAD_TICKSPERSEC=1000
 
 CONFIG_CDCACM=y
 CONFIG_SYSTEM_CDCACM=y
