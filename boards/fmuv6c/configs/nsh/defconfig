@@ -136,3 +136,16 @@ CONFIG_CDCACM=y
 CONFIG_SYSTEM_CDCACM=y
 CONFIG_SYSTEM_CDCACM_DEVMINOR=0
 CONFIG_SERIAL_REMOVABLE=y
+
+# SPI1 DMA for the IMU bus. Polled H7 SPI does a CSTART/CSUSP handshake PER BYTE
+# (real CPU on every byte of an IMU burst); DMA turns a burst into one hardware
+# transfer while the thread sleeps on a completion semaphore (~0% CPU). Required
+# for the ICM-42688-P FIFO+DRDY 2 kHz streaming (watermark reads are hundreds of
+# bytes). The driver bounces through a static AXI-SRAM buffer (.bss is at
+# 0x24000000, DMA-accessible) with cache clean/invalidate, so caller buffers may
+# live anywhere (incl. DTCM). SPI1_DMA selects STM32H7_SPI_DMA and needs a DMA
+# controller enabled; the 512 B bounce buffer covers a full FIFO watermark read.
+CONFIG_STM32H7_DMA1=y
+CONFIG_STM32H7_DMA2=y
+CONFIG_STM32H7_SPI1_DMA=y
+CONFIG_STM32H7_SPI1_DMA_BUFFER=512
