@@ -100,9 +100,15 @@ CONFIG_UART7_BAUD=115200
 CONFIG_UART7_SERIAL_CONSOLE=y
 CONFIG_UORB=y
 CONFIG_UORB_LISTENER=y
+# uorb_listener formats 5-6 %f fields per sample when CONFIG_DEBUG_UORB prints
+# values. NuttX float printf (double->string + buffers) is stack-hungry and the
+# default 2048 (DEFAULT_TASK_STACKSIZE) is marginal: it overflows intermittently
+# and reboots the board with NO assert output (the assert handler needs stack
+# too, so it dies as well). 4096 gives float printf room.
+CONFIG_UORB_STACKSIZE=4096
 CONFIG_USBDEV=y
 CONFIG_USENSOR=y
-# CONFIG_DEBUG_UORB=y is not set
+CONFIG_DEBUG_UORB=y
 
 CONFIG_ENABLE_ALL_SIGNALS=y
 CONFIG_SIG_DEFAULT=y
