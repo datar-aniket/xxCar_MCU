@@ -50,6 +50,9 @@ CMakeCache.txt
 cmake_install.cmake
 Makefile
 !/Makefile
+# Our out-of-tree board overlay's src Makefile carries the CSRCS build list
+# (sensor drivers, bring-up); it must be tracked or a clean clone won't build.
+!/boards/fmuv6c/src/Makefile
 install_manifest.txt
 compile_commands.json
 

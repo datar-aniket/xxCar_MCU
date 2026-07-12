@@ -20,10 +20,14 @@
 #include <syslog.h>
 
 #include <nuttx/i2c/i2c_master.h>
+#include <nuttx/spi/spi.h>
 
 #include "stm32_i2c.h"
+#include "stm32_spi.h"
 #include "fmuv6c.h"
 #include "ms5611.h"
+#include "ist8310.h"
+#include "icm42688.h"
 
 /****************************************************************************
  * Name: fmuv6c_sensors_initialize
@@ -62,6 +66,49 @@ int fmuv6c_sensors_initialize(void)
           {
             syslog(LOG_INFO,
                    "[sensors] MS5611 baro on uorb -> /dev/uorb/sensor_baro0\n");
+          }
+
+        /* IST8310 magnetometer on the same internal I2C bus @0x0c ->
+         * sensor_mag0. Reuse the already-initialized bus handle.
+         */
+
+        ret = ist8310_register(i2c, 0, IST8310_I2C_ADDR);
+        if (ret < 0)
+          {
+            syslog(LOG_ERR, "[sensors] ist8310_register failed: %d\n", ret);
+          }
+        else
+          {
+            syslog(LOG_INFO,
+                   "[sensors] IST8310 mag on uorb -> /dev/uorb/sensor_mag0\n");
+          }
+      }
+  }
+
+  /* ICM-42688-P primary IMU on SPI1 -> sensor_accel0 + sensor_gyro0.
+   * Polled bring-up driver (FIFO/DRDY 2 kHz streaming is a later stage).
+   */
+
+  {
+    FAR struct spi_dev_s *spi;
+
+    spi = stm32_spibus_initialize(1);
+    if (spi == NULL)
+      {
+        syslog(LOG_ERR, "[sensors] SPI1 init failed for ICM-42688\n");
+        ret = -ENODEV;
+      }
+    else
+      {
+        ret = icm42688_register(spi, 0);
+        if (ret < 0)
+          {
+            syslog(LOG_ERR, "[sensors] icm42688_register failed: %d\n", ret);
+          }
+        else
+          {
+            syslog(LOG_INFO, "[sensors] ICM-42688-P IMU on uorb -> "
+                             "sensor_accel0 + sensor_gyro0\n");
           }
       }
   }
