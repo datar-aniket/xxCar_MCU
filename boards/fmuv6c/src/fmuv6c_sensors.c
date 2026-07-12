@@ -23,10 +23,7 @@
 
 #include "stm32_i2c.h"
 #include "fmuv6c.h"
-
-#ifdef CONFIG_SENSORS_MS56XX
-#  include <nuttx/sensors/ms56xx.h>
-#endif
+#include "ms5611.h"
 
 /****************************************************************************
  * Name: fmuv6c_sensors_initialize
@@ -40,8 +37,9 @@ int fmuv6c_sensors_initialize(void)
 {
   int ret = OK;
 
-#ifdef CONFIG_SENSORS_MS56XX
-  /* MS5611 barometer on the internal I2C bus (I2C4) @0x77 -> sensor_baro0 */
+  /* MS5611 barometer on the internal I2C bus (I2C4) @0x77 -> sensor_baro0.
+   * Uses our lean driver (ms5611.c), not NuttX's high-CPU ms56xx_uorb.
+   */
 
   {
     FAR struct i2c_master_s *i2c;
@@ -55,10 +53,10 @@ int fmuv6c_sensors_initialize(void)
       }
     else
       {
-        ret = ms56xx_register(i2c, 0, MS56XX_ADDR0, MS56XX_MODEL_MS5611);
+        ret = ms5611_register(i2c, 0, MS5611_I2C_ADDR);
         if (ret < 0)
           {
-            syslog(LOG_ERR, "[sensors] ms56xx_register failed: %d\n", ret);
+            syslog(LOG_ERR, "[sensors] ms5611_register failed: %d\n", ret);
           }
         else
           {
@@ -67,7 +65,6 @@ int fmuv6c_sensors_initialize(void)
           }
       }
   }
-#endif /* CONFIG_SENSORS_MS56XX */
 
   return ret;
 }
