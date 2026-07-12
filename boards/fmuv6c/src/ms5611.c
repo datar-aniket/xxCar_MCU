@@ -46,11 +46,15 @@
 #define MS5611_CMD_ADC_READ   0x00
 #define MS5611_CMD_PROM_READ  0xa0   /* + (coef << 1); coef 0..7 */
 
-#define MS5611_CONV_WAIT_US   10000  /* >= 9.04 ms OSR4096 conv, 1 tick, no spin */
 #define MS5611_TEMP_DECIMATE  10     /* read temperature every Nth sample */
 #define MS5611_I2C_FREQ       400000
-#define MS5611_MIN_INTERVAL   10000  /* us -> 100 Hz cap (one conversion/tick) */
+#define MS5611_MIN_INTERVAL   20000  /* us -> 50 Hz cap; interval >= conv (~9ms) */
 #define MS5611_DEFAULT_INTERVAL 100000 /* us -> 10 Hz default */
+
+/* Which conversion is currently in flight (pipelined with the interval sleep) */
+
+#define MS5611_PENDING_D1     1       /* pressure    */
+#define MS5611_PENDING_D2     2       /* temperature */
 
 /****************************************************************************
  * Private Types
@@ -65,6 +69,7 @@ struct ms5611_dev_s
   int32_t                   dt;        /* cached dT (from last temp read) */
   int32_t                   temp;      /* cached TEMP in 0.01 C */
   uint32_t                  count;     /* sample counter for temp decimation */
+  uint8_t                   pending;   /* conversion in flight (D1/D2) */
   uint32_t                  interval;  /* us */
   mutex_t                   lock;
   sem_t                     run;
@@ -159,82 +164,95 @@ static int ms5611_configure(FAR struct ms5611_dev_s *dev)
   return OK;
 }
 
-/* Read temperature (D2), update cached dT + TEMP. Costs one conversion. */
+/* Start a conversion (non-blocking) and remember which one is in flight. */
 
-static void ms5611_update_temp(FAR struct ms5611_dev_s *dev)
+static void ms5611_start(FAR struct ms5611_dev_s *dev, uint8_t which)
 {
-  uint32_t d2 = 0;
-
-  if (ms5611_sendcmd(dev, MS5611_CMD_CONV_D2) < 0)
-    {
-      return;
-    }
-
-  nxsig_usleep(MS5611_CONV_WAIT_US);
-
-  if (ms5611_read_adc(dev, &d2) < 0)
-    {
-      return;
-    }
-
-  dev->dt   = (int32_t)d2 - ((int32_t)dev->c[5] << 8);
-  dev->temp = 2000 + (int32_t)(((int64_t)dev->dt * dev->c[6]) >> 23);
+  ms5611_sendcmd(dev, which == MS5611_PENDING_D2 ?
+                      MS5611_CMD_CONV_D2 : MS5611_CMD_CONV_D1);
+  dev->pending = which;
 }
 
-/* Read pressure (D1) and push a compensated sample using the cached dT/TEMP */
-
-static void ms5611_sample(FAR struct ms5611_dev_s *dev)
+static void ms5611_process(FAR struct ms5611_dev_s *dev, uint8_t was,
+                           uint32_t raw)
 {
-  struct sensor_baro baro;
-  uint32_t d1 = 0;
-  int64_t  off;
-  int64_t  sens;
-  int32_t  p;
-
-  /* Refresh temperature occasionally (slow-changing, feeds compensation) */
-
-  if ((dev->count++ % MS5611_TEMP_DECIMATE) == 0)
+  if (was == MS5611_PENDING_D2)
     {
-      ms5611_update_temp(dev);
-    }
+      /* Temperature: update the cached dT + TEMP (feeds compensation) */
 
-  if (ms5611_sendcmd(dev, MS5611_CMD_CONV_D1) < 0)
+      dev->dt   = (int32_t)raw - ((int32_t)dev->c[5] << 8);
+      dev->temp = 2000 + (int32_t)(((int64_t)dev->dt * dev->c[6]) >> 23);
+    }
+  else
     {
-      return;
+      /* Pressure: compensate with cached dT and push a sample */
+
+      struct sensor_baro baro;
+      int64_t off  = ((int64_t)dev->c[2] << 16) +
+                     (((int64_t)dev->c[4] * dev->dt) >> 7);
+      int64_t sens = ((int64_t)dev->c[1] << 15) +
+                     (((int64_t)dev->c[3] * dev->dt) >> 8);
+      int32_t p    = (int32_t)((((int64_t)raw * sens) >> 21) - off) >> 15;
+
+      baro.timestamp   = sensor_get_timestamp();
+      baro.pressure    = (float)p / 100.0f;          /* hPa / mbar */
+      baro.temperature = (float)dev->temp / 100.0f;  /* deg C */
+      dev->lower.push_event(dev->lower.priv, &baro, sizeof(baro));
     }
-
-  nxsig_usleep(MS5611_CONV_WAIT_US);
-
-  if (ms5611_read_adc(dev, &d1) < 0)
-    {
-      return;
-    }
-
-  off  = ((int64_t)dev->c[2] << 16) + (((int64_t)dev->c[4] * dev->dt) >> 7);
-  sens = ((int64_t)dev->c[1] << 15) + (((int64_t)dev->c[3] * dev->dt) >> 8);
-  p    = (int32_t)((((int64_t)d1 * sens) >> 21) - off) >> 15;   /* 0.01 mbar */
-
-  baro.timestamp   = sensor_get_timestamp();
-  baro.pressure    = (float)p / 100.0f;          /* hPa / mbar */
-  baro.temperature = (float)dev->temp / 100.0f;  /* deg C */
-  dev->lower.push_event(dev->lower.priv, &baro, sizeof(baro));
 }
+
+/* Pipelined sampler: the ADC conversion (~9 ms) runs while the thread SLEEPS
+ * for the sample interval, so there is exactly one sleep per sample and no
+ * busy/extra conversion wait -> the thread is essentially always sleeping.
+ */
 
 static int ms5611_thread(int argc, FAR char **argv)
 {
   FAR struct ms5611_dev_s *dev =
       (FAR struct ms5611_dev_s *)((uintptr_t)strtoul(argv[1], NULL, 16));
+  uint32_t raw;
+  uint8_t  was;
+
+  /* Prime with a temperature conversion so dT is valid for the 1st pressure */
+
+  ms5611_start(dev, MS5611_PENDING_D2);
 
   while (true)
     {
       if (!dev->enabled)
         {
           nxsem_wait(&dev->run);
+          ms5611_start(dev, MS5611_PENDING_D2);   /* re-prime on re-activate */
           continue;
         }
 
-      ms5611_sample(dev);
+      /* The pending conversion completes during this sleep */
+
       nxsig_usleep(dev->interval);
+
+      raw = 0;
+      if (ms5611_read_adc(dev, &raw) < 0)
+        {
+          continue;
+        }
+
+      was = dev->pending;
+
+      /* Start the next conversion immediately (overlaps the next interval):
+       * temperature every Nth sample, pressure otherwise.
+       */
+
+      if (++dev->count >= MS5611_TEMP_DECIMATE)
+        {
+          dev->count = 0;
+          ms5611_start(dev, MS5611_PENDING_D2);
+        }
+      else
+        {
+          ms5611_start(dev, MS5611_PENDING_D1);
+        }
+
+      ms5611_process(dev, was, raw);
     }
 
   return 0;
