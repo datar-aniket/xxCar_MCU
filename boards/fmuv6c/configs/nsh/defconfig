@@ -155,3 +155,28 @@ CONFIG_STM32H7_DMA1=y
 CONFIG_STM32H7_DMA2=y
 CONFIG_STM32H7_SPI1_DMA=y
 CONFIG_STM32H7_SPI1_DMA_BUFFER=512
+
+# Crash/hang recovery. Two independent layers, because they catch different
+# failures:
+#
+# 1. BOARD_RESET_ON_ASSERT=1 -> reset only on a KERNEL panic: an assert from an
+#    interrupt handler or a kernel thread calls board_reset(). A crash in a
+#    plain user thread does NOT reboot the board - NuttX just kills that thread
+#    and the system keeps running (=2 would reset for user threads too, which
+#    is too aggressive: one bad app shouldn't take the vehicle down).
+#
+# 2. IWDG hardware watchdog -> catches HANGS, where nothing asserts and the
+#    system just stops making progress (e.g. a spin inside the timer ISR). The
+#    IWDG is independent of the main clock and can only be stopped by a reset.
+#    It is auto-fed BY_WORKER (a low-priority work-queue task) rather than from
+#    a timer ISR on purpose: that proves the SCHEDULER is still alive, so a task
+#    spinning and starving the system still trips the watchdog. A 2 s timeout
+#    (fed every 1 s) is far longer than any legitimate stall at our ~8% load.
+#    NOTE: the IWDG runs off the ~32 kHz LSI with a 12-bit reload, so its max
+#    timeout is ~32 s - the 60 s Kconfig default would be unreachable.
+CONFIG_BOARD_RESET_ON_ASSERT=1
+CONFIG_SCHED_LPWORK=y
+CONFIG_STM32H7_IWDG=y
+CONFIG_WATCHDOG_AUTOMONITOR=y
+CONFIG_WATCHDOG_AUTOMONITOR_BY_WORKER=y
+CONFIG_WATCHDOG_AUTOMONITOR_TIMEOUT=2000

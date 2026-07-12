@@ -28,6 +28,7 @@
 #include "ms5611.h"
 #include "ist8310.h"
 #include "icm42688.h"
+#include "bmi055.h"
 
 /****************************************************************************
  * Name: fmuv6c_sensors_initialize
@@ -109,6 +110,21 @@ int fmuv6c_sensors_initialize(void)
           {
             syslog(LOG_INFO, "[sensors] ICM-42688-P IMU on uorb -> "
                              "sensor_accel0 + sensor_gyro0\n");
+          }
+
+        /* BMI055 secondary IMU on the same SPI1 bus (accel CS PC15, gyro
+         * CS PC14) -> sensor_accel1 + sensor_gyro1. Also 2 kHz FIFO+INT.
+         */
+
+        ret = bmi055_register(spi, 1);
+        if (ret < 0)
+          {
+            syslog(LOG_ERR, "[sensors] bmi055_register failed: %d\n", ret);
+          }
+        else
+          {
+            syslog(LOG_INFO, "[sensors] BMI055 2nd IMU on uorb -> "
+                             "sensor_accel1 + sensor_gyro1\n");
           }
       }
   }

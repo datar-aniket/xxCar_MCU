@@ -53,6 +53,7 @@ CSRCS += ms5611.c
 CSRCS += ist8310.c
 ifeq ($(CONFIG_SPI),y)
 CSRCS += icm42688.c
+CSRCS += bmi055.c
 endif
 endif
 
