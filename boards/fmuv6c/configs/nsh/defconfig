@@ -180,3 +180,26 @@ CONFIG_STM32H7_IWDG=y
 CONFIG_WATCHDOG_AUTOMONITOR=y
 CONFIG_WATCHDOG_AUTOMONITOR_BY_WORKER=y
 CONFIG_WATCHDOG_AUTOMONITOR_TIMEOUT=2000
+
+# microSD on SDMMC2 (4-bit SDIO, internal DMA) -> /dev/mmcsd0, mounted FAT at
+# /fs/microsd at boot. This is the store for logs, params and config, and the
+# volume exported over USB mass storage. No card-detect line on the FMUv6C, so
+# MMCSD_HAVE_CARDDETECT stays off and the board reports the card present.
+# The SDMMC driver's media-change callback support requires the HIGH-priority
+# work queue specifically (LPWORK alone is not enough).
+CONFIG_SCHED_HPWORK=y
+CONFIG_STM32H7_SDMMC2=y
+CONFIG_STM32H7_SDMMC_IDMA=y
+CONFIG_MMCSD=y
+CONFIG_MMCSD_SDIO=y
+CONFIG_MMCSD_SDIOWAIT_WRCOMPLETE=y
+# This board has an SDIO microSD only: no card-detect, no write-protect, no
+# SPI-attached card and no eMMC. Leaving these Kconfig defaults on would pull in
+# the SPI MMC path (which wants a stm32_mmcsd_initialize() we don't have).
+# CONFIG_MMCSD_SPI is not set
+# CONFIG_MMCSD_HAVE_CARDDETECT is not set
+# CONFIG_MMCSD_HAVE_WRITEPROTECT is not set
+# CONFIG_MMCSD_MMCSUPPORT is not set
+CONFIG_FS_FAT=y
+CONFIG_FAT_LFN=y
+CONFIG_FS_FATTIME=y

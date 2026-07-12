@@ -461,6 +461,34 @@ int stm32_bringup(void)
     }
 #endif
 
+#ifdef CONFIG_MMCSD_SDIO
+  /* microSD on SDMMC2 -> /dev/mmcsd0, mounted as FAT at /fs/microsd. This is
+   * the store for logs, parameters and config. A missing/unformatted card is
+   * non-fatal: the board still boots, just without persistent storage.
+   */
+
+  ret = stm32_sdio_initialize();
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: microSD (SDMMC2) init failed: %d\n", ret);
+    }
+  else
+    {
+      ret = nx_mount("/dev/mmcsd0", FMUV6C_MICROSD_MOUNTPOINT, "vfat", 0,
+                     NULL);
+      if (ret < 0)
+        {
+          syslog(LOG_ERR, "ERROR: Failed to mount %s: %d (card present?)\n",
+                 FMUV6C_MICROSD_MOUNTPOINT, ret);
+        }
+      else
+        {
+          syslog(LOG_INFO, "[fs] microSD mounted at %s\n",
+                 FMUV6C_MICROSD_MOUNTPOINT);
+        }
+    }
+#endif
+
 #ifdef CONFIG_PWM
   /* Initialize PWM and register the PWM device. */
 

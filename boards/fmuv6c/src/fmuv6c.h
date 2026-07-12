@@ -252,6 +252,13 @@
 #define FMUV6C_I2C_INTERNAL 4   /* MS5611 baro + IST8310 mag + EEPROM */
 #define FMUV6C_I2C_EXTERNAL 2   /* external I2C connector */
 
+/* microSD (SDMMC2). Single source of truth for the mountpoint: logs, params,
+ * config and the USB mass-storage export all refer to this.
+ */
+
+#define FMUV6C_MICROSD_BLOCKDEV   "/dev/mmcsd0"
+#define FMUV6C_MICROSD_MOUNTPOINT "/fs/microsd"
+
 /****************************************************************************
  * Public Function Prototypes
  ****************************************************************************/
@@ -452,6 +459,20 @@ int stm32_progmem_init(void);
 
 #ifdef CONFIG_MMCSD_SPI
 int stm32_mmcsd_initialize(int minor);
+#endif
+
+/****************************************************************************
+ * Name: stm32_sdio_initialize
+ *
+ * Description:
+ *   Initialize the microSD slot on SDMMC2 and bind it to the MMC/SD block
+ *   driver (-> /dev/mmcsd0). The FMUv6C has no card-detect line, so the card
+ *   is reported present unconditionally.
+ *
+ ****************************************************************************/
+
+#ifdef CONFIG_MMCSD_SDIO
+int stm32_sdio_initialize(void);
 #endif
 
 #endif /* __BOARDS_ARM_STM32H7_NUCLEO_H743ZI_SRC_NUCLEO_H743ZI_H */

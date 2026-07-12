@@ -282,18 +282,41 @@
 
 /* SDMMC definitions ********************************************************/
 
-/* Init 400kHz, PLL1Q/(2*250) */
-
-#define STM32_SDMMC_INIT_CLKDIV     (250 << STM32_SDMMC_CLKCR_CLKDIV_SHIFT)
-
-/* Just set these to 25 MHz for now,
- * PLL1Q/(2*4), for default speed 12.5MB/s
+/* Clock dividers use PX4's values for this exact board (fmu-v6c): init well
+ * under 400 kHz, transfers at PLL1Q/(2*5). These are more conservative than the
+ * generic template values and are hardware-proven on the 6C.
  */
 
-#define STM32_SDMMC_MMCXFR_CLKDIV   (4 << STM32_SDMMC_CLKCR_CLKDIV_SHIFT)
-#define STM32_SDMMC_SDXFR_CLKDIV    (4 << STM32_SDMMC_CLKCR_CLKDIV_SHIFT)
+#define STM32_SDMMC_INIT_CLKDIV     (300 << STM32_SDMMC_CLKCR_CLKDIV_SHIFT)
+
+#if defined(CONFIG_STM32H7_SDMMC_IDMA)
+#  define STM32_SDMMC_MMCXFR_CLKDIV (5 << STM32_SDMMC_CLKCR_CLKDIV_SHIFT)
+#  define STM32_SDMMC_SDXFR_CLKDIV  (5 << STM32_SDMMC_CLKCR_CLKDIV_SHIFT)
+#else
+#  define STM32_SDMMC_MMCXFR_CLKDIV (100 << STM32_SDMMC_CLKCR_CLKDIV_SHIFT)
+#  define STM32_SDMMC_SDXFR_CLKDIV  (100 << STM32_SDMMC_CLKCR_CLKDIV_SHIFT)
+#endif
 
 #define STM32_SDMMC_CLKCR_EDGE      STM32_SDMMC_CLKCR_NEGEDGE
+
+/* SDMMC2 = the microSD slot. There is no card-detect line on the FMUv6C, so
+ * the board logic reports the card as always present.
+ *
+ *   SDMMC2_CK   PD6     SDMMC2_D0   PB14
+ *   SDMMC2_CMD  PD7     SDMMC2_D1   PB15
+ *                       SDMMC2_D2   PB3
+ *                       SDMMC2_D3   PB4
+ *
+ * With the non-legacy pinmap every SDMMC pin must be selected explicitly here,
+ * even the ones that have only a single option.
+ */
+
+#define GPIO_SDMMC2_CK    GPIO_SDMMC2_CK_1   /* PD6  */
+#define GPIO_SDMMC2_CMD   GPIO_SDMMC2_CMD_1  /* PD7  */
+#define GPIO_SDMMC2_D0    GPIO_SDMMC2_D0_0   /* PB14 */
+#define GPIO_SDMMC2_D1    GPIO_SDMMC2_D1_0   /* PB15 */
+#define GPIO_SDMMC2_D2    GPIO_SDMMC2_D2_2   /* PB3  */
+#define GPIO_SDMMC2_D3    GPIO_SDMMC2_D3_0   /* PB4  */
 
 /* Ethernet definitions *****************************************************/
 
