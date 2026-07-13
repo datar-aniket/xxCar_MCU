@@ -7,16 +7,19 @@
  *
  * Transport note
  * --------------
- * PX4 drives this link with raw USART registers, DMA, and the IDLE-line
- * interrupt, because it pushes actuator updates at 400 Hz and cares about
- * microseconds of jitter. We do not: RC arrives at 50 Hz and a ground robot's
- * steering servo is happy at the same rate. So this uses the ordinary NuttX
- * serial driver, which is far less code and much easier to reason about.
+ * PX4 drives this link by hand: raw USART registers, its own DMA setup, and the
+ * IDLE-line interrupt to find the end of a reply. We get the same three things
+ * from the ordinary NuttX serial driver instead, with none of the code -
+ * CONFIG_USART6_RXDMA turns on exactly that machinery inside stm32_serial.c
+ * (circular RX DMA, drained on the IDLE-line interrupt), and the H7's 8-deep
+ * hardware RX FIFO is always on. So a ~52-byte reply arriving as one 350us burst
+ * costs about one interrupt, not fifty, and a 400 Hz servo loop stays cheap.
  *
- * That works because a reply is self-describing. We read the 4-byte header
- * first, and its count field tells us exactly how many register bytes follow -
- * so the packet boundary is never in doubt, and the IDLE-line trick is
- * unnecessary.
+ * We can also be simpler than PX4 in one place: a reply is self-describing. The
+ * 4-byte header's count field says exactly how many register bytes follow, so we
+ * read the header, then the payload, and the packet boundary is never in doubt.
+ * PX4 needs the IDLE edge to delimit packets; we only need it to keep the
+ * interrupt rate down.
  *
  * Concurrency note
  * ----------------
@@ -183,11 +186,42 @@ static int px4io_read_exact(int fd, FAR uint8_t *buf, size_t len)
   return OK;
 }
 
+/* Throw away anything sitting in the RX path.
+ *
+ * tcflush(TCIFLUSH) alone is not enough once RX DMA is on: it only resets the
+ * upper-half ring (dev->recv.tail = dev->recv.head, see drivers/serial/
+ * serial.c). Bytes that the DMA controller has already written to its own
+ * buffer but that have not yet been handed up - they are handed up on the
+ * IDLE-line interrupt - survive it, and would then be consumed as the *next*
+ * reply. So drain the readable side as well.
+ */
+
+static void px4io_drain(int fd)
+{
+  struct pollfd pfd;
+  uint8_t junk[64];
+
+  tcflush(fd, TCIFLUSH);
+
+  pfd.fd     = fd;
+  pfd.events = POLLIN;
+
+  while (poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLIN) != 0)
+    {
+      if (read(fd, junk, sizeof(junk)) <= 0)
+        {
+          break;
+        }
+    }
+}
+
 /* One request/reply round trip. Caller holds g_lock. */
 
 static int px4io_exchange(int fd, FAR struct px4io_packet_s *pkt)
 {
   size_t txlen = PKT_SIZE(*pkt);
+  uint8_t page = pkt->page;
+  uint8_t offset = pkt->offset;
   unsigned count;
   uint8_t crc;
   int ret;
@@ -197,12 +231,11 @@ static int px4io_exchange(int fd, FAR struct px4io_packet_s *pkt)
   pkt->crc = 0;
   pkt->crc = px4io_crc8((FAR const uint8_t *)pkt, txlen);
 
-  /* Drop anything stale in the RX buffer. After a timeout a late reply may be
-   * sitting there, and consuming it as the *next* reply would desynchronise
-   * every exchange after it.
+  /* After a timeout a late reply may still be in flight or buffered, and
+   * consuming it as the next reply would desynchronise every exchange after it.
    */
 
-  tcflush(fd, TCIFLUSH);
+  px4io_drain(fd);
 
   if (write(fd, pkt, txlen) != (ssize_t)txlen)
     {
@@ -236,6 +269,22 @@ static int px4io_exchange(int fd, FAR struct px4io_packet_s *pkt)
   pkt->crc = 0;
 
   if (crc != px4io_crc8((FAR const uint8_t *)pkt, PKT_SIZE(*pkt)))
+    {
+      return -EIO;
+    }
+
+  /* Is this a reply to the request we just sent, or a leftover?
+   *
+   * IO builds its reply by overwriting count_code and regs in the packet it
+   * received, in place (px4iofirmware/serial.cpp) - so page and offset come
+   * back exactly as we sent them. That makes the reply self-identifying, and it
+   * is worth checking: a stale reply from an earlier, timed-out request carries
+   * a perfectly valid CRC, so the CRC alone cannot tell the two apart. No amount
+   * of flushing can either, because such a reply may still be in flight at the
+   * moment we flush. Matching page/offset is what actually resynchronises us.
+   */
+
+  if (pkt->page != page || pkt->offset != offset)
     {
       return -EIO;
     }
@@ -660,7 +709,17 @@ int px4io_arm(FAR struct px4io_s *io, bool armed)
 
 int px4io_set_pwm_rate(FAR struct px4io_s *io, uint16_t rate_hz)
 {
+  uint16_t readback;
   int ret;
+
+  /* IO clamps this to [25, 400] Hz *silently* (registers.c), so a typo would
+   * otherwise be accepted and quietly do something else. Reject it here instead.
+   */
+
+  if (rate_hz < PX4IO_PWM_RATE_MIN || rate_hz > PX4IO_PWM_RATE_MAX)
+    {
+      return -ERANGE;
+    }
 
   /* PWM_RATES is a per-channel bitmask choosing between the "default" and the
    * "alt" rate. Clearing it puts all 8 channels on the default rate, and then
@@ -673,8 +732,25 @@ int px4io_set_pwm_rate(FAR struct px4io_s *io, uint16_t rate_hz)
       return ret;
     }
 
-  return px4io_reg_set(io, PX4IO_PAGE_SETUP, PX4IO_P_SETUP_PWM_DEFAULTRATE,
-                       rate_hz);
+  ret = px4io_reg_set(io, PX4IO_PAGE_SETUP, PX4IO_P_SETUP_PWM_DEFAULTRATE,
+                      rate_hz);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  /* Read it back. The rate the timers are actually running at is the one that
+   * matters, and IO is the only one who knows it.
+   */
+
+  ret = px4io_reg_get(io, PX4IO_PAGE_SETUP, PX4IO_P_SETUP_PWM_DEFAULTRATE,
+                      &readback);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  return (readback == rate_hz) ? OK : -EIO;
 }
 
 int px4io_set_failsafe_pwm(FAR struct px4io_s *io, FAR const uint16_t *values,
@@ -739,6 +815,9 @@ static int px4io_daemon(int argc, FAR char *argv[])
 {
   struct px4io_s io;
   useconds_t period_us;
+  int period_ms;
+  int rc_divisor;
+  int cycle = 0;
   int rcfd;
   int ret;
 
@@ -765,8 +844,45 @@ static int px4io_daemon(int argc, FAR char *argv[])
       syslog(LOG_ERR, "px4io: cannot advertise rc_in: %d\n", rcfd);
     }
 
-  period_us = (useconds_t)(1000000 / g_rate_hz);
+  /* Snap the period to whole system ticks, and publish the rate we can actually
+   * hold rather than the one that was asked for.
+   *
+   * The tick is 1 kHz (CONFIG_USEC_PER_TICK=1000), so usleep() can only express
+   * whole milliseconds. Naively sleeping 1000000/rate microseconds goes wrong in
+   * a way that is easy to miss: for 333 Hz that is 3003us, which rounds UP to 4
+   * ticks and quietly runs the loop at 250 Hz. 400 Hz (2.5 ms) is not expressible
+   * at all. So round to the nearest tick and tell the truth about the result.
+   *
+   * This limits how often we hand IO a NEW setpoint. It does NOT limit the PWM
+   * frame rate the servo sees - IO keeps pulsing the rails at
+   * P_SETUP_PWM_DEFAULTRATE (up to 400 Hz) from the last value it was given,
+   * whatever we do here.
+   */
+
+  period_ms = (1000 + g_rate_hz / 2) / g_rate_hz;
+  if (period_ms < 1)
+    {
+      period_ms = 1;
+    }
+
+  g_rate_hz = 1000 / period_ms;
+  period_us = (useconds_t)(period_ms * 1000);
   g_running = true;
+
+  /* Actuators are refreshed every cycle, but RC is not.
+   *
+   * A receiver emits frames at 50-150 Hz; asking IO for RC at 400 Hz would just
+   * re-read the same frame several times over, and an RC read is by far the
+   * bigger of the two transfers (a ~52-byte reply against 4 bytes for a PWM
+   * write). So RC is polled at roughly PX4IO_RC_POLL_HZ regardless of how fast
+   * the servo loop runs, which keeps a 400 Hz output rate cheap on the wire.
+   */
+
+  rc_divisor = g_rate_hz / PX4IO_RC_POLL_HZ;
+  if (rc_divisor < 1)
+    {
+      rc_divisor = 1;
+    }
 
   while (!g_should_stop)
     {
@@ -774,39 +890,9 @@ static int px4io_daemon(int argc, FAR char *argv[])
       uint16_t pwm[PX4IO_SERVO_COUNT];
       bool have_pwm;
 
-      if (px4io_get_rc(&io, &rc) == OK)
-        {
-          pthread_mutex_lock(&g_lock);
-          g_rc = rc;
-          g_rc_valid = true;
-          pthread_mutex_unlock(&g_lock);
-
-          if (rcfd >= 0)
-            {
-              struct rc_in_s msg;
-              unsigned i;
-
-              memset(&msg, 0, sizeof(msg));
-              msg.timestamp   = px4io_now_us();
-              msg.count       = rc.count;
-              msg.rssi        = rc.rssi;
-              msg.ok          = rc.ok;
-              msg.failsafe    = rc.failsafe;
-              msg.frames      = rc.frames;
-              msg.lost_frames = rc.lost_frames;
-              msg.source      = RC_IN_SRC_PX4IO;
-
-              for (i = 0; i < RC_IN_MAX_CHANNELS; i++)
-                {
-                  msg.channel[i] = rc.channel[i];
-                }
-
-              rc_in_publish(rcfd, &msg);
-            }
-        }
-
-      /* Re-send the setpoint. Writing DIRECT_PWM also raises IO's RAW_PWM
-       * status flag, which is the other half of what keeps the outputs armed.
+      /* Re-send the setpoint first: it is what the servos are waiting on, and
+       * writing DIRECT_PWM also raises IO's RAW_PWM status flag, which is the
+       * other half of what keeps the outputs armed.
        */
 
       pthread_mutex_lock(&g_lock);
@@ -818,6 +904,42 @@ static int px4io_daemon(int argc, FAR char *argv[])
         {
           px4io_reg_write(&io, PX4IO_PAGE_DIRECT_PWM, 0,
                           pwm, PX4IO_SERVO_COUNT);
+        }
+
+      if (++cycle >= rc_divisor)
+        {
+          cycle = 0;
+
+          if (px4io_get_rc(&io, &rc) == OK)
+            {
+              pthread_mutex_lock(&g_lock);
+              g_rc = rc;
+              g_rc_valid = true;
+              pthread_mutex_unlock(&g_lock);
+
+              if (rcfd >= 0)
+                {
+                  struct rc_in_s msg;
+                  unsigned i;
+
+                  memset(&msg, 0, sizeof(msg));
+                  msg.timestamp   = px4io_now_us();
+                  msg.count       = rc.count;
+                  msg.rssi        = rc.rssi;
+                  msg.ok          = rc.ok;
+                  msg.failsafe    = rc.failsafe;
+                  msg.frames      = rc.frames;
+                  msg.lost_frames = rc.lost_frames;
+                  msg.source      = RC_IN_SRC_PX4IO;
+
+                  for (i = 0; i < RC_IN_MAX_CHANNELS; i++)
+                    {
+                      msg.channel[i] = rc.channel[i];
+                    }
+
+                  rc_in_publish(rcfd, &msg);
+                }
+            }
         }
 
       usleep(period_us);
@@ -838,9 +960,13 @@ int px4io_start(int rate_hz)
       return OK;
     }
 
-  /* Must stay comfortably above IO's 500ms failsafe timeout. */
+  /* Must stay comfortably above IO's 500ms failsafe timeout at the bottom, and
+   * within the 1 kHz tick at the top. The daemon snaps the period to whole ticks
+   * and republishes the rate it can actually hold, so a request in between is
+   * always honoured, just possibly rounded.
+   */
 
-  if (rate_hz < 5 || rate_hz > 400)
+  if (rate_hz < 5 || rate_hz > 1000)
     {
       return -EINVAL;
     }
@@ -887,4 +1013,9 @@ void px4io_stop(void)
 bool px4io_is_running(void)
 {
   return g_running;
+}
+
+int px4io_daemon_rate(void)
+{
+  return g_running ? g_rate_hz : 0;
 }

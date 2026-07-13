@@ -158,6 +158,36 @@ CONFIG_USART6_BAUD=1500000
 CONFIG_USART6_RXBUFSIZE=256
 CONFIG_USART6_TXBUFSIZE=256
 
+# RX DMA on the IO link, so a 400 Hz servo update rate stays cheap.
+#
+# At 1.5 Mbaud a byte arrives every 6.7us. Interrupt-driven, IO's ~52-byte reply
+# costs an IRQ every time the 8-deep hardware FIFO crosses its threshold; at
+# 400 Hz that is thousands of interrupts per second just to service one link.
+# With RX DMA the controller writes the whole burst to memory unaided and the
+# USART's IDLE-line interrupt hands it over in ONE go once the line falls quiet
+# (stm32_serial.c only enables USART_CR1_IDLEIE when RX DMA is compiled in) --
+# roughly two interrupts per exchange instead of a dozen. It is the same
+# mechanism PX4 uses on this link.
+#
+# The RXDMA symbols do not exist in upstream NuttX 12.13.0: the H7 serial driver
+# implements RX/TX DMA in full but its Kconfig never declared the options, so the
+# code was unreachable. patches/nuttx/0002 restores them (stm32f7 has them).
+#
+# TX DMA is deliberately left off: our request is only 4-20 bytes, which the
+# hardware FIFO already absorbs in one go, so DMA would burn a second DMA1
+# stream for no measurable gain. The burst is entirely in the RX direction.
+CONFIG_USART6_RXDMA=y
+
+# One whole IOPacket (68 bytes) must fit, with room to spare, so a reply is never
+# split across a buffer wrap. Rounded up to a multiple of the 32-byte cache line.
+CONFIG_STM32H7_SERIAL_RXDMA_BUFFER_SIZE=128
+
+# The 8-deep RX FIFO is always enabled by the H7 driver; this only sets when it
+# raises an interrupt. 1/4 full (2 bytes) keeps latency low for the 4-byte packet
+# header, and with RX DMA doing the bulk transfer the threshold is not the thing
+# carrying the data anyway.
+CONFIG_USART6_RXFIFO_THRES=1
+
 # System tick = 1 kHz (1000 us/tick). Raised from the NuttX default 100 Hz for
 # two reasons: (1) 1 ms usleep granularity for future higher-rate periodic tasks
 # (control loops, polled sensors); (2) it makes the SYSCLK CPU-load sampler 10x

@@ -198,6 +198,7 @@ int main(int argc, FAR char *argv[])
   if (strcmp(argv[1], "start") == 0)
     {
       int rate = (argc > 2) ? atoi(argv[2]) : 50;
+      int actual;
 
       ret = px4io_start(rate);
       if (ret < 0)
@@ -208,7 +209,26 @@ int main(int argc, FAR char *argv[])
           return 1;
         }
 
-      printf("px4io: daemon polling at %d Hz; RC on uORB as 'rc_in'\n", rate);
+      actual = px4io_daemon_rate();
+
+      printf("px4io: daemon refreshing setpoints at %d Hz; "
+             "RC on uORB as 'rc_in'\n", actual);
+
+      /* The 1 kHz system tick can only express whole-millisecond periods, so
+       * some rates simply do not exist. Say so rather than let the number the
+       * user typed and the rate the loop actually runs at drift apart in
+       * silence.
+       */
+
+      if (actual != rate)
+        {
+          printf("note: %d Hz is not a whole number of 1 ms ticks, so the loop\n"
+                 "      runs at %d Hz. This is the SETPOINT refresh rate only -\n"
+                 "      the servo is still pulsed at the PWM frame rate set by\n"
+                 "      'px4io rate' (up to %d Hz), which IO clocks itself.\n",
+                 rate, actual, PX4IO_PWM_RATE_MAX);
+        }
+
       return 0;
     }
 
@@ -267,14 +287,30 @@ int main(int argc, FAR char *argv[])
     }
   else if (strcmp(argv[1], "rate") == 0 && argc == 3)
     {
-      ret = px4io_set_pwm_rate(&io, (uint16_t)atoi(argv[2]));
-      if (ret < 0)
+      int hz = atoi(argv[2]);
+
+      ret = px4io_set_pwm_rate(&io, (uint16_t)hz);
+      if (ret == -ERANGE)
+        {
+          fprintf(stderr, "px4io: %d Hz is out of range (%d-%d)\n",
+                  hz, PX4IO_PWM_RATE_MIN, PX4IO_PWM_RATE_MAX);
+        }
+      else if (ret < 0)
         {
           fprintf(stderr, "px4io: rate failed: %d\n", ret);
         }
       else
         {
-          printf("px4io: PWM rate %s Hz\n", argv[2]);
+          printf("px4io: PWM rate %d Hz (read back from IO)\n", hz);
+
+          if (hz > 50 && px4io_is_running() && px4io_daemon_rate() < hz)
+            {
+              printf("note: the daemon refreshes setpoints at %d Hz, so the\n"
+                     "      outputs update slower than they pulse. "
+                     "'px4io start %d' to match.\n",
+                     px4io_daemon_rate(), hz);
+            }
+
           status = 0;
         }
     }

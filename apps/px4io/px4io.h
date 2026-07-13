@@ -189,6 +189,13 @@ int  px4io_start(int rate_hz);
 void px4io_stop(void);
 bool px4io_is_running(void);
 
+/* The rate the daemon is refreshing setpoints at, Hz (0 if stopped). This is
+ * NOT the PWM frame rate: IO pulses the servos at P_SETUP_PWM_DEFAULTRATE
+ * whatever we do, and this is how often we give it a fresh value to pulse.
+ */
+
+int  px4io_daemon_rate(void);
+
 /* Ask the daemon to hold this PWM setpoint. Takes effect on its next cycle. */
 
 int px4io_set_setpoint(FAR const uint16_t *values, unsigned count);

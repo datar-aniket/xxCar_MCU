@@ -470,10 +470,24 @@
  * Runs at 1.5 Mbaud, 8N1, full duplex - see apps/px4io/. That rate comes from
  * PX4's PX4IO_SERIAL_BITRATE and is fixed by the firmware already flashed on
  * the IO chip, so it is not configurable.
+ *
+ * RX DMA matters here. At 1.5 Mbaud a byte lands every 6.7us, and IO's reply to
+ * an RC read is a ~52-byte uninterrupted burst. Interrupt-driven, that is one
+ * IRQ per FIFO threshold crossing for every exchange; with RX DMA the whole
+ * burst is written to memory by the DMA controller and the USART's IDLE-line
+ * interrupt raises it in one go when the line goes quiet. That is the same
+ * mechanism PX4 uses, and it is what makes a 400 Hz servo update rate cheap
+ * rather than a stream of interrupts.
+ *
+ * Stream assignment matches PX4's boards/px4/fmu-v6c board_dma_map.h: USART6 on
+ * DMA1, alongside SPI1 (which takes 2 of DMA1's 8 streams).
  */
 
 #define GPIO_USART6_RX    (GPIO_USART6_RX_1 | GPIO_SPEED_100MHz) /* PC7 */
 #define GPIO_USART6_TX    (GPIO_USART6_TX_1 | GPIO_SPEED_100MHz) /* PC6 */
+
+#define DMAMAP_USART6_RX  DMAMAP_DMA12_USART6RX_0  /* DMA1:71 */
+#define DMAMAP_USART6_TX  DMAMAP_DMA12_USART6TX_0  /* DMA1:72 */
 
 /* UART7 = TELEM1. The NSH console by default (SER_TEL1_FUNC). No hardware flow
  * control, so a 3-wire (TX/RX/GND) USB-TTL adapter works. TELEM1's flow-control

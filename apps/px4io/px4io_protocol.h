@@ -178,6 +178,20 @@
 #define PX4IO_SERVO_COUNT             8
 #define PX4IO_RC_CHANNELS            18
 
+/* IO clamps the PWM frame rate into this range, silently (registers.c). 50 Hz
+ * suits an analog steering servo; 333/400 Hz suits a digital servo or an ESC.
+ */
+
+#define PX4IO_PWM_RATE_MIN           25
+#define PX4IO_PWM_RATE_MAX          400
+
+/* How often the daemon asks IO for RC, regardless of how fast the servo loop is
+ * running. Receivers emit frames at 50-150 Hz, so polling faster just re-reads
+ * the same frame - and an RC read is by far the larger transfer.
+ */
+
+#define PX4IO_RC_POLL_HZ             50
+
 /* IO declares the FMU dead if it has not been spoken to for this long, and
  * drops the outputs to their failsafe values. Any client that wants IO to keep
  * driving the servos must poll faster than this - see PX4's

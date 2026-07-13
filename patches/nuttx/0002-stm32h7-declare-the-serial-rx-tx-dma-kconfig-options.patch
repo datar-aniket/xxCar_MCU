@@ -1,0 +1,151 @@
+diff --git a/arch/arm/src/stm32h7/Kconfig b/arch/arm/src/stm32h7/Kconfig
+index 92c44d81..4f50ff7d 100644
+--- a/arch/arm/src/stm32h7/Kconfig
++++ b/arch/arm/src/stm32h7/Kconfig
+@@ -1791,6 +1791,146 @@ config UART8_RXFIFO_THRES
+ 
+ endif # STM32H7_UART8
+ 
++# Per-U[S]ART DMA selection.
++#
++# stm32_serial.c and stm32_uart.h already implement serial RX and TX DMA for the
++# H7 in full, keyed off CONFIG_<port>_RXDMA / CONFIG_<port>_TXDMA, and
++# STM32H7_SERIAL_RXDMA_BUFFER_SIZE below already depends on those symbols - but
++# nothing ever defined them, so the feature was unreachable. stm32f7 and stm32
++# define exactly these options. This restores them for the H7.
++#
++# RX DMA also enables the USART IDLE-line interrupt (see up_setup), which is what
++# delivers a partial burst as soon as the line goes quiet instead of waiting for
++# the DMA buffer to half-fill.
++
++config USART1_RXDMA
++	bool "USART1 Rx DMA"
++	default n
++	depends on STM32H7_USART1 && (STM32H7_DMA1 || STM32H7_DMA2)
++	select SERIAL_RXDMA
++	---help---
++		In high data rate usage, Rx DMA may eliminate Rx overrun errors.
++
++config USART1_TXDMA
++	bool "USART1 Tx DMA"
++	default n
++	depends on STM32H7_USART1 && (STM32H7_DMA1 || STM32H7_DMA2)
++	select SERIAL_TXDMA
++	---help---
++		In high data rate usage, Tx DMA may reduce CPU load.
++
++config USART2_RXDMA
++	bool "USART2 Rx DMA"
++	default n
++	depends on STM32H7_USART2 && (STM32H7_DMA1 || STM32H7_DMA2)
++	select SERIAL_RXDMA
++	---help---
++		In high data rate usage, Rx DMA may eliminate Rx overrun errors.
++
++config USART2_TXDMA
++	bool "USART2 Tx DMA"
++	default n
++	depends on STM32H7_USART2 && (STM32H7_DMA1 || STM32H7_DMA2)
++	select SERIAL_TXDMA
++	---help---
++		In high data rate usage, Tx DMA may reduce CPU load.
++
++config USART3_RXDMA
++	bool "USART3 Rx DMA"
++	default n
++	depends on STM32H7_USART3 && (STM32H7_DMA1 || STM32H7_DMA2)
++	select SERIAL_RXDMA
++	---help---
++		In high data rate usage, Rx DMA may eliminate Rx overrun errors.
++
++config USART3_TXDMA
++	bool "USART3 Tx DMA"
++	default n
++	depends on STM32H7_USART3 && (STM32H7_DMA1 || STM32H7_DMA2)
++	select SERIAL_TXDMA
++	---help---
++		In high data rate usage, Tx DMA may reduce CPU load.
++
++config UART4_RXDMA
++	bool "UART4 Rx DMA"
++	default n
++	depends on STM32H7_UART4 && (STM32H7_DMA1 || STM32H7_DMA2)
++	select SERIAL_RXDMA
++	---help---
++		In high data rate usage, Rx DMA may eliminate Rx overrun errors.
++
++config UART4_TXDMA
++	bool "UART4 Tx DMA"
++	default n
++	depends on STM32H7_UART4 && (STM32H7_DMA1 || STM32H7_DMA2)
++	select SERIAL_TXDMA
++	---help---
++		In high data rate usage, Tx DMA may reduce CPU load.
++
++config UART5_RXDMA
++	bool "UART5 Rx DMA"
++	default n
++	depends on STM32H7_UART5 && (STM32H7_DMA1 || STM32H7_DMA2)
++	select SERIAL_RXDMA
++	---help---
++		In high data rate usage, Rx DMA may eliminate Rx overrun errors.
++
++config UART5_TXDMA
++	bool "UART5 Tx DMA"
++	default n
++	depends on STM32H7_UART5 && (STM32H7_DMA1 || STM32H7_DMA2)
++	select SERIAL_TXDMA
++	---help---
++		In high data rate usage, Tx DMA may reduce CPU load.
++
++config USART6_RXDMA
++	bool "USART6 Rx DMA"
++	default n
++	depends on STM32H7_USART6 && (STM32H7_DMA1 || STM32H7_DMA2)
++	select SERIAL_RXDMA
++	---help---
++		In high data rate usage, Rx DMA may eliminate Rx overrun errors.
++
++config USART6_TXDMA
++	bool "USART6 Tx DMA"
++	default n
++	depends on STM32H7_USART6 && (STM32H7_DMA1 || STM32H7_DMA2)
++	select SERIAL_TXDMA
++	---help---
++		In high data rate usage, Tx DMA may reduce CPU load.
++
++config UART7_RXDMA
++	bool "UART7 Rx DMA"
++	default n
++	depends on STM32H7_UART7 && (STM32H7_DMA1 || STM32H7_DMA2)
++	select SERIAL_RXDMA
++	---help---
++		In high data rate usage, Rx DMA may eliminate Rx overrun errors.
++
++config UART7_TXDMA
++	bool "UART7 Tx DMA"
++	default n
++	depends on STM32H7_UART7 && (STM32H7_DMA1 || STM32H7_DMA2)
++	select SERIAL_TXDMA
++	---help---
++		In high data rate usage, Tx DMA may reduce CPU load.
++
++config UART8_RXDMA
++	bool "UART8 Rx DMA"
++	default n
++	depends on STM32H7_UART8 && (STM32H7_DMA1 || STM32H7_DMA2)
++	select SERIAL_RXDMA
++	---help---
++		In high data rate usage, Rx DMA may eliminate Rx overrun errors.
++
++config UART8_TXDMA
++	bool "UART8 Tx DMA"
++	default n
++	depends on STM32H7_UART8 && (STM32H7_DMA1 || STM32H7_DMA2)
++	select SERIAL_TXDMA
++	---help---
++		In high data rate usage, Tx DMA may reduce CPU load.
++
+ config STM32H7_SERIAL_RXDMA_BUFFER_SIZE
+ 	int "Rx DMA buffer size"
+ 	default 32
