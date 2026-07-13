@@ -415,7 +415,44 @@
 #define GPIO_ADC12_INP4   GPIO_ADC12_INP4_0                      /* PC4, channel 4  */
 #define GPIO_ADC12_INP8   GPIO_ADC12_INP8_0                      /* PC5, channel 8  */
 
-/* USART3 (Nucleo Virtual Console) */
+/* Serial ports ************************************************************/
+
+/* The FMUv6C connector <-> UART map. Pin assignments are cross-checked against
+ * PX4's boards/px4/fmu-v6c/nuttx-config/include/board.h.
+ *
+ * CONFIG_STM32H7_SERIAL_DISABLE_REORDERING=y is set in the defconfig, which is
+ * what makes the /dev/ttySn numbering below true and stable: without it NuttX
+ * renumbers the ports so that the console becomes ttyS0, and every other index
+ * shifts depending on which peripherals happen to be enabled. The serial port
+ * manager hands these device names out by parameter, so they must not move.
+ *
+ *   Connector    UART     Pins          Device       Notes
+ *   ---------    ------   -----------   ----------   ----------------------
+ *   GPS1         USART1   PB6 / PA10    /dev/ttyS0
+ *   TELEM3       USART2   PD5 / PA3     /dev/ttyS1
+ *   FMU DEBUG    USART3   PD8 / PD9     /dev/ttyS2
+ *   TELEM2       UART5    PC12 / PD2    /dev/ttyS3
+ *   (internal)   USART6   PC6 / PC7     /dev/ttyS4   PX4IO co-processor link
+ *   TELEM1       UART7    PE8 / PE7     /dev/ttyS5   NSH console by default
+ *   GPS2         UART8    PE1 / PE0     /dev/ttyS6
+ *
+ * Note the RC IN connector is NOT on this list: on the 6C it is wired to the
+ * PX4IO co-processor, not to the FMU. RC from that connector arrives over the
+ * USART6 link as PX4IO registers, not as a raw SBUS/CRSF byte stream. Direct
+ * UART RC (SBUS/CRSF) is still possible on any of the connectors above.
+ */
+
+/* USART1 = GPS1 */
+
+#define GPIO_USART1_RX    (GPIO_USART1_RX_2 | GPIO_SPEED_100MHz) /* PA10 */
+#define GPIO_USART1_TX    (GPIO_USART1_TX_3 | GPIO_SPEED_100MHz) /* PB6 */
+
+/* USART2 = TELEM3 */
+
+#define GPIO_USART2_RX    (GPIO_USART2_RX_1 | GPIO_SPEED_100MHz) /* PA3 */
+#define GPIO_USART2_TX    (GPIO_USART2_TX_2 | GPIO_SPEED_100MHz) /* PD5 */
+
+/* USART3 = FMU DEBUG connector */
 
 #define GPIO_USART3_RX    (GPIO_USART3_RX_3 | GPIO_SPEED_100MHz) /* PD9 */
 #define GPIO_USART3_TX    (GPIO_USART3_TX_3 | GPIO_SPEED_100MHz) /* PD8 */
@@ -423,18 +460,33 @@
 #define DMAMAP_USART3_RX DMAMAP_DMA12_USART3RX_0
 #define DMAMAP_USART3_TX DMAMAP_DMA12_USART3TX_1
 
-/* UART7 = FMUv6C TELEM1 connector (PE7/PE8, AF7). Used as the NSH serial
- * console during Stage 1 bring-up. No hardware flow control so a 3-wire
- * (TX/RX/GND) USB-TTL adapter works. TELEM1 flow-control lines are PE9/PE10.
+/* UART5 = TELEM2 */
+
+#define GPIO_UART5_RX     (GPIO_UART5_RX_3 | GPIO_SPEED_100MHz) /* PD2 */
+#define GPIO_UART5_TX     (GPIO_UART5_TX_3 | GPIO_SPEED_100MHz) /* PC12 */
+
+/* USART6 = link to the PX4IO co-processor (STM32F103).
+ *
+ * Runs at 1.5 Mbaud, 8N1, full duplex - see apps/px4io/. That rate comes from
+ * PX4's PX4IO_SERIAL_BITRATE and is fixed by the firmware already flashed on
+ * the IO chip, so it is not configurable.
+ */
+
+#define GPIO_USART6_RX    (GPIO_USART6_RX_1 | GPIO_SPEED_100MHz) /* PC7 */
+#define GPIO_USART6_TX    (GPIO_USART6_TX_1 | GPIO_SPEED_100MHz) /* PC6 */
+
+/* UART7 = TELEM1. The NSH console by default (SER_TEL1_FUNC). No hardware flow
+ * control, so a 3-wire (TX/RX/GND) USB-TTL adapter works. TELEM1's flow-control
+ * lines are PE9/PE10 and are left unused.
  */
 
 #define GPIO_UART7_RX     (GPIO_UART7_RX_3 | GPIO_SPEED_100MHz) /* PE7 */
 #define GPIO_UART7_TX     (GPIO_UART7_TX_3 | GPIO_SPEED_100MHz) /* PE8 */
 
-/* USART6 = FMUv6C link to the PX4IO co-processor (PC6/PC7, AF7). Not used yet. */
+/* UART8 = GPS2 */
 
-#define GPIO_USART6_RX    (GPIO_USART6_RX_1 | GPIO_SPEED_100MHz) /* PC7 */
-#define GPIO_USART6_TX    (GPIO_USART6_TX_1 | GPIO_SPEED_100MHz) /* PC6 */
+#define GPIO_UART8_RX     (GPIO_UART8_RX_1 | GPIO_SPEED_100MHz) /* PE0 */
+#define GPIO_UART8_TX     (GPIO_UART8_TX_1 | GPIO_SPEED_100MHz) /* PE1 */
 
 /* I2C1 - external / expansion bus (PB8/PB7) */
 

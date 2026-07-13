@@ -475,4 +475,24 @@ int stm32_mmcsd_initialize(int minor);
 int stm32_sdio_initialize(void);
 #endif
 
+/****************************************************************************
+ * Name: board_composite_initialize / board_composite_connect
+ *
+ * Description:
+ *   The USB composite device (CDC/ACM + mass storage), implemented in
+ *   stm32_composite.c.
+ *
+ *   These carry NuttX's standard board-interface names, but NuttX only
+ *   declares them in <nuttx/board.h> when CONFIG_BOARDCTL_USBDEVCTRL is set -
+ *   i.e. when they are reached through boardctl(). We call them directly from
+ *   the board bring-up instead, so we declare them ourselves rather than turn
+ *   on a boardctl path we do not use.
+ *
+ ****************************************************************************/
+
+#ifdef CONFIG_USBDEV_COMPOSITE
+int board_composite_initialize(int port);
+FAR void *board_composite_connect(int port, int configid);
+#endif
+
 #endif /* __BOARDS_ARM_STM32H7_NUCLEO_H743ZI_SRC_NUCLEO_H743ZI_H */

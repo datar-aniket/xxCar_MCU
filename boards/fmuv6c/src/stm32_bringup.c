@@ -70,6 +70,11 @@
 #  include <nuttx/usb/rndis.h>
 #endif
 
+#ifdef CONFIG_I2C
+#  include <nuttx/i2c/i2c_master.h>
+#  include "stm32_i2c.h"
+#endif
+
 #include "stm32_gpio.h"
 
 /****************************************************************************

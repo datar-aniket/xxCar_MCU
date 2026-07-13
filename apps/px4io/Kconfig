@@ -1,0 +1,36 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config XXCAR_PX4IO
+	tristate "px4io: PX4IO co-processor client (RC input + PWM output)"
+	default n
+	depends on STM32H7_USART6 && SERIAL_TERMIOS
+	---help---
+		Client for the PX4IO co-processor (STM32F103) on the Pixhawk 6C,
+		over USART6 (/dev/ttyS4) at 1.5 Mbaud.
+
+		The 6C's RC IN connector and its 8 PWM servo rails belong to the IO
+		chip, not to the FMU - talking to IO is the only way to reach them.
+		IO demodulates SBUS/DSM/PPM itself and hands over decoded channels,
+		so no protocol autodetection is needed for that connector.
+
+		Not every FMUv6C is fitted with the IO chip; the client probes for it
+		and fails cleanly when it is absent.
+
+if XXCAR_PX4IO
+
+config XXCAR_PX4IO_PROGNAME
+	string "Program name"
+	default "px4io"
+
+config XXCAR_PX4IO_PRIORITY
+	int "px4io task priority"
+	default 100
+
+config XXCAR_PX4IO_STACKSIZE
+	int "px4io stack size"
+	default 2048
+
+endif

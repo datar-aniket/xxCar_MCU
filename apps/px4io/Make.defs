@@ -1,0 +1,9 @@
+############################################################################
+# apps/px4io/Make.defs
+#
+# SPDX-License-Identifier: Apache-2.0
+############################################################################
+
+ifneq ($(CONFIG_XXCAR_PX4IO),)
+CONFIGURED_APPS += $(APPDIR)/xxcar/px4io
+endif
