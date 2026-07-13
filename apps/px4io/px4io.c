@@ -15,8 +15,20 @@
  *
  * That works because a reply is self-describing. We read the 4-byte header
  * first, and its count field tells us exactly how many register bytes follow -
- * so there is never any guessing about where the packet ends, and we never need
- * the IDLE-line trick to find the boundary.
+ * so the packet boundary is never in doubt, and the IDLE-line trick is
+ * unnecessary.
+ *
+ * Concurrency note
+ * ----------------
+ * The file descriptor lives in a caller-owned handle, never in a global. In a
+ * flat build every task shares .bss but file descriptors are per task group, so
+ * a cached global fd goes stale (EBADF) the instant the task that opened it
+ * exits. The daemon opens its own; each NSH invocation opens its own.
+ *
+ * Plain data - the RC snapshot, the PWM setpoint - IS legitimately shared
+ * through .bss, guarded by g_lock. g_lock also serialises the wire itself, so
+ * an NSH command and the daemon can both hold the port open without their
+ * request/reply pairs interleaving.
  ****************************************************************************/
 
 #include <nuttx/config.h>
@@ -32,8 +44,10 @@
 #include <pthread.h>
 #include <sched.h>
 #include <syslog.h>
+#include <sys/time.h>
 
 #include "px4io.h"
+#include "../rc_in/rc_in.h"
 
 /****************************************************************************
  * Pre-processor Definitions
@@ -46,45 +60,40 @@
 
 #define PX4IO_TIMEOUT_MS   10
 
-/* How many times to retry a failed exchange before giving up. A single CRC
- * error is not interesting (the line is fast and unshielded); a persistent one
- * is.
+/* Retry transport failures. A single CRC error on a fast unshielded line is not
+ * interesting; a persistent one is.
  */
 
 #define PX4IO_RETRIES      3
+
+#define PX4IO_DAEMON_STACK 2048
+#define PX4IO_DAEMON_PRIO  (SCHED_PRIORITY_DEFAULT + 10)
 
 /****************************************************************************
  * Private Data
  ****************************************************************************/
 
-static int             g_fd = -1;
-static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+/* Serialises the wire, and protects the shared snapshots below. */
 
-/* Number of RC channels this particular IO reports it can decode. Read from
- * PAGE_CONFIG at probe time rather than assumed, so we never read off the end
- * of the RC page.
- */
+static pthread_mutex_t   g_lock = PTHREAD_MUTEX_INITIALIZER;
 
-static uint8_t         g_rc_channels;
+/* Daemon state. */
 
-/* Poller state. */
+static volatile bool     g_running;
+static volatile bool     g_should_stop;
+static int               g_rate_hz = 50;
 
-static pthread_t       g_poller;
-static volatile bool   g_running;
-static volatile bool   g_should_stop;
-static int             g_rate_hz = 50;
-
-/* The PWM setpoint the poller keeps re-sending. IO failsafes the outputs if the
+/* The PWM setpoint the daemon keeps re-sending. IO failsafes the outputs if the
  * FMU goes quiet for 500ms, so a setpoint has to be refreshed, not just sent.
  */
 
-static uint16_t        g_pwm[PX4IO_SERVO_COUNT];
-static bool            g_pwm_valid;
+static uint16_t          g_pwm[PX4IO_SERVO_COUNT];
+static bool              g_pwm_valid;
 
-/* Last RC frame the poller saw. */
+/* Last RC frame the daemon saw. */
 
 static struct px4io_rc_s g_rc;
-static bool            g_rc_valid;
+static bool              g_rc_valid;
 
 /****************************************************************************
  * Private Functions
@@ -93,9 +102,9 @@ static bool            g_rc_valid;
 /* CRC-8, polynomial 0x07, initial value 0, MSB first.
  *
  * PX4 ships this as a 256-entry lookup table (crc8_tab in protocol.h). This
- * loop produces byte-for-byte identical results for all 256 inputs - it was
- * checked against PX4's table before being written - and costs 256 fewer bytes
- * of flash.
+ * loop reproduces that table byte-for-byte across all 256 inputs - it was
+ * checked against PX4's before being written - and costs 256 fewer bytes of
+ * flash.
  */
 
 static uint8_t px4io_crc8(FAR const uint8_t *p, size_t len)
@@ -124,12 +133,12 @@ static uint8_t px4io_crc8(FAR const uint8_t *p, size_t len)
  * nothing and keeps this simple.
  */
 
-static int px4io_read_exact(FAR uint8_t *buf, size_t len)
+static int px4io_read_exact(int fd, FAR uint8_t *buf, size_t len)
 {
   struct pollfd pfd;
   size_t got = 0;
 
-  pfd.fd     = g_fd;
+  pfd.fd     = fd;
   pfd.events = POLLIN;
 
   while (got < len)
@@ -152,7 +161,7 @@ static int px4io_read_exact(FAR uint8_t *buf, size_t len)
           return -errno;
         }
 
-      n = read(g_fd, buf + got, len - got);
+      n = read(fd, buf + got, len - got);
       if (n < 0)
         {
           if (errno == EINTR)
@@ -174,39 +183,35 @@ static int px4io_read_exact(FAR uint8_t *buf, size_t len)
   return OK;
 }
 
-/* One request/reply round trip. pkt must already have count_code, page, offset
- * and any outgoing regs filled in; on return it holds IO's reply.
- */
+/* One request/reply round trip. Caller holds g_lock. */
 
-static int px4io_exchange(FAR struct px4io_packet_s *pkt)
+static int px4io_exchange(int fd, FAR struct px4io_packet_s *pkt)
 {
   size_t txlen = PKT_SIZE(*pkt);
   unsigned count;
   uint8_t crc;
   int ret;
 
-  /* CRC covers the whole packet with the crc field itself zeroed. */
+  /* The CRC covers the whole packet with the crc field itself zeroed. */
 
   pkt->crc = 0;
   pkt->crc = px4io_crc8((FAR const uint8_t *)pkt, txlen);
 
-  /* Drop anything stale in the RX buffer - after a timeout there may be a
-   * late reply sitting there, and consuming it as the *next* reply would
-   * desynchronise every subsequent exchange.
+  /* Drop anything stale in the RX buffer. After a timeout a late reply may be
+   * sitting there, and consuming it as the *next* reply would desynchronise
+   * every exchange after it.
    */
 
-  tcflush(g_fd, TCIFLUSH);
+  tcflush(fd, TCIFLUSH);
 
-  if (write(g_fd, pkt, txlen) != (ssize_t)txlen)
+  if (write(fd, pkt, txlen) != (ssize_t)txlen)
     {
       return -errno;
     }
 
-  /* Header first. Its count field says how much payload follows, so the
-   * packet boundary is never in doubt.
-   */
+  /* Header first: its count field says how much payload follows. */
 
-  ret = px4io_read_exact((FAR uint8_t *)pkt, 4);
+  ret = px4io_read_exact(fd, (FAR uint8_t *)pkt, 4);
   if (ret < 0)
     {
       return ret;
@@ -220,14 +225,12 @@ static int px4io_exchange(FAR struct px4io_packet_s *pkt)
 
   if (count > 0)
     {
-      ret = px4io_read_exact((FAR uint8_t *)pkt->regs, count * 2);
+      ret = px4io_read_exact(fd, (FAR uint8_t *)pkt->regs, count * 2);
       if (ret < 0)
         {
           return ret;
         }
     }
-
-  /* Verify: same rule as the request - zero the crc field, recompute. */
 
   crc = pkt->crc;
   pkt->crc = 0;
@@ -237,8 +240,8 @@ static int px4io_exchange(FAR struct px4io_packet_s *pkt)
       return -EIO;
     }
 
-  /* CORRUPT means IO received *our* packet badly; ERROR means it understood
-   * us but the register operation itself was rejected.
+  /* CORRUPT means IO received *our* packet badly; ERROR means it understood us
+   * but rejected the register operation.
    */
 
   if (PKT_CODE(*pkt) == PKT_CODE_CORRUPT)
@@ -254,53 +257,60 @@ static int px4io_exchange(FAR struct px4io_packet_s *pkt)
   return OK;
 }
 
-/* Retry wrapper. Only transport failures are retried - a register op that IO
- * actively rejected (-EINVAL) will be rejected again, so it fails straight out.
+/* Retry transport failures only: a register op IO actively rejected (-EINVAL)
+ * will be rejected again.
  */
 
-static int px4io_exchange_retry(FAR struct px4io_packet_s *pkt,
-                                FAR const struct px4io_packet_s *req)
+static int px4io_exchange_locked(int fd, FAR struct px4io_packet_s *pkt,
+                                 FAR const struct px4io_packet_s *req)
 {
   int ret = -EIO;
   int i;
+
+  pthread_mutex_lock(&g_lock);
 
   for (i = 0; i < PX4IO_RETRIES; i++)
     {
       *pkt = *req;
 
-      ret = px4io_exchange(pkt);
+      ret = px4io_exchange(fd, pkt);
       if (ret == OK || ret == -EINVAL)
         {
-          return ret;
+          break;
         }
     }
 
+  pthread_mutex_unlock(&g_lock);
   return ret;
+}
+
+static uint64_t px4io_now_us(void)
+{
+  struct timespec ts;
+
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)(ts.tv_nsec / 1000);
 }
 
 /****************************************************************************
  * Public Functions
  ****************************************************************************/
 
-int px4io_reg_read(uint8_t page, uint8_t offset,
+int px4io_reg_read(FAR struct px4io_s *io, uint8_t page, uint8_t offset,
                    FAR uint16_t *values, unsigned count)
 {
   struct px4io_packet_s req;
   struct px4io_packet_s pkt;
   int ret;
 
-  if (count == 0 || count > PKT_MAX_REGS || values == NULL)
+  if (io == NULL || io->fd < 0 || values == NULL ||
+      count == 0 || count > PKT_MAX_REGS)
     {
       return -EINVAL;
     }
 
-  if (g_fd < 0)
-    {
-      return -ENODEV;
-    }
-
-  /* For a read, the count field says how many registers we *want*; no payload
-   * travels in the request itself.
+  /* On a read, count says how many registers we *want*; the request carries no
+   * payload of its own.
    */
 
   memset(&req, 0, sizeof(req));
@@ -308,17 +318,14 @@ int px4io_reg_read(uint8_t page, uint8_t offset,
   req.page       = page;
   req.offset     = offset;
 
-  pthread_mutex_lock(&g_lock);
-  ret = px4io_exchange_retry(&pkt, &req);
-  pthread_mutex_unlock(&g_lock);
-
+  ret = px4io_exchange_locked(io->fd, &pkt, &req);
   if (ret < 0)
     {
       return ret;
     }
 
-  /* IO is allowed to return fewer registers than asked for. Returning stale
-   * stack contents for the rest would be worse than failing.
+  /* IO may legally return fewer registers than asked for. Handing back stale
+   * stack contents for the remainder would be worse than failing.
    */
 
   if (PKT_COUNT(pkt) != count)
@@ -330,21 +337,16 @@ int px4io_reg_read(uint8_t page, uint8_t offset,
   return OK;
 }
 
-int px4io_reg_write(uint8_t page, uint8_t offset,
+int px4io_reg_write(FAR struct px4io_s *io, uint8_t page, uint8_t offset,
                     FAR const uint16_t *values, unsigned count)
 {
   struct px4io_packet_s req;
   struct px4io_packet_s pkt;
-  int ret;
 
-  if (count == 0 || count > PKT_MAX_REGS || values == NULL)
+  if (io == NULL || io->fd < 0 || values == NULL ||
+      count == 0 || count > PKT_MAX_REGS)
     {
       return -EINVAL;
-    }
-
-  if (g_fd < 0)
-    {
-      return -ENODEV;
     }
 
   memset(&req, 0, sizeof(req));
@@ -353,30 +355,28 @@ int px4io_reg_write(uint8_t page, uint8_t offset,
   req.offset     = offset;
   memcpy(req.regs, values, count * sizeof(uint16_t));
 
-  pthread_mutex_lock(&g_lock);
-  ret = px4io_exchange_retry(&pkt, &req);
-  pthread_mutex_unlock(&g_lock);
-
-  return ret;
+  return px4io_exchange_locked(io->fd, &pkt, &req);
 }
 
-int px4io_reg_get(uint8_t page, uint8_t offset, FAR uint16_t *value)
+int px4io_reg_get(FAR struct px4io_s *io, uint8_t page, uint8_t offset,
+                  FAR uint16_t *value)
 {
-  return px4io_reg_read(page, offset, value, 1);
+  return px4io_reg_read(io, page, offset, value, 1);
 }
 
-int px4io_reg_set(uint8_t page, uint8_t offset, uint16_t value)
+int px4io_reg_set(FAR struct px4io_s *io, uint8_t page, uint8_t offset,
+                  uint16_t value)
 {
-  return px4io_reg_write(page, offset, &value, 1);
+  return px4io_reg_write(io, page, offset, &value, 1);
 }
 
-int px4io_reg_modify(uint8_t page, uint8_t offset,
+int px4io_reg_modify(FAR struct px4io_s *io, uint8_t page, uint8_t offset,
                      uint16_t clearbits, uint16_t setbits)
 {
   uint16_t value;
   int ret;
 
-  ret = px4io_reg_get(page, offset, &value);
+  ret = px4io_reg_get(io, page, offset, &value);
   if (ret < 0)
     {
       return ret;
@@ -385,22 +385,22 @@ int px4io_reg_modify(uint8_t page, uint8_t offset,
   value &= ~clearbits;
   value |= setbits;
 
-  return px4io_reg_set(page, offset, value);
+  return px4io_reg_set(io, page, offset, value);
 }
 
-int px4io_probe(void)
+int px4io_open(FAR struct px4io_s *io)
 {
   uint16_t config[8];
   struct termios tio;
   int ret;
 
-  if (g_fd >= 0)
+  if (io == NULL)
     {
-      return OK;
+      return -EINVAL;
     }
 
-  g_fd = open(PX4IO_DEVPATH, O_RDWR | O_NOCTTY);
-  if (g_fd < 0)
+  io->fd = open(PX4IO_DEVPATH, O_RDWR | O_NOCTTY);
+  if (io->fd < 0)
     {
       return -errno;
     }
@@ -408,11 +408,11 @@ int px4io_probe(void)
   /* Raw, 8N1, no flow control, 1.5 Mbaud. The rate is dictated by the firmware
    * already running on the IO chip; it is not negotiable.
    *
-   * cfmakeraw() matters: in canonical mode the driver would try to interpret
-   * the binary packet as lines of text.
+   * cfmakeraw() matters: in canonical mode the driver would try to read the
+   * binary packet as lines of text.
    */
 
-  if (tcgetattr(g_fd, &tio) < 0)
+  if (tcgetattr(io->fd, &tio) < 0)
     {
       ret = -errno;
       goto err;
@@ -423,19 +423,18 @@ int px4io_probe(void)
   tio.c_cflag |= CS8;
   cfsetspeed(&tio, B1500000);
 
-  if (tcsetattr(g_fd, TCSANOW, &tio) < 0)
+  if (tcsetattr(io->fd, TCSANOW, &tio) < 0)
     {
       ret = -errno;
       goto err;
     }
 
   /* Ask IO who it is. This is the real test: on a board with no IO chip fitted
-   * (PX4's board_config.h lists NO-PX4IO hardware revisions) nothing answers
-   * and we time out here, which is exactly the outcome we want - better than
-   * silently half-working.
+   * nothing answers and we time out here, which is exactly what we want -
+   * better than silently half-working.
    */
 
-  ret = px4io_reg_read(PX4IO_PAGE_CONFIG, PX4IO_P_CONFIG_PROTOCOL_VERSION,
+  ret = px4io_reg_read(io, PX4IO_PAGE_CONFIG, PX4IO_P_CONFIG_PROTOCOL_VERSION,
                        config, 8);
   if (ret < 0)
     {
@@ -450,32 +449,54 @@ int px4io_probe(void)
       goto err;
     }
 
-  g_rc_channels = (uint8_t)config[PX4IO_P_CONFIG_RC_INPUT_COUNT];
-  if (g_rc_channels > PX4IO_RC_CHANNELS)
+  io->rc_channels = (uint8_t)config[PX4IO_P_CONFIG_RC_INPUT_COUNT];
+  if (io->rc_channels > PX4IO_RC_CHANNELS)
     {
-      g_rc_channels = PX4IO_RC_CHANNELS;
+      io->rc_channels = PX4IO_RC_CHANNELS;
     }
 
   return OK;
 
 err:
-  close(g_fd);
-  g_fd = -1;
+  close(io->fd);
+  io->fd = -1;
   return ret;
 }
 
-void px4io_close(void)
+void px4io_close(FAR struct px4io_s *io)
 {
-  px4io_stop();
-
-  if (g_fd >= 0)
+  if (io != NULL && io->fd >= 0)
     {
-      close(g_fd);
-      g_fd = -1;
+      close(io->fd);
+      io->fd = -1;
     }
 }
 
-int px4io_get_status(FAR struct px4io_status_s *status)
+int px4io_init(FAR struct px4io_s *io)
+{
+  uint16_t disarmed[PX4IO_SERVO_COUNT];
+  unsigned i;
+
+  /* Writing PAGE_DISARMED_PWM is what makes IO raise INIT_OK, and INIT_OK is
+   * half the gate on the servo rails (INIT_OK && (FMU_ARMED || RAW_PWM)).
+   * Skip this and the outputs can never come on, whatever else we write.
+   *
+   * Zero means "emit no pulses at all" on the disarmed page (it is explicitly
+   * special-cased in IO's registers.c), so a disarmed rail is genuinely dead
+   * rather than parked at some pulse width. For a ground robot that is the
+   * right default: no signal beats a wrong signal into an ESC.
+   */
+
+  for (i = 0; i < PX4IO_SERVO_COUNT; i++)
+    {
+      disarmed[i] = 0;
+    }
+
+  return px4io_reg_write(io, PX4IO_PAGE_DISARMED_PWM, 0,
+                         disarmed, PX4IO_SERVO_COUNT);
+}
+
+int px4io_get_status(FAR struct px4io_s *io, FAR struct px4io_status_s *status)
 {
   uint16_t config[8];
   uint16_t stat[8];
@@ -486,13 +507,13 @@ int px4io_get_status(FAR struct px4io_status_s *status)
       return -EINVAL;
     }
 
-  ret = px4io_reg_read(PX4IO_PAGE_CONFIG, 0, config, 8);
+  ret = px4io_reg_read(io, PX4IO_PAGE_CONFIG, 0, config, 8);
   if (ret < 0)
     {
       return ret;
     }
 
-  ret = px4io_reg_read(PX4IO_PAGE_STATUS, 0, stat, 8);
+  ret = px4io_reg_read(io, PX4IO_PAGE_STATUS, 0, stat, 8);
   if (ret < 0)
     {
       return ret;
@@ -513,29 +534,30 @@ int px4io_get_status(FAR struct px4io_status_s *status)
   return OK;
 }
 
-int px4io_get_rc(FAR struct px4io_rc_s *rc)
+int px4io_get_rc(FAR struct px4io_s *io, FAR struct px4io_rc_s *rc)
 {
   uint16_t regs[PX4IO_P_RAW_RC_BASE + PX4IO_RC_CHANNELS];
-  unsigned count = PX4IO_P_RAW_RC_BASE + g_rc_channels;
+  unsigned count;
   uint16_t flags;
   unsigned i;
   int ret;
 
-  if (rc == NULL)
+  if (io == NULL || rc == NULL)
     {
       return -EINVAL;
     }
 
+  count = PX4IO_P_RAW_RC_BASE + io->rc_channels;
   if (count > PKT_MAX_REGS)
     {
       count = PKT_MAX_REGS;
     }
 
   /* One read pulls the header and every channel together, so the channels can
-   * never be torn across two frames.
+   * never be torn across two RC frames.
    */
 
-  ret = px4io_reg_read(PX4IO_PAGE_RAW_RC_INPUT, 0, regs, count);
+  ret = px4io_reg_read(io, PX4IO_PAGE_RAW_RC_INPUT, 0, regs, count);
   if (ret < 0)
     {
       return ret;
@@ -551,9 +573,9 @@ int px4io_get_rc(FAR struct px4io_rc_s *rc)
   rc->ok          = (flags & PX4IO_P_RAW_RC_FLAGS_RC_OK) != 0;
   rc->failsafe    = (flags & PX4IO_P_RAW_RC_FLAGS_FAILSAFE) != 0;
 
-  if (rc->count > g_rc_channels)
+  if (rc->count > io->rc_channels)
     {
-      rc->count = g_rc_channels;
+      rc->count = io->rc_channels;
     }
 
   for (i = 0; i < rc->count && (PX4IO_P_RAW_RC_BASE + i) < count; i++)
@@ -564,7 +586,8 @@ int px4io_get_rc(FAR struct px4io_rc_s *rc)
   return OK;
 }
 
-int px4io_set_pwm(FAR const uint16_t *values, unsigned count)
+int px4io_set_pwm(FAR struct px4io_s *io, FAR const uint16_t *values,
+                  unsigned count)
 {
   int ret;
 
@@ -573,17 +596,28 @@ int px4io_set_pwm(FAR const uint16_t *values, unsigned count)
       return -EINVAL;
     }
 
-  ret = px4io_reg_write(PX4IO_PAGE_DIRECT_PWM, 0, values, count);
+  ret = px4io_reg_write(io, PX4IO_PAGE_DIRECT_PWM, 0, values, count);
   if (ret < 0)
     {
       return ret;
     }
 
-  /* Remember it: IO drops the outputs to failsafe if we go quiet for 500ms, so
-   * the poller has to keep re-sending this.
+  /* Hand it to the daemon as well: IO drops the outputs to failsafe if we go
+   * quiet for 500ms, so this has to keep being re-sent.
    */
 
+  return px4io_set_setpoint(values, count);
+}
+
+int px4io_set_setpoint(FAR const uint16_t *values, unsigned count)
+{
+  if (values == NULL || count == 0 || count > PX4IO_SERVO_COUNT)
+    {
+      return -EINVAL;
+    }
+
   pthread_mutex_lock(&g_lock);
+  memset(g_pwm, 0, sizeof(g_pwm));
   memcpy(g_pwm, values, count * sizeof(uint16_t));
   g_pwm_valid = true;
   pthread_mutex_unlock(&g_lock);
@@ -591,76 +625,78 @@ int px4io_set_pwm(FAR const uint16_t *values, unsigned count)
   return OK;
 }
 
-int px4io_arm(bool armed)
+int px4io_arm(FAR struct px4io_s *io, bool armed)
 {
   if (armed)
     {
-      /* IO_ARM_OK lets IO arm at all; FMU_ARMED says we want it now.
+      /* IO_ARM_OK lets IO arm at all; FMU_ARMED says we want it armed now.
        *
-       * Also tell IO that safety is off. On current IO firmware that flag only
-       * drives the safety LED (the outputs are gated by INIT_OK && (FMU_ARMED
-       * || RAW_PWM), not by the button) - but leaving it unset would mean a
-       * blinking LED saying "safe" while the servos move, which is a lie worth
-       * avoiding.
+       * SAFETY_OFF is also set. On current IO firmware that flag only drives
+       * the safety LED - the outputs are gated by INIT_OK && (FMU_ARMED ||
+       * RAW_PWM), not by the button - but leaving it clear would mean an LED
+       * blinking "safe" above moving servos, which is a lie worth avoiding.
        */
 
-      int ret = px4io_reg_set(PX4IO_PAGE_SETUP, PX4IO_P_SETUP_SAFETY_OFF, 1);
+      int ret = px4io_reg_set(io, PX4IO_PAGE_SETUP,
+                              PX4IO_P_SETUP_SAFETY_OFF, 1);
       if (ret < 0)
         {
           return ret;
         }
 
-      return px4io_reg_modify(PX4IO_PAGE_SETUP, PX4IO_P_SETUP_ARMING,
+      return px4io_reg_modify(io, PX4IO_PAGE_SETUP, PX4IO_P_SETUP_ARMING,
                               PX4IO_P_SETUP_ARMING_LOCKDOWN,
                               PX4IO_P_SETUP_ARMING_IO_ARM_OK |
                               PX4IO_P_SETUP_ARMING_FMU_ARMED);
     }
 
-  px4io_reg_set(PX4IO_PAGE_SETUP, PX4IO_P_SETUP_SAFETY_OFF, 0);
+  px4io_reg_set(io, PX4IO_PAGE_SETUP, PX4IO_P_SETUP_SAFETY_OFF, 0);
 
-  return px4io_reg_modify(PX4IO_PAGE_SETUP, PX4IO_P_SETUP_ARMING,
+  return px4io_reg_modify(io, PX4IO_PAGE_SETUP, PX4IO_P_SETUP_ARMING,
                           PX4IO_P_SETUP_ARMING_IO_ARM_OK |
                           PX4IO_P_SETUP_ARMING_FMU_ARMED,
                           0);
 }
 
-int px4io_set_pwm_rate(uint16_t rate_hz)
+int px4io_set_pwm_rate(FAR struct px4io_s *io, uint16_t rate_hz)
 {
   int ret;
 
-  /* PWM_RATES is a per-channel bitmask choosing between the "default" and
+  /* PWM_RATES is a per-channel bitmask choosing between the "default" and the
    * "alt" rate. Clearing it puts all 8 channels on the default rate, and then
-   * one register sets that rate - which is all a ground robot needs.
+   * one register sets what that rate is - all a ground robot needs.
    */
 
-  ret = px4io_reg_set(PX4IO_PAGE_SETUP, PX4IO_P_SETUP_PWM_RATES, 0);
+  ret = px4io_reg_set(io, PX4IO_PAGE_SETUP, PX4IO_P_SETUP_PWM_RATES, 0);
   if (ret < 0)
     {
       return ret;
     }
 
-  return px4io_reg_set(PX4IO_PAGE_SETUP, PX4IO_P_SETUP_PWM_DEFAULTRATE,
+  return px4io_reg_set(io, PX4IO_PAGE_SETUP, PX4IO_P_SETUP_PWM_DEFAULTRATE,
                        rate_hz);
 }
 
-int px4io_set_failsafe_pwm(FAR const uint16_t *values, unsigned count)
+int px4io_set_failsafe_pwm(FAR struct px4io_s *io, FAR const uint16_t *values,
+                           unsigned count)
 {
   if (values == NULL || count == 0 || count > PX4IO_SERVO_COUNT)
     {
       return -EINVAL;
     }
 
-  return px4io_reg_write(PX4IO_PAGE_FAILSAFE_PWM, 0, values, count);
+  return px4io_reg_write(io, PX4IO_PAGE_FAILSAFE_PWM, 0, values, count);
 }
 
-int px4io_set_disarmed_pwm(FAR const uint16_t *values, unsigned count)
+int px4io_set_disarmed_pwm(FAR struct px4io_s *io, FAR const uint16_t *values,
+                           unsigned count)
 {
   if (values == NULL || count == 0 || count > PX4IO_SERVO_COUNT)
     {
       return -EINVAL;
     }
 
-  return px4io_reg_write(PX4IO_PAGE_DISARMED_PWM, 0, values, count);
+  return px4io_reg_write(io, PX4IO_PAGE_DISARMED_PWM, 0, values, count);
 }
 
 int px4io_rc_latest(FAR struct px4io_rc_s *rc)
@@ -684,68 +720,122 @@ int px4io_rc_latest(FAR struct px4io_rc_s *rc)
   return ret;
 }
 
-/* The poller. Two jobs, and the second one is not optional:
+/****************************************************************************
+ * The daemon
  *
- *  1. Refresh the RC snapshot.
- *  2. Keep talking to IO. IO failsafes the servo rails if the FMU is silent for
- *     500ms (PX4IO_FMU_DROP_LIMIT_US), so even when nothing is steering, this
- *     loop is what keeps the outputs alive.
- */
+ * A task rather than a pthread: it must outlive the NSH command that starts it,
+ * and it needs its own file-descriptor table (a pthread would share the command
+ * task's, and die with it).
+ *
+ * Three jobs, and the third is not optional:
+ *   1. refresh the RC snapshot,
+ *   2. publish RC to uORB as rc_in,
+ *   3. keep talking to IO at all. IO failsafes the servo rails if the FMU is
+ *      silent for 500ms (PX4IO_FMU_DROP_LIMIT_US), so even when nothing is
+ *      steering, this loop is what keeps the outputs alive.
+ ****************************************************************************/
 
-static FAR void *px4io_poller(FAR void *arg)
+static int px4io_daemon(int argc, FAR char *argv[])
 {
-  useconds_t period_us = (useconds_t)(1000000 / g_rate_hz);
+  struct px4io_s io;
+  useconds_t period_us;
+  int rcfd;
+  int ret;
 
-  UNUSED(arg);
+  UNUSED(argc);
+  UNUSED(argv);
+
+  /* Our own connection: file descriptors do not cross task groups. */
+
+  ret = px4io_open(&io);
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "px4io: daemon cannot open IO: %d\n", ret);
+      g_running = false;
+      return EXIT_FAILURE;
+    }
+
+  /* Raise INIT_OK, without which the outputs can never arm. */
+
+  px4io_init(&io);
+
+  rcfd = rc_in_advertise();
+  if (rcfd < 0)
+    {
+      syslog(LOG_ERR, "px4io: cannot advertise rc_in: %d\n", rcfd);
+    }
+
+  period_us = (useconds_t)(1000000 / g_rate_hz);
+  g_running = true;
 
   while (!g_should_stop)
     {
       struct px4io_rc_s rc;
+      uint16_t pwm[PX4IO_SERVO_COUNT];
+      bool have_pwm;
 
-      if (px4io_get_rc(&rc) == OK)
+      if (px4io_get_rc(&io, &rc) == OK)
         {
           pthread_mutex_lock(&g_lock);
           g_rc = rc;
           g_rc_valid = true;
           pthread_mutex_unlock(&g_lock);
+
+          if (rcfd >= 0)
+            {
+              struct rc_in_s msg;
+              unsigned i;
+
+              memset(&msg, 0, sizeof(msg));
+              msg.timestamp   = px4io_now_us();
+              msg.count       = rc.count;
+              msg.rssi        = rc.rssi;
+              msg.ok          = rc.ok;
+              msg.failsafe    = rc.failsafe;
+              msg.frames      = rc.frames;
+              msg.lost_frames = rc.lost_frames;
+              msg.source      = RC_IN_SRC_PX4IO;
+
+              for (i = 0; i < RC_IN_MAX_CHANNELS; i++)
+                {
+                  msg.channel[i] = rc.channel[i];
+                }
+
+              rc_in_publish(rcfd, &msg);
+            }
         }
 
-      /* Re-send the setpoint. Writing DIRECT_PWM is also what raises IO's
-       * RAW_PWM status flag, which is half of what keeps the outputs armed.
+      /* Re-send the setpoint. Writing DIRECT_PWM also raises IO's RAW_PWM
+       * status flag, which is the other half of what keeps the outputs armed.
        */
 
       pthread_mutex_lock(&g_lock);
-      bool have_pwm = g_pwm_valid;
-      uint16_t pwm[PX4IO_SERVO_COUNT];
+      have_pwm = g_pwm_valid;
       memcpy(pwm, g_pwm, sizeof(pwm));
       pthread_mutex_unlock(&g_lock);
 
       if (have_pwm)
         {
-          px4io_reg_write(PX4IO_PAGE_DIRECT_PWM, 0, pwm, PX4IO_SERVO_COUNT);
+          px4io_reg_write(&io, PX4IO_PAGE_DIRECT_PWM, 0,
+                          pwm, PX4IO_SERVO_COUNT);
         }
 
       usleep(period_us);
     }
 
+  px4io_close(&io);
   g_running = false;
-  return NULL;
+  return EXIT_SUCCESS;
 }
 
 int px4io_start(int rate_hz)
 {
-  pthread_attr_t attr;
-  struct sched_param param;
-  int ret;
+  int pid;
+  int i;
 
   if (g_running)
     {
       return OK;
-    }
-
-  if (g_fd < 0)
-    {
-      return -ENODEV;
     }
 
   /* Must stay comfortably above IO's 500ms failsafe timeout. */
@@ -758,34 +848,40 @@ int px4io_start(int rate_hz)
   g_rate_hz     = rate_hz;
   g_should_stop = false;
 
-  pthread_attr_init(&attr);
-  pthread_attr_setstacksize(&attr, 2048);
-  param.sched_priority = SCHED_PRIORITY_DEFAULT + 10;
-  pthread_attr_setschedparam(&attr, &param);
-
-  ret = pthread_create(&g_poller, &attr, px4io_poller, NULL);
-  pthread_attr_destroy(&attr);
-
-  if (ret != 0)
+  pid = task_create("px4io", PX4IO_DAEMON_PRIO, PX4IO_DAEMON_STACK,
+                    px4io_daemon, NULL);
+  if (pid < 0)
     {
-      return -ret;
+      return -errno;
     }
 
-  pthread_setname_np(g_poller, "px4io");
-  g_running = true;
-  return OK;
+  /* Wait for it to come up (or fail), so the caller gets a real answer rather
+   * than a hopeful one.
+   */
+
+  for (i = 0; i < 100 && !g_running; i++)
+    {
+      usleep(10000);
+    }
+
+  return g_running ? OK : -EIO;
 }
 
 void px4io_stop(void)
 {
+  int i;
+
   if (!g_running)
     {
       return;
     }
 
   g_should_stop = true;
-  pthread_join(g_poller, NULL);
-  g_running = false;
+
+  for (i = 0; i < 100 && g_running; i++)
+    {
+      usleep(10000);
+    }
 }
 
 bool px4io_is_running(void)

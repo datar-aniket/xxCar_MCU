@@ -17,11 +17,21 @@
  *   - PWM out:   drive the 8 servo rails (steering servo, etc).
  *
  * Not every FMUv6C board is populated with an IO chip (PX4's board_config.h
- * lists NO-PX4IO hardware revisions), so px4io_probe() is the entry point and
- * it is expected to fail gracefully.
+ * lists NO-PX4IO hardware revisions), so px4io_open() is expected to fail
+ * gracefully.
  *
  * RC on a *direct* FMU UART (a receiver plugged into TELEM/GPS rather than
  * RC IN) is a different code path and does not live here.
+ *
+ * ---------------------------------------------------------------------------
+ * Why the handle
+ *
+ * The connection is a caller-owned struct rather than a hidden global, and that
+ * is not a style choice. In a NuttX flat build every task shares one copy of
+ * .bss, but file descriptors are per task group. A file descriptor cached in a
+ * global is therefore only valid inside the task that opened it: the moment that
+ * task exits, the fd is closed, and the next task to run reads the stale number
+ * out of the global and gets EBADF. Each task must own its own connection.
  ****************************************************************************/
 
 #ifndef __APPS_PX4IO_PX4IO_H
@@ -46,6 +56,16 @@
 /****************************************************************************
  * Public Types
  ****************************************************************************/
+
+/* One task's connection to IO. Open it, use it, close it - do not share it
+ * between tasks (see the note at the top of this file).
+ */
+
+struct px4io_s
+{
+  int     fd;
+  uint8_t rc_channels;  /* how many channels this IO says it can decode */
+};
 
 /* A decoded RC frame as IO handed it to us. */
 
@@ -85,79 +105,96 @@ struct px4io_status_s
  * fitted fails here rather than half-working. Returns 0 on success.
  */
 
-int px4io_probe(void);
+int px4io_open(FAR struct px4io_s *io);
+void px4io_close(FAR struct px4io_s *io);
 
-/* Close the link. */
+/* Tell IO the FMU has configured it.
+ *
+ * This is a real handshake, not a formality: IO only raises its INIT_OK status
+ * flag when the FMU writes PAGE_DISARMED_PWM, and INIT_OK is half of what gates
+ * the servo rails (INIT_OK && (FMU_ARMED || RAW_PWM)). Until this runs, the
+ * outputs can never come on, no matter what else is written.
+ *
+ * The disarmed values are set to zero, which on IO means "emit no pulses at
+ * all" - so a disarmed rail is genuinely dead rather than holding a position.
+ */
 
-void px4io_close(void);
+int px4io_init(FAR struct px4io_s *io);
 
 /* Raw register access, for anything this header does not wrap. count is in
  * 16-bit registers and must be <= PKT_MAX_REGS.
  */
 
-int px4io_reg_read(uint8_t page, uint8_t offset,
+int px4io_reg_read(FAR struct px4io_s *io, uint8_t page, uint8_t offset,
                    FAR uint16_t *values, unsigned count);
-int px4io_reg_write(uint8_t page, uint8_t offset,
+int px4io_reg_write(FAR struct px4io_s *io, uint8_t page, uint8_t offset,
                     FAR const uint16_t *values, unsigned count);
 
-/* Convenience wrappers for the very common single-register case. */
-
-int px4io_reg_get(uint8_t page, uint8_t offset, FAR uint16_t *value);
-int px4io_reg_set(uint8_t page, uint8_t offset, uint16_t value);
-
-/* Read-modify-write a setup register (clearbits then setbits). */
-
-int px4io_reg_modify(uint8_t page, uint8_t offset,
+int px4io_reg_get(FAR struct px4io_s *io, uint8_t page, uint8_t offset,
+                  FAR uint16_t *value);
+int px4io_reg_set(FAR struct px4io_s *io, uint8_t page, uint8_t offset,
+                  uint16_t value);
+int px4io_reg_modify(FAR struct px4io_s *io, uint8_t page, uint8_t offset,
                      uint16_t clearbits, uint16_t setbits);
 
 /* Fetch identification + live status. */
 
-int px4io_get_status(FAR struct px4io_status_s *status);
+int px4io_get_status(FAR struct px4io_s *io, FAR struct px4io_status_s *status);
 
 /* Fetch one decoded RC frame from PAGE_RAW_RC_INPUT. */
 
-int px4io_get_rc(FAR struct px4io_rc_s *rc);
+int px4io_get_rc(FAR struct px4io_s *io, FAR struct px4io_rc_s *rc);
 
-/* Drive the servo rails. Values are pulse widths in microseconds; a value of 0
- * disables that channel. Writing here is also what sets IO's RAW_PWM flag,
- * which is half of what arms the outputs.
+/* Drive the servo rails. Values are pulse widths in microseconds; 0 disables
+ * that channel. Writing here also raises IO's RAW_PWM flag, which is the other
+ * half of what arms the outputs.
  *
  * IMPORTANT: IO drops the outputs to failsafe if the FMU goes quiet for
- * PX4IO_FMU_DROP_LIMIT_US (500 ms), so a one-shot call will not hold a servo
- * position. Something has to keep talking - see px4io_start().
+ * PX4IO_FMU_DROP_LIMIT_US (500 ms), so a one-shot call will NOT hold a servo
+ * position. The daemon (px4io_start) is what keeps it alive.
  */
 
-int px4io_set_pwm(FAR const uint16_t *values, unsigned count);
+int px4io_set_pwm(FAR struct px4io_s *io, FAR const uint16_t *values,
+                  unsigned count);
 
-/* Arm or disarm the outputs. Arming sets IO_ARM_OK|FMU_ARMED; disarming clears
- * them, which drops the rails to their PAGE_DISARMED_PWM values.
+/* Arm or disarm the outputs. */
+
+int px4io_arm(FAR struct px4io_s *io, bool armed);
+
+/* PWM frame rate, Hz. 50 suits an analog steering servo. */
+
+int px4io_set_pwm_rate(FAR struct px4io_s *io, uint16_t rate_hz);
+
+/* Where the rails go when IO decides the FMU is gone, or when disarmed.
+ * Note IO *ignores* a zero written to the failsafe page, but honours it on the
+ * disarmed page (where it means "no pulses").
  */
 
-int px4io_arm(bool armed);
+int px4io_set_failsafe_pwm(FAR struct px4io_s *io, FAR const uint16_t *values,
+                           unsigned count);
+int px4io_set_disarmed_pwm(FAR struct px4io_s *io, FAR const uint16_t *values,
+                           unsigned count);
 
-/* Set the PWM frame rate (Hz) for all 8 channels. 50 Hz suits an analog
- * steering servo; ESCs generally accept much more.
- */
-
-int px4io_set_pwm_rate(uint16_t rate_hz);
-
-/* Set the values the rails fall back to when IO decides the FMU is gone
- * (failsafe) or when the outputs are disarmed.
- */
-
-int px4io_set_failsafe_pwm(FAR const uint16_t *values, unsigned count);
-int px4io_set_disarmed_pwm(FAR const uint16_t *values, unsigned count);
-
-/* Background poller. Keeps the link alive (so IO does not failsafe), republishes
- * RC, and re-sends the current PWM setpoint at `rate_hz`. Idempotent.
- */
+/****************************************************************************
+ * The daemon
+ *
+ * A background task - not a pthread - because it has to outlive the NSH command
+ * that started it, and because it needs its own file descriptor table.
+ *
+ * It keeps the link alive (without which IO failsafes the rails after 500 ms),
+ * refreshes the RC snapshot, and re-sends the current PWM setpoint every cycle.
+ ****************************************************************************/
 
 int  px4io_start(int rate_hz);
 void px4io_stop(void);
 bool px4io_is_running(void);
 
-/* Latest RC frame seen by the poller. Returns -EAGAIN if it has not seen one
- * yet. Cheap - does not touch the wire.
+/* Ask the daemon to hold this PWM setpoint. Takes effect on its next cycle. */
+
+int px4io_set_setpoint(FAR const uint16_t *values, unsigned count);
+
+/* Latest RC frame the daemon saw. -EAGAIN if it has not seen one yet. Cheap:
+ * does not touch the wire.
  */
 
 int px4io_rc_latest(FAR struct px4io_rc_s *rc);

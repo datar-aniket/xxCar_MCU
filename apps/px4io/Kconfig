@@ -7,6 +7,7 @@ config XXCAR_PX4IO
 	tristate "px4io: PX4IO co-processor client (RC input + PWM output)"
 	default n
 	depends on STM32H7_USART6 && SERIAL_TERMIOS
+	select XXCAR_RC_IN
 	---help---
 		Client for the PX4IO co-processor (STM32F103) on the Pixhawk 6C,
 		over USART6 (/dev/ttyS4) at 1.5 Mbaud.

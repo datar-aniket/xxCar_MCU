@@ -1,0 +1,19 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config XXCAR_RC_IN
+	bool "rc_in: the decoded-RC uORB topic"
+	default n
+	depends on UORB
+	---help---
+		Defines the `rc_in` uORB topic: one decoded RC frame, regardless of
+		which wire it arrived on.
+
+		This is a library, not a command. It is shared by the PX4IO client
+		(RC IN connector, demodulated by the IO co-processor) and by the
+		direct-UART RC decoder (SBUS/CRSF on an FMU serial port), so that
+		subscribers do not have to care about the source.
+
+		Watch it with:  uorb_listener rc_in
