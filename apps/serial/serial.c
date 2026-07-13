@@ -209,11 +209,11 @@ static int serial_nsh_task(int argc, FAR char *argv[])
        *            This is why `echo ps > /dev/ttyACM0` worked (echo sends LF)
        *            while pressing Enter in a terminal did nothing.
        *
-       *   ECHO   - the DRIVER echoes typed characters (serial.c, `tc_lflag &
-       *            ECHO`), not readline - despite CONFIG_READLINE_ECHO being
-       *            set. Without it you type blind. Note the driver's echo path
-       *            emits '\r' before '\n' by itself, so the newline echo does
-       *            not depend on ONLCR.
+       *   ECHO   - who echoes depends on the editor, so this flag does too.
+       *            readline does NOT echo (the driver does, under `tc_lflag &
+       *            ECHO`), but CLE redraws the whole line itself on every
+       *            keypress - so with CLE the driver must stay quiet or every
+       *            character appears twice.
        *
        *   ONLCR  - the shell's *output* is bare '\n'. Without LF->CRLF the
        *            cursor never returns to column 0 and output walks down the
@@ -237,7 +237,13 @@ static int serial_nsh_task(int argc, FAR char *argv[])
         {
           tio.c_iflag |= ICRNL;
           tio.c_oflag |= OPOST | ONLCR;
-          tio.c_lflag |= ISIG | ECHO;
+          tio.c_lflag |= ISIG;
+
+#ifdef CONFIG_NSH_CLE
+          tio.c_lflag &= ~ECHO;
+#else
+          tio.c_lflag |= ECHO;
+#endif
           tio.c_lflag &= ~ICANON;
           tcsetattr(fd, TCSANOW, &tio);
         }

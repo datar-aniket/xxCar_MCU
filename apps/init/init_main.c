@@ -28,6 +28,8 @@
 
 #include <stdio.h>
 #include <syslog.h>
+#include <unistd.h>
+#include <termios.h>
 
 #include <nshlib/nshlib.h>
 
@@ -58,6 +60,28 @@ int main(int argc, FAR char *argv[])
        */
 
       return 0;
+    }
+#endif
+
+#ifdef CONFIG_NSH_CLE
+  /* Stop the driver echoing on the console.
+   *
+   * uart_register() turns ECHO on for /dev/console and nothing else, which is
+   * right for readline (readline does not echo; the driver does). CLE is the
+   * other way round: it redraws the whole line itself on every keypress, so a
+   * driver that also echoes puts every character on screen twice.
+   *
+   * Non-console ports are handled the same way, in apps/serial.
+   */
+
+    {
+      struct termios tio;
+
+      if (tcgetattr(STDIN_FILENO, &tio) == 0)
+        {
+          tio.c_lflag &= ~ECHO;
+          tcsetattr(STDIN_FILENO, TCSANOW, &tio);
+        }
     }
 #endif
 

@@ -1,0 +1,505 @@
+diff --git a/include/system/cle.h b/include/system/cle.h
+index c120486..9422f3b 100644
+--- a/include/system/cle.h
++++ b/include/system/cle.h
+@@ -38,6 +38,24 @@
+  * Pre-processor Definitions
+  ****************************************************************************/
+ 
++/****************************************************************************
++ * Public Types
++ ****************************************************************************/
++
++#ifdef CONFIG_SYSTEM_CLE_TABCOMPLETION
++/* TAB completion knows about the registered "builtin" applications by itself,
++ * but a shell also has commands of its own that are not builtins (NSH's ls, ps,
++ * cat and so on).  A shell may register this vtable to have those included in
++ * completion as well.  It mirrors readline's extmatch_vtable_s.
++ */
++
++struct cle_extmatch_vtable_s
++{
++  CODE int (*count_matches)(FAR char *name, FAR int *matches, int namelen);
++  CODE FAR const char *(*getname)(int index);
++};
++#endif
++
+ /****************************************************************************
+  * Public Data
+  ****************************************************************************/
+@@ -66,6 +84,23 @@ extern "C"
+ int cle_fd(FAR char *line, FAR const char *prompt, uint16_t linelen,
+            int infd, int outfd);
+ 
++/****************************************************************************
++ * Name: cle_extmatch
++ *
++ * Description:
++ *   Register a vtable that lets TAB completion see a shell's own commands, in
++ *   addition to the registered builtin applications.
++ *
++ * Returned Value:
++ *   The previously registered vtable (NULL if none).
++ *
++ ****************************************************************************/
++
++#ifdef CONFIG_SYSTEM_CLE_TABCOMPLETION
++FAR const struct cle_extmatch_vtable_s *
++  cle_extmatch(FAR const struct cle_extmatch_vtable_s *vtbl);
++#endif
++
+ #ifdef CONFIG_FILE_STREAM
+ int cle(FAR char *line, FAR const char *prompt, uint16_t linelen,
+         FAR FILE *instream, FAR FILE *outstream);
+diff --git a/nshlib/nsh.h b/nshlib/nsh.h
+index 8ea334d..f97796d 100644
+--- a/nshlib/nsh.h
++++ b/nshlib/nsh.h
+@@ -1259,8 +1259,9 @@ int cmd_wait(FAR struct nsh_vtbl_s *vtbl, int argc, FAR char **argv);
+  *
+  ****************************************************************************/
+ 
+-#if defined(CONFIG_NSH_READLINE) && defined(CONFIG_READLINE_TABCOMPLETION) && \
+-    defined(CONFIG_READLINE_HAVE_EXTMATCH)
++#if (defined(CONFIG_NSH_READLINE) && defined(CONFIG_READLINE_TABCOMPLETION) && \
++     defined(CONFIG_READLINE_HAVE_EXTMATCH)) || \
++    (defined(CONFIG_NSH_CLE) && defined(CONFIG_SYSTEM_CLE_TABCOMPLETION))
+ int nsh_extmatch_count(FAR char *name, FAR int *matches, int namelen);
+ #endif
+ 
+@@ -1280,8 +1281,9 @@ int nsh_extmatch_count(FAR char *name, FAR int *matches, int namelen);
+  *
+  ****************************************************************************/
+ 
+-#if defined(CONFIG_NSH_READLINE) && defined(CONFIG_READLINE_TABCOMPLETION) && \
+-    defined(CONFIG_READLINE_HAVE_EXTMATCH)
++#if (defined(CONFIG_NSH_READLINE) && defined(CONFIG_READLINE_TABCOMPLETION) && \
++     defined(CONFIG_READLINE_HAVE_EXTMATCH)) || \
++    (defined(CONFIG_NSH_CLE) && defined(CONFIG_SYSTEM_CLE_TABCOMPLETION))
+ FAR const char *nsh_extmatch_getname(int index);
+ #endif
+ 
+diff --git a/nshlib/nsh_command.c b/nshlib/nsh_command.c
+index ec3f8a3..0a4c7bb 100644
+--- a/nshlib/nsh_command.c
++++ b/nshlib/nsh_command.c
+@@ -1322,8 +1322,20 @@ int nsh_command(FAR struct nsh_vtbl_s *vtbl, int argc, FAR char *argv[])
+  *
+  ****************************************************************************/
+ 
+-#if defined(CONFIG_NSH_READLINE) && defined(CONFIG_READLINE_TABCOMPLETION) && \
+-    defined(CONFIG_READLINE_HAVE_EXTMATCH)
++#if (defined(CONFIG_NSH_READLINE) && defined(CONFIG_READLINE_TABCOMPLETION) && \
++     defined(CONFIG_READLINE_HAVE_EXTMATCH)) || \
++    (defined(CONFIG_NSH_CLE) && defined(CONFIG_SYSTEM_CLE_TABCOMPLETION))
++
++/* The cap on how many matches the editor's array can hold. The two editors name
++ * it differently, so pick whichever one is actually in use.
++ */
++
++#if defined(CONFIG_NSH_CLE) && defined(CONFIG_SYSTEM_CLE_TABCOMPLETION)
++#  define NSH_MAX_EXTCMDS CONFIG_SYSTEM_CLE_MAX_EXTCMDS
++#else
++#  define NSH_MAX_EXTCMDS CONFIG_READLINE_MAX_EXTCMDS
++#endif
++
+ int nsh_extmatch_count(FAR char *name, FAR int *matches, int namelen)
+ {
+   int nr_matches = 0;
+@@ -1336,7 +1348,7 @@ int nsh_extmatch_count(FAR char *name, FAR int *matches, int namelen)
+           matches[nr_matches] = i;
+           nr_matches++;
+ 
+-          if (nr_matches >= CONFIG_READLINE_MAX_EXTCMDS)
++          if (nr_matches >= NSH_MAX_EXTCMDS)
+             {
+               break;
+             }
+@@ -1363,8 +1375,9 @@ int nsh_extmatch_count(FAR char *name, FAR int *matches, int namelen)
+  *
+  ****************************************************************************/
+ 
+-#if defined(CONFIG_NSH_READLINE) && defined(CONFIG_READLINE_TABCOMPLETION) && \
+-    defined(CONFIG_READLINE_HAVE_EXTMATCH)
++#if (defined(CONFIG_NSH_READLINE) && defined(CONFIG_READLINE_TABCOMPLETION) && \
++     defined(CONFIG_READLINE_HAVE_EXTMATCH)) || \
++    (defined(CONFIG_NSH_CLE) && defined(CONFIG_SYSTEM_CLE_TABCOMPLETION))
+ FAR const char *nsh_extmatch_getname(int index)
+ {
+   DEBUGASSERT(index > 0 && index <= (int)NUM_CMDS);
+diff --git a/nshlib/nsh_init.c b/nshlib/nsh_init.c
+index 4846ff1..bf99da6 100644
+--- a/nshlib/nsh_init.c
++++ b/nshlib/nsh_init.c
+@@ -30,6 +30,10 @@
+ #include <nuttx/symtab.h>
+ 
+ #include "system/readline.h"
++
++#ifdef CONFIG_SYSTEM_CLE_TABCOMPLETION
++#  include "system/cle.h"
++#endif
+ #include "nshlib/nshlib.h"
+ 
+ #include "nsh.h"
+@@ -78,6 +82,18 @@ static const struct extmatch_vtable_s g_nsh_extmatch =
+ };
+ #endif
+ 
++#if defined(CONFIG_NSH_CLE) && defined(CONFIG_SYSTEM_CLE_TABCOMPLETION)
++/* The same command list, offered to CLE's tab completion. Without this, TAB
++ * would only complete the builtin apps and not NSH's own ls/ps/cat.
++ */
++
++static const struct cle_extmatch_vtable_s g_nsh_cle_extmatch =
++{
++  nsh_extmatch_count,  /* count_matches */
++  nsh_extmatch_getname /* getname */
++};
++#endif
++
+ #if defined(CONFIG_NSH_SYMTAB)
+ extern const struct symtab_s CONFIG_NSH_SYMTAB_ARRAYNAME[];
+ extern const int CONFIG_NSH_SYMTAB_COUNTNAME;
+@@ -128,6 +144,12 @@ void nsh_initialize(void)
+ #  endif
+ #endif
+ 
++#if defined(CONFIG_NSH_CLE) && defined(CONFIG_SYSTEM_CLE_TABCOMPLETION)
++  /* Set up for tab completion on NSH commands */
++
++  cle_extmatch(&g_nsh_cle_extmatch);
++#endif
++
+ #ifdef CONFIG_NSH_USBDEV_TRACE
+   /* Initialize any USB tracing options that were requested */
+ 
+diff --git a/system/cle/Kconfig b/system/cle/Kconfig
+index 12b89c5..0a7c61b 100644
+--- a/system/cle/Kconfig
++++ b/system/cle/Kconfig
+@@ -27,6 +27,34 @@ config SYSTEM_COLOR_CLE
+ 	---help---
+ 		Adds some simple color highlighting into the CLE.
+ 
++config SYSTEM_CLE_TABCOMPLETION
++	bool "Tab completion"
++	default n
++	---help---
++		Enable TAB completion of command names.
++
++		Completes the registered builtin applications, and - if the shell
++		registers a vtable with cle_extmatch() - the shell's own commands too.
++		NSH does register one, so `ls`, `ps` and friends complete as well as
++		the apps.
++
++if SYSTEM_CLE_TABCOMPLETION
++
++config SYSTEM_CLE_MAX_BUILTINS
++	int "Maximum number of builtin matches"
++	default 64
++	---help---
++		The most builtin applications that can match a single TAB. Beyond
++		this the list is truncated.
++
++config SYSTEM_CLE_MAX_EXTCMDS
++	int "Maximum number of external (shell) matches"
++	default 64
++	---help---
++		The most shell commands that can match a single TAB.
++
++endif # SYSTEM_CLE_TABCOMPLETION
++
+ config SYSTEM_CLE_CMD_HISTORY
+ 	bool "Command line history"
+ 	default n
+diff --git a/system/cle/cle.c b/system/cle/cle.c
+index 21b4428..f3f5c83 100644
+--- a/system/cle/cle.c
++++ b/system/cle/cle.c
+@@ -42,6 +42,10 @@
+ #include <nuttx/ascii.h>
+ #include <nuttx/vt100.h>
+ 
++#ifdef CONFIG_SYSTEM_CLE_TABCOMPLETION
++#  include <nuttx/lib/builtin.h>
++#endif
++
+ #include "system/cle.h"
+ 
+ /****************************************************************************
+@@ -156,6 +160,14 @@ static int      cle_editloop(FAR struct cle_s *priv);
+  ****************************************************************************/
+ 
+ #ifdef CONFIG_SYSTEM_CLE_CMD_HISTORY
++#ifdef CONFIG_SYSTEM_CLE_TABCOMPLETION
++/* A shell's own commands, if it registered them (NSH does). Builtin apps are
++ * found without this; NSH's ls/ps/cat are not.
++ */
++
++static FAR const struct cle_extmatch_vtable_s *g_extmatch_vtbl = NULL;
++#endif
++
+ /* Command history
+  *
+  *   g_cmd_history[][]             Circular buffer
+@@ -675,6 +687,225 @@ static void cle_insertch(FAR struct cle_s *priv, char ch)
+  *
+  ****************************************************************************/
+ 
++#ifdef CONFIG_SYSTEM_CLE_TABCOMPLETION
++
++/****************************************************************************
++ * Name: cle_appendtext
++ *
++ * Description:
++ *   Append a string at the cursor, as if it had been typed.
++ *
++ ****************************************************************************/
++
++static void cle_appendtext(FAR struct cle_s *priv, FAR const char *text)
++{
++  for (; *text != '\0'; text++)
++    {
++      cle_insertch(priv, *text);
++    }
++}
++
++/****************************************************************************
++ * Name: cle_countbuiltins
++ *
++ * Description:
++ *   Count the registered builtin applications whose names begin with the
++ *   first namelen characters of buf, recording their indices.
++ *
++ ****************************************************************************/
++
++static int cle_countbuiltins(FAR char *buf, FAR int *matches, int namelen)
++{
++#ifdef CONFIG_BUILTIN
++  FAR const char *name;
++  int nmatches = 0;
++  int i;
++
++  for (i = 0; (name = builtin_getname(i)) != NULL; i++)
++    {
++      if (strncmp(buf, name, namelen) == 0)
++        {
++          matches[nmatches++] = i;
++
++          if (nmatches >= CONFIG_SYSTEM_CLE_MAX_BUILTINS)
++            {
++              break;
++            }
++        }
++    }
++
++  return nmatches;
++#else
++  return 0;
++#endif
++}
++
++/****************************************************************************
++ * Name: cle_matchname
++ *
++ * Description:
++ *   The name of the i'th match, counting builtins first and then the shell's
++ *   own commands.
++ *
++ ****************************************************************************/
++
++static FAR const char *cle_matchname(int i, int nbuiltin,
++                                     FAR const int *builtins,
++                                     FAR const int *extcmds)
++{
++#ifdef CONFIG_BUILTIN
++  if (i < nbuiltin)
++    {
++      return builtin_getname(builtins[i]);
++    }
++#endif
++
++  if (g_extmatch_vtbl != NULL)
++    {
++      return g_extmatch_vtbl->getname(extcmds[i - nbuiltin]);
++    }
++
++  return NULL;
++}
++
++/****************************************************************************
++ * Name: cle_tabcompletion
++ *
++ * Description:
++ *   Complete the command name at the cursor.
++ *
++ *   One match completes it outright. Several are listed, and the line is
++ *   extended by however much they all agree on - so a TAB is never wasted even
++ *   when it cannot finish the job.
++ *
++ ****************************************************************************/
++
++static void cle_tabcompletion(FAR struct cle_s *priv)
++{
++  int builtins[CONFIG_SYSTEM_CLE_MAX_BUILTINS];
++  int extcmds[CONFIG_SYSTEM_CLE_MAX_EXTCMDS];
++  FAR const char *name;
++  int nbuiltin = 0;
++  int nextcmd  = 0;
++  int nmatches;
++  int len = priv->nchars;
++  int common;
++  int i;
++
++  /* Only the command is completed, and only when the cursor is at the end of
++   * it. Anything past a space is an argument, and we have no idea how to
++   * complete those - inserting a command name there would be worse than doing
++   * nothing.
++   */
++
++  if (len < 1 || priv->curpos != priv->nchars)
++    {
++      return;
++    }
++
++  for (i = 0; i < len; i++)
++    {
++      if (isspace((int)priv->line[i]))
++        {
++          return;
++        }
++    }
++
++  nbuiltin = cle_countbuiltins(priv->line, builtins, len);
++  nmatches = nbuiltin;
++
++  if (g_extmatch_vtbl != NULL)
++    {
++      nextcmd = g_extmatch_vtbl->count_matches(priv->line, extcmds, len);
++      nmatches += nextcmd;
++    }
++
++  if (nmatches < 1)
++    {
++      CLE_BEL(priv);
++      return;
++    }
++
++  /* How much of the completion do ALL the matches agree on? For one match that
++   * is the whole name; for several it is their common prefix, which is exactly
++   * how far we can safely type ahead for the user.
++   */
++
++  name   = cle_matchname(0, nbuiltin, builtins, extcmds);
++  common = name != NULL ? strlen(name) : 0;
++
++  for (i = 1; i < nmatches; i++)
++    {
++      FAR const char *other = cle_matchname(i, nbuiltin, builtins, extcmds);
++      int j;
++
++      if (other == NULL)
++        {
++          continue;
++        }
++
++      for (j = 0; j < common; j++)
++        {
++          if (name[j] != other[j])
++            {
++              break;
++            }
++        }
++
++      common = j;
++    }
++
++  /* More than one match: show them, on their own line, then put the prompt and
++   * the line back. realpos has to be told the cursor is sitting just after the
++   * prompt again, or the redraw will position itself against a stale column.
++   */
++
++  if (nmatches > 1)
++    {
++      cle_putch(priv, '\n');
++
++      for (i = 0; i < nmatches; i++)
++        {
++          FAR const char *match =
++            cle_matchname(i, nbuiltin, builtins, extcmds);
++
++          if (match != NULL)
++            {
++              cle_write(priv, match, strlen(match));
++              cle_putch(priv, ' ');
++              cle_putch(priv, ' ');
++            }
++        }
++
++      cle_putch(priv, '\n');
++      cle_outputprompt(priv);
++      priv->realpos = priv->coloffs;
++    }
++
++  /* Type in whatever the matches agreed on. With a single match that finishes
++   * the command; with several it advances as far as it can.
++   */
++
++  if (common > len && name != NULL)
++    {
++      cle_appendtext(priv, name + len);
++
++      /* An unambiguous command gets a space, so the next word can just be
++       * typed.
++       */
++
++      if (nmatches == 1)
++        {
++          cle_insertch(priv, ' ');
++        }
++    }
++  else if (nmatches == 1)
++    {
++      cle_insertch(priv, ' ');
++    }
++}
++#endif /* CONFIG_SYSTEM_CLE_TABCOMPLETION */
++
+ static int cle_editloop(FAR struct cle_s *priv)
+ {
+   /* Loop while we are in command mode */
+@@ -1001,6 +1232,14 @@ static int cle_editloop(FAR struct cle_s *priv)
+           }
+           break;
+ 
++#ifdef CONFIG_SYSTEM_CLE_TABCOMPLETION
++        case ASCII_TAB: /* Complete the command name */
++          {
++            cle_tabcompletion(priv);
++          }
++          break;
++#endif
++
+         /* Text to insert or unimplemented/invalid keypresses */
+ 
+         default:
+@@ -1152,3 +1391,18 @@ int cle(FAR char *line, FAR const char *prompt, uint16_t linelen,
+   return cle_fd(line, prompt, linelen, instream_fd, outstream_fd);
+ }
+ #endif
++
++/****************************************************************************
++ * Name: cle_extmatch
++ ****************************************************************************/
++
++#ifdef CONFIG_SYSTEM_CLE_TABCOMPLETION
++FAR const struct cle_extmatch_vtable_s *
++  cle_extmatch(FAR const struct cle_extmatch_vtable_s *vtbl)
++{
++  FAR const struct cle_extmatch_vtable_s *oldvtbl = g_extmatch_vtbl;
++
++  g_extmatch_vtbl = vtbl;
++  return oldvtbl;
++}
++#endif

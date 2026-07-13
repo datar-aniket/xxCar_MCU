@@ -99,25 +99,26 @@ CONFIG_NSH_ARCHINIT=y
 CONFIG_NSH_BUILTIN_APPS=y
 CONFIG_NSH_CONSOLE=y
 CONFIG_NSH_FILEIOSIZE=512
-CONFIG_NSH_READLINE=y
-
-# Shell line editing.
+# Shell line editor: CLE, not readline.
 #
-# TAB completes builtin and NSH command names (NSH registers the extra matcher
-# in nsh_init.c, which is why READLINE_HAVE_EXTMATCH matters - without it TAB
-# would only complete the apps, not `ls`/`ps`/`cat`).
+# readline cannot move the cursor. It decodes exactly two escape sequences, 'A'
+# and 'B' (up/down for history), and swallows the rest - so LEFT/RIGHT/HOME/END
+# do nothing and fixing a typo means retyping the line. CLE decodes the full
+# VT100 set (left, right, home, end, delete) and has its own history.
 #
-# UP/DOWN walk the command history. The escape bytes reach readline intact even
-# with driver ECHO on, because the driver's echo path skips escape sequences
-# rather than printing them as garbage (serial.c: `if (ch == ASCII_ESC)`).
+# What CLE lacks upstream is TAB completion; patches/nuttx-apps/0001 adds it,
+# reusing the command list NSH already exposes to readline, so TAB completes
+# NSH's own ls/ps/cat as well as the apps.
 #
-# LEFT/RIGHT cursor movement inside a line is NOT available: NuttX's readline
-# simply does not implement it (readline_common.c decodes only 'A' and 'B').
-# That needs the other editor, CONFIG_NSH_CLE - see the note in apps/serial.
-CONFIG_READLINE_TABCOMPLETION=y
-CONFIG_READLINE_CMD_HISTORY=y
-CONFIG_READLINE_CMD_HISTORY_LEN=64
-CONFIG_READLINE_CMD_HISTORY_LINELEN=200
+# CLE redraws the whole line itself on every keypress, so the DRIVER must not
+# also echo or every character would appear twice. apps/serial and apps/init
+# both clear ECHO before handing a port to a shell.
+CONFIG_NSH_CLE=y
+CONFIG_SYSTEM_CLE=y
+CONFIG_SYSTEM_CLE_TABCOMPLETION=y
+CONFIG_SYSTEM_CLE_CMD_HISTORY=y
+CONFIG_SYSTEM_CLE_CMD_HISTORY_LEN=64
+CONFIG_SYSTEM_CLE_CMD_HISTORY_LINELEN=200
 CONFIG_PREALLOC_TIMERS=4
 CONFIG_RAMLOG=y
 CONFIG_RAMLOG_BUFSIZE=8192
