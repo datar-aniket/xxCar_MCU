@@ -7,7 +7,18 @@
  *
  *   ser status            what each connector is set to, and what it maps to
  *   ser start             apply the SER_* parameters now
- *   ser nsh <port>        open a shell on a port right now (does not persist)
+ *   ser nsh <port|dev>    open a shell right now (does not persist). Takes a
+ *                         port name or a device path:
+ *                           ser nsh USB
+ *                           ser nsh /dev/ttyACM0
+ *                           ser nsh TELEM2
+ *
+ * The USB port only exists while a host is attached, so a shell on it waits for
+ * the cable and re-arms when it is pulled.
+ *
+ * TELEM1 always keeps a shell whatever the parameters say - NSH is the init
+ * entrypoint and owns /dev/console. So a params.txt with every port disabled
+ * still boots normally and still lets you in.
  *
  * Moving the shell permanently is a parameter change like any other:
  *
@@ -50,7 +61,9 @@ static void serial_usage(void)
   printf("Usage: ser <command>\n"
          "  status           show what each connector is set to\n"
          "  start            apply the SER_* parameters now\n"
-         "  nsh <port>       open a shell on a port now (not persistent)\n"
+         "  nsh <port|dev>   open a shell now, not persistent. Takes a port\n"
+         "                   name or a device: 'ser nsh USB', 'ser nsh TELEM2',\n"
+         "                   'ser nsh /dev/ttyACM0'\n"
          "\n"
          "To move the shell permanently:\n"
          "  param set SER_TEL2_FUNC 1   (0=off 1=NSH 2=MAVLink 3=GPS 4=RC)\n"
@@ -64,18 +77,33 @@ static int serial_do_status(void)
   int n = serial_port_count();
   int i;
 
-  printf("%-8s %-11s %-8s %-8s %-9s %s\n",
-         "PORT", "DEVICE", "UART", "FUNCTION", "BAUD", "");
+  printf("%-8s %-13s %-8s %-8s %-9s %s\n",
+         "PORT", "DEVICE", "BUS", "FUNCTION", "BAUD", "");
 
   for (i = 0; i < n; i++)
     {
       int32_t func = param_i32(ports[i].func_param);
-      int32_t baud = param_i32(ports[i].baud_param);
+      char baud[12];
 
-      printf("%-8s %-11s %-8s %-8s %-9" PRId32 " %s\n",
+      /* USB has no baud: the host owns the line coding and the device ignores
+       * it. Printing a number there would just be a lie.
+       */
+
+      if (ports[i].baud_param != NULL)
+        {
+          snprintf(baud, sizeof(baud), "%" PRId32,
+                   param_i32(ports[i].baud_param));
+        }
+      else
+        {
+          strlcpy(baud, "host", sizeof(baud));
+        }
+
+      printf("%-8s %-13s %-8s %-8s %-9s %s\n",
              ports[i].name, ports[i].devpath, ports[i].uart,
              serial_funcname(func), baud,
-             ports[i].is_console ? "(syslog console)" : "");
+             ports[i].is_console ? "(syslog console)" :
+             ports[i].removable  ? "(needs a host attached)" : "");
     }
 
   /* These two are not assignable, and saying so is more useful than leaving
@@ -114,26 +142,58 @@ int main(int argc, FAR char *argv[])
 
   if (strcmp(argv[1], "nsh") == 0 && argc == 3)
     {
-      int port = serial_find(argv[2]);
       int ret;
 
-      if (port < 0)
-        {
-          fprintf(stderr, "ser: unknown port '%s'\n", argv[2]);
-          fprintf(stderr, "  try: ser status\n");
-          return 1;
-        }
+      /* Accept either a connector name ("USB", "telem2") or a raw device path
+       * ("/dev/ttyACM0"), because both are natural things to type.
+       */
 
-      ret = serial_start_nsh(port);
-      if (ret < 0)
+      if (argv[2][0] == '/')
         {
-          fprintf(stderr, "ser: cannot start NSH on %s: %d\n", argv[2], ret);
-          return 1;
-        }
+          /* A USB CDC port does not exist until a host attaches, so a shell on
+           * one has to wait for the cable rather than fail. Nothing else on this
+           * board is removable, so recognising ACM is enough.
+           */
 
-      printf("ser: NSH started on %s (%s)\n",
-             serial_ports()[port].name, serial_ports()[port].devpath);
-      return 0;
+          bool removable = (strstr(argv[2], "ACM") != NULL);
+
+          ret = serial_start_nsh_dev(argv[2], removable);
+          if (ret < 0)
+            {
+              fprintf(stderr, "ser: cannot start NSH on %s: %d\n",
+                      argv[2], ret);
+              return 1;
+            }
+
+          printf("ser: NSH started on %s%s\n", argv[2],
+                 removable ? " (waits for a host to attach)" : "");
+          return 0;
+        }
+      else
+        {
+          int port = serial_find(argv[2]);
+
+          if (port < 0)
+            {
+              fprintf(stderr, "ser: unknown port '%s'\n", argv[2]);
+              fprintf(stderr, "  try: ser status\n");
+              return 1;
+            }
+
+          ret = serial_start_nsh(port);
+          if (ret < 0)
+            {
+              fprintf(stderr, "ser: cannot start NSH on %s: %d\n",
+                      argv[2], ret);
+              return 1;
+            }
+
+          printf("ser: NSH started on %s (%s)%s\n",
+                 serial_ports()[port].name, serial_ports()[port].devpath,
+                 serial_ports()[port].removable ?
+                   " (waits for a host to attach)" : "");
+          return 0;
+        }
     }
 
   serial_usage();

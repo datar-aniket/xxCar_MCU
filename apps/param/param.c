@@ -73,6 +73,14 @@ static const struct param_def_s g_params[] =
   { "SER_DBG_BAUD",  PARAM_TYPE_INT32, I32(115200), I32(1200), I32(3000000),
     "FMU DEBUG baud rate" },
 
+  /* The USB CDC/ACM port. No baud: the host owns the line coding on a USB
+   * serial port and the device ignores it, so there is nothing to configure.
+   * NSH by default - plug a cable in and you get a shell.
+   */
+
+  { "SER_USB_FUNC",  PARAM_TYPE_INT32, I32(SER_FUNC_NSH), I32(0), I32(4),
+    "USB (/dev/ttyACM0) function - no baud, the host sets it" },
+
   /* ---- RC input ---------------------------------------------------------
    * RC_PROT applies only to a receiver wired to an FMU UART (SER_*_FUNC=4).
    * A receiver in the RC IN connector is decoded by PX4IO, which works out the
