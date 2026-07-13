@@ -118,6 +118,7 @@ static bool g_nsh_running[SERIAL_NPORTS];
 static int serial_nsh_task(int argc, FAR char *argv[])
 {
   FAR const char *devpath;
+  struct termios tio;
   bool removable;
   bool waiting = false;
   int fd;
@@ -164,6 +165,33 @@ static int serial_nsh_task(int argc, FAR char *argv[])
         }
 
       waiting = false;
+
+      /* Make the port behave like a terminal.
+       *
+       * NuttX applies these translations in uart_register() ONLY to the console
+       * device (`if (dev->isconsole)`). Every other tty is left raw, and a raw
+       * tty makes a shell almost unusable:
+       *
+       *   ICRNL  - a terminal's Enter key sends CR (0x0D). Readline ends a line
+       *            on '\n' and nothing else (readline_common.c), so without
+       *            CR->LF the line never completes and the shell simply never
+       *            answers. This is why `echo ps > /dev/ttyACM0` worked (echo
+       *            sends LF) while pressing Enter in picocom did nothing.
+       *
+       *   ONLCR  - the shell emits bare '\n'. Without LF->CRLF the cursor never
+       *            returns to column 0, so output walks diagonally down the
+       *            screen.
+       *
+       * Nothing else is touched: readline does its own echo and line editing, so
+       * ECHO/ICANON are deliberately left off.
+       */
+
+      if (tcgetattr(fd, &tio) == 0)
+        {
+          tio.c_iflag |= ICRNL;
+          tio.c_oflag |= OPOST | ONLCR;
+          tcsetattr(fd, TCSANOW, &tio);
+        }
 
       /* Point the standard streams at this port. NSH reads fd 0 and writes fd 1
        * directly (nsh_console.c: read(INFD)/write(OUTFD) with INFD=STDIN_FILENO,
