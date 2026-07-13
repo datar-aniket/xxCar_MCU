@@ -1,0 +1,9 @@
+############################################################################
+# apps/init/Make.defs
+#
+# SPDX-License-Identifier: Apache-2.0
+############################################################################
+
+ifneq ($(CONFIG_XXCAR_INIT),)
+CONFIGURED_APPS += $(APPDIR)/xxcar/init
+endif

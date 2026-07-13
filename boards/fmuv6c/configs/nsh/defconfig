@@ -56,7 +56,19 @@ CONFIG_I2C=y
 CONFIG_I2C_DRIVER=y
 CONFIG_I2CTOOL_MAXBUS=4
 CONFIG_IDLETHREAD_STACKSIZE=3072
-CONFIG_INIT_ENTRYPOINT="nsh_main"
+# The init task is ours, not NuttX's nsh_main.
+#
+# nsh_main unconditionally takes /dev/console and runs a shell on it, which made
+# TELEM1's shell impossible to turn off: assign TELEM1 to MAVLink and you got
+# MAVLink AND a shell fighting over the same UART. apps/init runs the console
+# shell only if the console's port is actually set to NSH (SER_TEL1_FUNC).
+#
+# The symbol is <PROGNAME>_main, exactly as "nsh" yields nsh_main.
+#
+# Board init is unaffected: it runs from board_late_initialize() -> stm32_bringup(),
+# driven by the OS regardless of which task is init (board_app_initialize() is
+# already a no-op under CONFIG_BOARD_LATE_INITIALIZE).
+CONFIG_INIT_ENTRYPOINT="xxcar_init_main"
 
 # Stack for the NSH console task. Raised from the 2048 default because `ps`
 # OVERFLOWED IT and reset the board with no crash dump.
@@ -272,6 +284,7 @@ CONFIG_XXCAR_PARAM=y
 CONFIG_XXCAR_PX4IO=y
 CONFIG_XXCAR_RC_IN=y
 CONFIG_XXCAR_SERIAL=y
+CONFIG_XXCAR_INIT=y
 
 # SPI1 DMA for the IMU bus. Polled H7 SPI does a CSTART/CSUSP handshake PER BYTE
 # (real CPU on every byte of an IMU burst); DMA turns a burst into one hardware

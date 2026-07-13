@@ -1,0 +1,41 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config XXCAR_INIT
+	tristate "xxcar_init: the init task (replaces nsh_main)"
+	default n
+	depends on NSH_CONSOLE
+	---help---
+		The CONFIG_INIT_ENTRYPOINT task.
+
+		It exists so that the console's shell is a decision rather than a given.
+		nsh_main unconditionally takes /dev/console and runs a shell on it, which
+		made TELEM1's shell impossible to turn off - assign TELEM1 to MAVLink and
+		you got MAVLink and a shell fighting over the same UART.
+
+		Here, the console shell runs only if the console's port is set to NSH
+		(SER_TEL1_FUNC). Everything on every other port is already started by the
+		serial manager during board bring-up.
+
+		Set CONFIG_INIT_ENTRYPOINT="xxcar_init_main" to use it.
+
+if XXCAR_INIT
+
+config XXCAR_INIT_PROGNAME
+	string "Program name"
+	default "xxcar_init"
+
+config XXCAR_INIT_PRIORITY
+	int "init task priority"
+	default 100
+
+config XXCAR_INIT_STACKSIZE
+	int "init task stack size"
+	default 4096
+	---help---
+		This task becomes the console shell, so it needs an NSH-sized stack.
+		`ps` measures NSH using ~2136 bytes; 2048 overflowed and reset the board.
+
+endif

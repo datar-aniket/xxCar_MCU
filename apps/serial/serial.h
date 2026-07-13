@@ -10,12 +10,15 @@
  * nothing) and its baud rate are just values in params.txt, editable from a
  * Linux host over USB mass storage.
  *
- * NSH is one function among several, and it can run on several ports at once -
- * including the USB CDC/ACM port. TELEM1 keeps a shell regardless of what the
- * parameters say, because NSH is the init entrypoint and owns /dev/console:
- * other ports ADD shells, they do not take that one away. That is deliberate -
- * a text file on a removable card must never be able to leave the board with no
- * way in.
+ * NSH is one function among several. It can run on any port, on several at once,
+ * or on the USB CDC/ACM port - and assigning TELEM1 something else means no shell
+ * is started there, which was the point.
+ *
+ * If NO port asks for a shell, one is put on the FMU DEBUG connector anyway.
+ * params.txt is a text file on a removable card that people hand-edit, so it
+ * must not be able to leave the board with no way in. DEBUG is the right place
+ * for that: always present (unlike USB, which needs a cable) and the port you
+ * would reach for when something has gone wrong.
  *
  * The RC IN connector is NOT in this list. On the 6C it belongs to the PX4IO
  * co-processor, not the FMU (see apps/px4io/), so it is not a port whose
@@ -110,5 +113,14 @@ int serial_start_nsh_dev(FAR const char *devpath, bool removable);
  */
 
 int serial_manager_start(void);
+
+/* Did the console's port (TELEM1) ask for a shell?
+ *
+ * The init task owns /dev/console, so it - not the manager - is what actually
+ * runs the console shell. It calls this to decide whether to. Only meaningful
+ * after serial_manager_start().
+ */
+
+bool serial_console_wants_nsh(void);
 
 #endif /* __APPS_SERIAL_SERIAL_H */

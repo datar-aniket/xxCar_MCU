@@ -35,6 +35,13 @@
                                  */
 #define SERIAL_NSH_PRIO   SCHED_PRIORITY_DEFAULT
 
+/* Where the shell goes when no port asked for one. The FMU DEBUG connector: it
+ * is on every board, always present (USB needs a cable), and it is the port you
+ * reach for when something is wrong.
+ */
+
+#define SERIAL_RESCUE_PORT "DEBUG"
+
 /****************************************************************************
  * Private Data
  ****************************************************************************/
@@ -69,6 +76,12 @@ static const struct serial_port_s g_ports[] =
 };
 
 #define SERIAL_NPORTS ((int)(sizeof(g_ports) / sizeof(g_ports[0])))
+
+/* Whether the console port asked for a shell. Set by serial_manager_start(),
+ * read by the init task (apps/init), which is what actually owns /dev/console.
+ */
+
+static bool g_console_nsh;
 
 
 /****************************************************************************
@@ -307,15 +320,17 @@ int serial_manager_start(void)
           continue;
         }
 
-      /* The console port already has a shell: NSH is the init entrypoint and it
-       * owns /dev/console. Starting a second one here would give two shells
-       * fighting over the same UART.
+      /* The console port's shell is not started here. The init task IS that
+       * shell (apps/init owns /dev/console), so spawning another would leave two
+       * shells fighting over one UART. Just record that it was asked for; init
+       * reads this back through serial_console_wants_nsh().
        */
 
       if (func == SER_FUNC_NSH && p->is_console)
         {
           syslog(LOG_INFO, "serial: %s (%s) NSH @ %" PRId32 " [boot console]\n",
                  p->name, p->devpath, baud);
+          g_console_nsh = true;
           have_nsh = true;
           continue;
         }
@@ -380,18 +395,56 @@ int serial_manager_start(void)
         }
     }
 
-  /* The boot console (TELEM1) keeps its shell regardless: NSH is the init
-   * entrypoint and owns /dev/console. That is deliberate - params.txt is a text
-   * file on a removable card, edited from a host, and it must never be able to
-   * leave the board with no way in. Other ports ADD shells; they do not take
-   * this one away.
+  /* Nothing asked for a shell. Put one on the FMU DEBUG connector.
+   *
+   * That port exists on every board, is always present (unlike USB, which needs
+   * a cable), and is the connector you would reach for anyway when something has
+   * gone wrong. It is the rescue shell: a params.txt that assigns every port to
+   * a protocol should not leave the board with no way in, and params.txt is a
+   * text file on a removable card that people are meant to hand-edit.
+   *
+   * If DEBUG is itself carrying a function, leave it alone. Stomping a port the
+   * user deliberately configured would be worse than being headless, and they
+   * still have the card and the bootloader.
    */
 
   if (!have_nsh)
     {
-      syslog(LOG_INFO,
-             "serial: no port set to NSH; the boot console still has one\n");
+      int dbg = serial_find(SERIAL_RESCUE_PORT);
+
+      if (dbg >= 0 &&
+          param_i32(g_ports[dbg].func_param) == SER_FUNC_DISABLED)
+        {
+          int32_t dbgbaud = param_i32(g_ports[dbg].baud_param);
+
+          serial_set_baud(g_ports[dbg].devpath, (int)dbgbaud);
+
+          if (serial_start_nsh(dbg) == OK)
+            {
+              syslog(LOG_WARNING,
+                     "serial: no port set to NSH - rescue shell on %s (%s) "
+                     "@ %" PRId32 "\n",
+                     g_ports[dbg].name, g_ports[dbg].devpath, dbgbaud);
+            }
+          else
+            {
+              syslog(LOG_ERR, "serial: rescue shell on %s failed to start\n",
+                     g_ports[dbg].name);
+            }
+        }
+      else
+        {
+          syslog(LOG_WARNING,
+                 "serial: no port set to NSH, and %s is in use - there will be "
+                 "NO shell. Recover by editing params.txt on the card.\n",
+                 SERIAL_RESCUE_PORT);
+        }
     }
 
   return OK;
+}
+
+bool serial_console_wants_nsh(void)
+{
+  return g_console_nsh;
 }
