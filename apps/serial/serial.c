@@ -26,6 +26,10 @@
 #include "serial.h"
 #include "../param/param.h"
 
+#ifdef CONFIG_XXCAR_RC
+#  include "../rc/rc.h"
+#endif
+
 /****************************************************************************
  * Pre-processor Definitions
  ****************************************************************************/
@@ -526,13 +530,37 @@ int serial_manager_start(void)
               }
             break;
 
+          case SER_FUNC_RC_IN:
+#ifdef CONFIG_XXCAR_RC
+            /* The RC driver owns the line settings from here on: SBUS and CRSF
+             * each dictate their own baud, parity, stop bits and polarity, so
+             * SER_*_BAUD means nothing on an RC port and is ignored.
+             */
+
+            ret = rc_start(p->devpath, param_i32("RC_PROT"));
+
+            if (ret < 0 && ret != -ENOTSUP)
+              {
+                syslog(LOG_ERR, "serial: %s: RC failed to start: %d\n",
+                       p->name, ret);
+              }
+            else if (ret == OK)
+              {
+                syslog(LOG_INFO, "serial: %s (%s) RC\n", p->name, p->devpath);
+              }
+#else
+            syslog(LOG_WARNING,
+                   "serial: %s: RC requested but XXCAR_RC is not built in\n",
+                   p->name);
+#endif
+            break;
+
           case SER_FUNC_MAVLINK:
           case SER_FUNC_GPS:
-          case SER_FUNC_RC_IN:
 
-            /* Owners for these arrive with the MAVLink, GPS and direct-UART RC
-             * drivers. The port is configured and reserved; nothing consumes it
-             * yet. Say so plainly rather than pretend it is running.
+            /* Owners for these arrive with the MAVLink and GPS drivers. The
+             * port is configured and reserved; nothing consumes it yet. Say so
+             * plainly rather than pretend it is running.
              */
 
             syslog(LOG_WARNING,

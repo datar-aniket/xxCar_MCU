@@ -315,6 +315,16 @@ CONFIG_XXCAR_PARAM=y
 CONFIG_XXCAR_PX4IO=y
 CONFIG_XXCAR_RC_IN=y
 CONFIG_XXCAR_SERIAL=y
+
+# RC on a plain FMU serial port (SBUS / CRSF), as opposed to the RC IN
+# connector, which belongs to PX4IO.
+#
+# STM32H7_USART_INVERT is not optional here: SBUS is an INVERTED signal, and the
+# only inverter on this board sits in front of PX4IO, on the RC IN line. A
+# receiver wired to TELEM/GPS can therefore only be read using the STM32's own
+# RXINV, which is what the TIOCSINVERT ioctl drives.
+CONFIG_STM32H7_USART_INVERT=y
+CONFIG_XXCAR_RC=y
 CONFIG_XXCAR_INIT=y
 
 # SPI1 DMA for the IMU bus. Polled H7 SPI does a CSTART/CSUSP handshake PER BYTE

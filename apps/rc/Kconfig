@@ -1,0 +1,43 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config XXCAR_RC
+	tristate "rc: RC receiver on an FMU serial port (SBUS / CRSF)"
+	default n
+	depends on SERIAL_TERMIOS && STM32H7_USART_INVERT
+	select XXCAR_RC_IN
+	select XXCAR_SERIAL
+	---help---
+		Decodes an RC receiver wired to a plain FMU serial port (TELEM/GPS),
+		as opposed to the RC IN connector - which belongs to the PX4IO
+		co-processor and is handled by XXCAR_PX4IO.
+
+		SBUS (100000 8E2, inverted) and CRSF/ELRS (420000 8N1) are supported,
+		with autodetection between them. Both publish the same `rc_in` uORB
+		topic as PX4IO does, so consumers do not care which wire RC arrived on.
+
+		Requires STM32H7_USART_INVERT: SBUS is an inverted signal and there is
+		no inverter on the FMU's serial connectors, so the STM32's own RXINV
+		has to do it.
+
+		PPM is not supported here and cannot be: it is a pulse train on a timer
+		capture pin, not a UART protocol. PX4IO decodes PPM from the RC IN
+		connector already.
+
+if XXCAR_RC
+
+config XXCAR_RC_PROGNAME
+	string "Program name"
+	default "rc"
+
+config XXCAR_RC_PRIORITY
+	int "rc task priority"
+	default 100
+
+config XXCAR_RC_STACKSIZE
+	int "rc stack size"
+	default 3072
+
+endif
