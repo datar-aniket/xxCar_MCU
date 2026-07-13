@@ -6,5 +6,6 @@
 #
 
 menu "xxCar Applications"
+source "/home/aniket/xxCar_Nav/src/xxCar_MCU/apps/param/Kconfig"
 source "/home/aniket/xxCar_Nav/src/xxCar_MCU/apps/sdmsc/Kconfig"
 endmenu # xxCar Applications

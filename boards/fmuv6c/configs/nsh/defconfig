@@ -181,6 +181,7 @@ CONFIG_USBMSC_NWRREQS=8
 
 # Our out-of-tree apps (apps/ -> nuttx-apps/xxcar symlink, made by build.sh)
 CONFIG_XXCAR_SDMSC=y
+CONFIG_XXCAR_PARAM=y
 
 # SPI1 DMA for the IMU bus. Polled H7 SPI does a CSTART/CSUSP handshake PER BYTE
 # (real CPU on every byte of an IMU burst); DMA turns a burst into one hardware
