@@ -168,28 +168,36 @@ static int serial_nsh_task(int argc, FAR char *argv[])
 
       /* Make the port behave like a terminal.
        *
-       * NuttX applies these translations in uart_register() ONLY to the console
-       * device (`if (dev->isconsole)`). Every other tty is left raw, and a raw
-       * tty makes a shell almost unusable:
+       * NuttX sets this up in uart_register() under `if (dev->isconsole)` and
+       * nowhere else, so /dev/console gets a working line discipline and every
+       * other tty is left raw. A raw tty makes a shell unusable in three
+       * separate ways, so give a non-console port exactly what the console gets:
        *
-       *   ICRNL  - a terminal's Enter key sends CR (0x0D). Readline ends a line
-       *            on '\n' and nothing else (readline_common.c), so without
-       *            CR->LF the line never completes and the shell simply never
-       *            answers. This is why `echo ps > /dev/ttyACM0` worked (echo
-       *            sends LF) while pressing Enter in picocom did nothing.
+       *   ICRNL  - a terminal's Enter sends CR (0x0D). Readline ends a line on
+       *            '\n' and nothing else (readline_common.c), so without CR->LF
+       *            the line never completes and the shell never answers. This is
+       *            why `echo ps > /dev/ttyACM0` worked - echo sends LF - while
+       *            pressing Enter in a terminal did nothing.
+       *
+       *   ECHO   - the DRIVER is what echoes typed characters (serial.c, under
+       *            `dev->tc_lflag & ECHO`). Readline does not, despite
+       *            CONFIG_READLINE_ECHO: the console shows exactly one echo and
+       *            it has driver ECHO set, while a port without it showed none.
+       *            So this flag is the whole of it - without it you type blind.
        *
        *   ONLCR  - the shell emits bare '\n'. Without LF->CRLF the cursor never
-       *            returns to column 0, so output walks diagonally down the
-       *            screen.
+       *            returns to column 0 and output walks down the screen.
        *
-       * Nothing else is touched: readline does its own echo and line editing, so
-       * ECHO/ICANON are deliberately left off.
+       * ICANON and ISIG come along for the ride, as on the console: ICANON gives
+       * the driver's backspace handling (readline_fd() clears it while reading
+       * anyway), and ISIG is what makes Ctrl-C work.
        */
 
       if (tcgetattr(fd, &tio) == 0)
         {
           tio.c_iflag |= ICRNL;
           tio.c_oflag |= OPOST | ONLCR;
+          tio.c_lflag |= ISIG | ECHO | ICANON;
           tcsetattr(fd, TCSANOW, &tio);
         }
 
