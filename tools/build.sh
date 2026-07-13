@@ -17,6 +17,13 @@ command -v kconfig-tweak >/dev/null 2>&1 || \
 command -v arm-none-eabi-gcc >/dev/null 2>&1 || \
   { echo "error: arm-none-eabi-gcc not found (install the arm-gnu-toolchain, 12.x+ recommended)"; exit 1; }
 
+# Our out-of-tree apps (apps/) are pulled into the NuttX apps tree as a
+# top-level directory. nuttx-apps builds any top-level dir that has a Make.defs
+# (BUILDIRS := $(dir $(wildcard $(APPDIR)/*/Make.defs))), so a symlink is all
+# that is needed. It lives inside the submodule, so recreate it every build.
+echo ">> linking out-of-tree apps (apps/ -> nuttx-apps/xxcar)"
+ln -sfn ../../apps "$REPO/deps/nuttx-apps/xxcar"
+
 echo ">> configuring NuttX (out-of-tree board: boards/fmuv6c:nsh)"
 cd "$NUTTX"
 if [ "${RECONFIGURE:-0}" = "1" ] || [ ! -f .config ]; then

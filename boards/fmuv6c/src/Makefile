@@ -113,9 +113,8 @@ ifeq ($(CONFIG_BOARDCTL_BOOT_IMAGE),y)
 CSRCS += stm32_boot_image.c
 endif
 
-ifeq ($(CONFIG_USBMSC),y)
-CSRCS += stm32_usbmsc.c
-endif
+# Mass storage is provided by the CDC/ACM+MSC composite (stm32_composite.c),
+# not as a standalone USBMSC device, so there is no stm32_usbmsc.c here.
 
 ifeq ($(CONFIG_USBDEV_COMPOSITE),y)
 CSRCS += stm32_composite.c

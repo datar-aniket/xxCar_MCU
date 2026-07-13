@@ -30,6 +30,7 @@
 #include <nuttx/config.h>
 
 #ifndef __ASSEMBLY__
+#  include <stdbool.h>
 #  include <stdint.h>
 #endif
 
@@ -563,6 +564,34 @@ extern "C"
 /****************************************************************************
  * Public Function Prototypes
  ****************************************************************************/
+
+#ifdef CONFIG_USBMSC_COMPOSITE
+
+/****************************************************************************
+ * Name: fmuv6c_msc_export / fmuv6c_msc_release / fmuv6c_msc_is_exported
+ *
+ * Description:
+ *   Hand the microSD to the USB host, or take it back. The CDC/ACM serial
+ *   function of the composite device is unaffected either way - only the
+ *   mass-storage media is toggled.
+ *
+ *   Exactly one side owns the card at a time: export() unmounts /fs/microsd
+ *   locally BEFORE binding the LUN, and release() unbinds the LUN BEFORE
+ *   remounting. Declared here (rather than in the private board header) so
+ *   NSH applications can drive them; this is a flat build, so apps link
+ *   directly against the board code.
+ *
+ * Returned Value:
+ *   OK on success; a negated errno on failure (-ENODEV if USB is not up,
+ *   -EBUSY if something still holds /fs/microsd open).
+ *
+ ****************************************************************************/
+
+int  fmuv6c_msc_export(void);
+int  fmuv6c_msc_release(void);
+bool fmuv6c_msc_is_exported(void);
+
+#endif /* CONFIG_USBMSC_COMPOSITE */
 
 #undef EXTERN
 #if defined(__cplusplus)

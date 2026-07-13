@@ -439,6 +439,25 @@ int stm32_bringup(void)
     }
 #endif /* CONFIG_CDCACM & !CONFIG_CDCACM_CONSOLE */
 
+#ifdef CONFIG_USBDEV_COMPOSITE
+  /* Bring up USB as CDC/ACM only (configid 0). The board keeps the microSD
+   * mounted at /fs/microsd. `sdmsc on` swaps to the CDC+MSC function set to
+   * hand the card to the host (see stm32_composite.c).
+   */
+
+  board_composite_initialize(0);
+
+  if (board_composite_connect(0, 0) == NULL)
+    {
+      syslog(LOG_ERR, "ERROR: Failed to connect USB device\n");
+    }
+  else
+    {
+      syslog(LOG_INFO,
+             "[usb] CDC/ACM up (sdmsc on -> export microSD to host)\n");
+    }
+#endif
+
 #if defined(CONFIG_RNDIS) && !defined(CONFIG_RNDIS_COMPOSITE)
   uint8_t mac[6];
   mac[0] = 0xa0; /* TODO */

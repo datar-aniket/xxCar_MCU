@@ -1,0 +1,65 @@
+# Gen Make.dep automatically
+sdmsc_main.c.home.aniket.xxCar_Nav.src.xxCar_MCU.apps.sdmsc.o: \
+ sdmsc_main.c \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/nuttx/config.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/stdio.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/sys/types.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/nuttx/compiler.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/stdint.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/arch/types.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/arch/inttypes.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/limits.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/arch/limits.h \
+ /usr/lib/gcc/arm-none-eabi/10.3.1/include/stdarg.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/time.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/nuttx/fs/fs.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/nuttx/fs/ioctl.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/stdbool.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/nuttx/serial/tioctl.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/nuttx/fs/uio.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/sys/uio.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/dirent.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/nuttx/atomic.h \
+ /usr/lib/gcc/arm-none-eabi/10.3.1/include/stdatomic.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/nuttx/mutex.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/assert.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/nuttx/semaphore.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/errno.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/semaphore.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/nuttx/queue.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/nuttx/clock.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/sys/timex.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/sys/time.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/sys/select.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/signal.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/string.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/stddef.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/alloca.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/nuttx/lib/math32.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/inttypes.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/strings.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/nuttx/mm/map.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/nuttx/mm/gran.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/nuttx/spawn.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/spawn.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/sched.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/nuttx/irq.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/arch/irq.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/arch/syscall.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/arch/chip/irq.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/arch/stm32h7/stm32h7x3xx_irq.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/arch/armv7-m/irq.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/arch/armv7-m/nvicpri.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/arch/chip/chip.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/nuttx/spinlock_type.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/nuttx/lib/lib.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/nuttx/kmalloc.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/stdlib.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/nuttx/mm/mm.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/nuttx/userspace.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/pthread.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/unistd.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/deps/nuttx/include/malloc.h \
+ /home/aniket/xxCar_Nav/src/xxCar_MCU/boards/fmuv6c/include/board.h
+# No files specified for dependency generation
+# No files specified for dependency generation

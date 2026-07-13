@@ -139,9 +139,48 @@ CONFIG_SCHED_CPULOAD_SYSCLK=y
 CONFIG_SCHED_CPULOAD_TICKSPERSEC=1000
 
 CONFIG_CDCACM=y
-CONFIG_SYSTEM_CDCACM=y
-CONFIG_SYSTEM_CDCACM_DEVMINOR=0
 CONFIG_SERIAL_REMOVABLE=y
+
+# USB = permanent CDC/ACM + Mass Storage composite. The CDC serial data port is
+# always enumerated, so it never disappears. Only the mass-storage MEDIA is
+# toggled at runtime (see boards/fmuv6c/src/stm32_composite.c):
+#
+#   boot      -> SD mounted locally at /fs/microsd; the MSC LUN is left UNBOUND
+#                so the host sees "no medium" and cannot touch the card.
+#   sdmsc on  -> unmount locally, THEN bind the LUN: the host owns the card.
+#   sdmsc off -> unbind the LUN, THEN remount locally.
+#
+# Binding the LUN at composite-connect time (as the reference boards do) would
+# export the card while NuttX still had it mounted - Linux would auto-mount it
+# and both sides would write the same FAT. Exactly one owner at a time.
+#
+# VID/PID are kept at the Stage 1 values so the existing udev rule still binds.
+# SYSTEM_CDCACM (sercon/serdis) is dropped: it calls cdcacm_initialize() for a
+# STANDALONE CDC device, which conflicts with the composite.
+CONFIG_USBDEV_COMPOSITE=y
+CONFIG_COMPOSITE_IAD=y
+CONFIG_CDCACM_COMPOSITE=y
+CONFIG_USBMSC=y
+CONFIG_USBMSC_COMPOSITE=y
+CONFIG_USBMSC_REMOVABLE=y
+CONFIG_COMPOSITE_VENDORID=0x3162
+CONFIG_COMPOSITE_PRODUCTID=0x0053
+CONFIG_COMPOSITE_VENDORSTR="Holybro"
+CONFIG_COMPOSITE_PRODUCTSTR="Pixhawk6C xxCar"
+
+# Mass-storage bulk transfer sizing. These Kconfig values default to 512 only
+# when USBDEV_DUALSPEED is set; our OTG_FS is full-speed only, so they silently
+# fall back to the 64-byte MINIMUM. That dribbles every 512-byte sector through
+# 8 tiny USB requests and bulk copies crawl to ~0 B/s (small directory reads
+# still work, which makes it look like a glitch rather than a config problem).
+# NuttX's own help says the request buffer should be one block-device sector.
+CONFIG_USBMSC_BULKINREQLEN=512
+CONFIG_USBMSC_BULKOUTREQLEN=512
+CONFIG_USBMSC_NRDREQS=8
+CONFIG_USBMSC_NWRREQS=8
+
+# Our out-of-tree apps (apps/ -> nuttx-apps/xxcar symlink, made by build.sh)
+CONFIG_XXCAR_SDMSC=y
 
 # SPI1 DMA for the IMU bus. Polled H7 SPI does a CSTART/CSUSP handshake PER BYTE
 # (real CPU on every byte of an IMU burst); DMA turns a burst into one hardware
