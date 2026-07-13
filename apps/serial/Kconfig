@@ -1,0 +1,38 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config XXCAR_SERIAL
+	tristate "ser: serial port manager"
+	default n
+	depends on SERIAL_TERMIOS && NSH_CONSOLE
+	select XXCAR_PARAM
+	---help---
+		Decides what runs on each FMU serial connector from parameters rather
+		than from the build: function (NSH / MAVLink / GPS / RC / off) and baud
+		rate, per port, editable in params.txt from a Linux host.
+
+		NSH is not special - it is one function among several, and it can be
+		moved off TELEM1 onto any other port, or run on several at once. A shell
+		is always guaranteed to exist, so a bad parameter file cannot lock you
+		out of the board.
+
+		The RC IN connector and the PWM rails are NOT here: on the 6C they belong
+		to the PX4IO co-processor. See XXCAR_PX4IO.
+
+if XXCAR_SERIAL
+
+config XXCAR_SERIAL_PROGNAME
+	string "Program name"
+	default "ser"
+
+config XXCAR_SERIAL_PRIORITY
+	int "ser task priority"
+	default 100
+
+config XXCAR_SERIAL_STACKSIZE
+	int "ser stack size"
+	default 2048
+
+endif

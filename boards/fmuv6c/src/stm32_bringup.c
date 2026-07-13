@@ -77,6 +77,24 @@
 
 #include "stm32_gpio.h"
 
+/* Board bring-up reaches up into the xxCar apps to start the parameter-driven
+ * services. In a flat build these all link into one image, so this is a plain
+ * call; the #ifdefs keep the board buildable with any of them turned off.
+ */
+
+#ifdef CONFIG_XXCAR_SERIAL
+#  include "../../../apps/serial/serial.h"
+#endif
+
+#ifdef CONFIG_XXCAR_PX4IO
+#  include <inttypes.h>
+#  include "../../../apps/px4io/px4io.h"
+#endif
+
+#if defined(CONFIG_XXCAR_SERIAL) || defined(CONFIG_XXCAR_PX4IO)
+#  include "../../../apps/param/param.h"
+#endif
+
 /****************************************************************************
  * Private Functions
  ****************************************************************************/
@@ -565,6 +583,55 @@ int stm32_bringup(void)
   /* Stage 2 - Task 2: register onboard sensors on the uorb framework */
 
   fmuv6c_sensors_initialize();
+#endif
+
+  /* Everything below is parameter-driven, so it has to come after the microSD
+   * mount above: that is where params.txt lives. With no card we fall back to
+   * built-in defaults, which is why a missing card is not fatal.
+   */
+
+#ifdef CONFIG_XXCAR_SERIAL
+  /* Hand each serial connector to whatever SER_*_FUNC says should own it -
+   * including deciding which port runs the shell.
+   */
+
+  serial_manager_start();
+#endif
+
+#ifdef CONFIG_XXCAR_PX4IO
+  /* The PX4IO co-processor owns the RC IN connector and the PWM rails, and it
+   * failsafes those rails if we stop talking to it. Starting the client at boot
+   * is what makes RC available without anyone having to type a command.
+   *
+   * Boards with no IO chip fitted simply fail the probe; that is not an error.
+   */
+
+  if (param_i32("PX4IO_EN") != 0)
+    {
+      ret = px4io_start((int)param_i32("PX4IO_RATE"));
+      if (ret < 0)
+        {
+          syslog(LOG_INFO, "[px4io] not started (%d) - no IO chip fitted?\n",
+                 ret);
+        }
+      else
+        {
+          struct px4io_s io;
+
+          syslog(LOG_INFO, "[px4io] RC + PWM up, %" PRId32 " Hz\n",
+                 param_i32("PX4IO_RATE"));
+
+          /* The PWM frame rate is IO's own timer setting and survives nothing,
+           * so it has to be pushed every boot.
+           */
+
+          if (px4io_open(&io) == OK)
+            {
+              px4io_set_pwm_rate(&io, (uint16_t)param_i32("PX4IO_PWM_HZ"));
+              px4io_close(&io);
+            }
+        }
+    }
 #endif
 
   return OK;

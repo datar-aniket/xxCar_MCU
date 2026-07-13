@@ -1,0 +1,9 @@
+############################################################################
+# apps/serial/Make.defs
+#
+# SPDX-License-Identifier: Apache-2.0
+############################################################################
+
+ifneq ($(CONFIG_XXCAR_SERIAL),)
+CONFIGURED_APPS += $(APPDIR)/xxcar/serial
+endif

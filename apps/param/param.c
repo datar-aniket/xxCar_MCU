@@ -35,33 +35,67 @@
 static const struct param_def_s g_params[] =
 {
   /* ---- Serial ports -----------------------------------------------------
-   * Function: 0=disabled 1=NSH 2=MAVLINK 3=GPS 4=RC_IN.
-   * NSH is not special - it is just a function you assign to a port. TEL1 has
-   * it by default because that is where the console lives today.
+   * One FUNC + one BAUD per FMU connector. Function:
+   *   0=disabled 1=NSH 2=MAVLink 3=GPS 4=RC_IN
+   *
+   * NSH is not special - it is a function you assign to a port like any other,
+   * and it can be moved. TELEM1 has it by default only because that is where
+   * the boot console lives.
+   *
+   * Every connector below is an FMU UART. The RC IN connector is deliberately
+   * absent: on the 6C it is wired to the PX4IO co-processor, not to the FMU, so
+   * it is not a port you can assign a function to - see PX4IO_* below.
+   * USART6 is likewise absent; it IS the link to PX4IO.
    */
 
-  { "SER_TEL1_FUNC", PARAM_TYPE_INT32, I32(SER_FUNC_NSH),     I32(0), I32(4),
+  { "SER_TEL1_FUNC", PARAM_TYPE_INT32, I32(SER_FUNC_NSH),      I32(0), I32(4),
     "TELEM1 function (0=off 1=NSH 2=MAVLink 3=GPS 4=RC)" },
   { "SER_TEL1_BAUD", PARAM_TYPE_INT32, I32(115200), I32(1200), I32(3000000),
     "TELEM1 baud rate" },
-  { "SER_TEL2_FUNC", PARAM_TYPE_INT32, I32(SER_FUNC_MAVLINK), I32(0), I32(4),
+  { "SER_TEL2_FUNC", PARAM_TYPE_INT32, I32(SER_FUNC_DISABLED), I32(0), I32(4),
     "TELEM2 function" },
   { "SER_TEL2_BAUD", PARAM_TYPE_INT32, I32(57600),  I32(1200), I32(3000000),
     "TELEM2 baud rate" },
+  { "SER_TEL3_FUNC", PARAM_TYPE_INT32, I32(SER_FUNC_DISABLED), I32(0), I32(4),
+    "TELEM3 function" },
+  { "SER_TEL3_BAUD", PARAM_TYPE_INT32, I32(57600),  I32(1200), I32(3000000),
+    "TELEM3 baud rate" },
   { "SER_GPS1_FUNC", PARAM_TYPE_INT32, I32(SER_FUNC_DISABLED), I32(0), I32(4),
     "GPS1 function" },
   { "SER_GPS1_BAUD", PARAM_TYPE_INT32, I32(38400),  I32(1200), I32(3000000),
     "GPS1 baud rate" },
-  { "SER_RC_FUNC",   PARAM_TYPE_INT32, I32(SER_FUNC_RC_IN), I32(0), I32(4),
-    "RC port function" },
+  { "SER_GPS2_FUNC", PARAM_TYPE_INT32, I32(SER_FUNC_DISABLED), I32(0), I32(4),
+    "GPS2 function" },
+  { "SER_GPS2_BAUD", PARAM_TYPE_INT32, I32(38400),  I32(1200), I32(3000000),
+    "GPS2 baud rate" },
+  { "SER_DBG_FUNC",  PARAM_TYPE_INT32, I32(SER_FUNC_DISABLED), I32(0), I32(4),
+    "FMU DEBUG connector function" },
+  { "SER_DBG_BAUD",  PARAM_TYPE_INT32, I32(115200), I32(1200), I32(3000000),
+    "FMU DEBUG baud rate" },
 
   /* ---- RC input ---------------------------------------------------------
-   * PPM is a pulse train on a timer-capture pin, not a UART protocol, so it
-   * can never be autodetected alongside SBUS/CRSF - select it explicitly.
+   * RC_PROT applies only to a receiver wired to an FMU UART (SER_*_FUNC=4).
+   * A receiver in the RC IN connector is decoded by PX4IO, which works out the
+   * protocol itself and hands over channels - nothing to configure.
+   *
+   * PPM is a pulse train on a timer-capture pin, not a UART protocol, so it can
+   * never be autodetected alongside SBUS/CRSF: select it explicitly.
    */
 
   { "RC_PROT", PARAM_TYPE_INT32, I32(RC_PROT_AUTO), I32(0), I32(3),
-    "RC protocol (0=auto SBUS/CRSF 1=SBUS 2=CRSF/ELRS 3=PPM)" },
+    "RC protocol on an FMU UART (0=auto SBUS/CRSF 1=SBUS 2=CRSF 3=PPM)" },
+
+  /* ---- PX4IO co-processor ------------------------------------------------
+   * Owns the RC IN connector and the 8 PWM servo rails. Not all FMUv6C boards
+   * are fitted with the chip, so this is allowed to fail harmlessly.
+   */
+
+  { "PX4IO_EN",   PARAM_TYPE_INT32, I32(1), I32(0), I32(1),
+    "Start the PX4IO client at boot (RC in + PWM out)" },
+  { "PX4IO_RATE", PARAM_TYPE_INT32, I32(50), I32(5), I32(400),
+    "PX4IO setpoint refresh rate (Hz)" },
+  { "PX4IO_PWM_HZ", PARAM_TYPE_INT32, I32(50), I32(25), I32(400),
+    "PWM frame rate the servos see (50=analog, 333/400=digital)" },
 
   /* ---- MAVLink ---------------------------------------------------------- */
 
