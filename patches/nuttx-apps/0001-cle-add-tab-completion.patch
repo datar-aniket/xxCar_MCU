@@ -214,7 +214,7 @@ index 12b89c5..0a7c61b 100644
  	bool "Command line history"
  	default n
 diff --git a/system/cle/cle.c b/system/cle/cle.c
-index 21b4428..f3f5c83 100644
+index 21b4428..e68770b 100644
 --- a/system/cle/cle.c
 +++ b/system/cle/cle.c
 @@ -42,6 +42,10 @@
@@ -469,7 +469,32 @@ index 21b4428..f3f5c83 100644
  static int cle_editloop(FAR struct cle_s *priv)
  {
    /* Loop while we are in command mode */
-@@ -1001,6 +1232,14 @@ static int cle_editloop(FAR struct cle_s *priv)
+@@ -993,6 +1224,24 @@ static int cle_editloop(FAR struct cle_s *priv)
+ 
+         case '\n': /* LF terminates line */
+           {
++            /* Move the terminal cursor to the end of what was typed and start a
++             * new line there.
++             *
++             * Upstream left this to the driver's ECHO, which emits the newline
++             * as it echoes it. But CLE cannot run with driver ECHO on - it
++             * redraws the whole line itself on every keypress, so a driver that
++             * also echoed would put every character on the screen twice. With
++             * ECHO off, nothing else takes the cursor off this line: the next
++             * prompt would be printed wherever this line happened to end, and
++             * cle_fd() would then compute every cursor move against a coloffs
++             * that assumes the prompt starts at column 0.
++             *
++             * ONLCR turns this '\n' into CR LF on the way out.
++             */
++
++            cle_setcursor(priv, priv->nchars);
++            cle_putch(priv, '\n');
++
+             /* Add the newline to the buffer at the end of the line */
+ 
+             priv->curpos = priv->nchars;
+@@ -1001,6 +1250,14 @@ static int cle_editloop(FAR struct cle_s *priv)
            }
            break;
  
@@ -484,7 +509,7 @@ index 21b4428..f3f5c83 100644
          /* Text to insert or unimplemented/invalid keypresses */
  
          default:
-@@ -1152,3 +1391,18 @@ int cle(FAR char *line, FAR const char *prompt, uint16_t linelen,
+@@ -1152,3 +1409,18 @@ int cle(FAR char *line, FAR const char *prompt, uint16_t linelen,
    return cle_fd(line, prompt, linelen, instream_fd, outstream_fd);
  }
  #endif
