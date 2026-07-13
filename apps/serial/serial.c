@@ -166,38 +166,49 @@ static int serial_nsh_task(int argc, FAR char *argv[])
 
       waiting = false;
 
-      /* Make the port behave like a terminal.
+      /* Give the port a terminal line discipline.
        *
-       * NuttX sets this up in uart_register() under `if (dev->isconsole)` and
-       * nowhere else, so /dev/console gets a working line discipline and every
-       * other tty is left raw. A raw tty makes a shell unusable in three
-       * separate ways, so give a non-console port exactly what the console gets:
+       * NuttX does this in uart_register() under `if (dev->isconsole)` and
+       * nowhere else, so /dev/console works and every other tty is left raw.
+       * That is the whole reason a shell on TELEM1 behaves and a shell anywhere
+       * else does not. What a raw tty costs, and what fixes it:
        *
        *   ICRNL  - a terminal's Enter sends CR (0x0D). Readline ends a line on
        *            '\n' and nothing else (readline_common.c), so without CR->LF
-       *            the line never completes and the shell never answers. This is
-       *            why `echo ps > /dev/ttyACM0` worked - echo sends LF - while
-       *            pressing Enter in a terminal did nothing.
+       *            the line never completes and the shell simply never answers.
+       *            This is why `echo ps > /dev/ttyACM0` worked (echo sends LF)
+       *            while pressing Enter in a terminal did nothing.
        *
-       *   ECHO   - the DRIVER is what echoes typed characters (serial.c, under
-       *            `dev->tc_lflag & ECHO`). Readline does not, despite
-       *            CONFIG_READLINE_ECHO: the console shows exactly one echo and
-       *            it has driver ECHO set, while a port without it showed none.
-       *            So this flag is the whole of it - without it you type blind.
+       *   ECHO   - the DRIVER echoes typed characters (serial.c, `tc_lflag &
+       *            ECHO`), not readline - despite CONFIG_READLINE_ECHO being
+       *            set. Without it you type blind. Note the driver's echo path
+       *            emits '\r' before '\n' by itself, so the newline echo does
+       *            not depend on ONLCR.
        *
-       *   ONLCR  - the shell emits bare '\n'. Without LF->CRLF the cursor never
-       *            returns to column 0 and output walks down the screen.
+       *   ONLCR  - the shell's *output* is bare '\n'. Without LF->CRLF the
+       *            cursor never returns to column 0 and output walks down the
+       *            screen.
        *
-       * ICANON and ISIG come along for the ride, as on the console: ICANON gives
-       * the driver's backspace handling (readline_fd() clears it while reading
-       * anyway), and ISIG is what makes Ctrl-C work.
+       *   ISIG   - Ctrl-C. Independent of everything else (uart_check_special).
+       *
+       * ICANON is deliberately NOT set, even though the console has it.
+       *
+       * It changes what a read means: with ICANON, uart_read refuses to return
+       * partial data and blocks until it sees '\n' (serial.c, `recvd > 0 &&
+       * !(dev->tc_lflag & ICANON)`). Readline reads one byte at a time and is
+       * supposed to dodge that by clearing ICANON itself - but readline_fd()
+       * only does so `if (isatty(infd))`, so it is a dependency, and setting
+       * ICANON here broke Enter all over again. Nothing wants it: the echo and
+       * the CR/LF mapping above are all independent of it, and readline does its
+       * own line editing.
        */
 
       if (tcgetattr(fd, &tio) == 0)
         {
           tio.c_iflag |= ICRNL;
           tio.c_oflag |= OPOST | ONLCR;
-          tio.c_lflag |= ISIG | ECHO | ICANON;
+          tio.c_lflag |= ISIG | ECHO;
+          tio.c_lflag &= ~ICANON;
           tcsetattr(fd, TCSANOW, &tio);
         }
 
