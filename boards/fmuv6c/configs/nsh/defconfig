@@ -298,7 +298,19 @@ CONFIG_USBMSC_NRDREQS=8
 CONFIG_USBMSC_NWRREQS=8
 
 # Our out-of-tree apps (apps/ -> nuttx-apps/xxcar symlink, made by build.sh)
+# Pipes, and NSH's use of them.
+#
+# Without CONFIG_PIPES, `dmesg | grep serial` does not fail so much as get
+# misread: NSH never sees a pipeline, so `|` and `grep` are passed to dmesg as
+# arguments and it complains about too many of them. NSH builds the pipeline
+# with pipe2() and hands the ends to nsh_execute() as fd_in/fd_out, which works
+# for its own internal commands and for builtin apps alike.
+CONFIG_PIPES=y
+CONFIG_NSH_PIPELINE=y
+
 CONFIG_XXCAR_SDMSC=y
+CONFIG_XXCAR_GREP=y
+CONFIG_XXCAR_CLEAR=y
 CONFIG_XXCAR_PARAM=y
 CONFIG_XXCAR_PX4IO=y
 CONFIG_XXCAR_RC_IN=y

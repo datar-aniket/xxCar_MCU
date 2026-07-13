@@ -1,0 +1,9 @@
+############################################################################
+# apps/grep/Make.defs
+#
+# SPDX-License-Identifier: Apache-2.0
+############################################################################
+
+ifneq ($(CONFIG_XXCAR_GREP),)
+CONFIGURED_APPS += $(APPDIR)/xxcar/grep
+endif

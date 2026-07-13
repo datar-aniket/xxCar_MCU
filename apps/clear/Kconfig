@@ -1,0 +1,28 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config XXCAR_CLEAR
+	tristate "clear: clear the terminal"
+	default n
+	---help---
+		Erase the screen and put the cursor back at the top-left, with the
+		VT100 sequences. Writes to stdout, so it clears whichever terminal
+		the shell happens to be on.
+
+if XXCAR_CLEAR
+
+config XXCAR_CLEAR_PROGNAME
+	string "Program name"
+	default "clear"
+
+config XXCAR_CLEAR_PRIORITY
+	int "clear task priority"
+	default 100
+
+config XXCAR_CLEAR_STACKSIZE
+	int "clear stack size"
+	default 1024
+
+endif
