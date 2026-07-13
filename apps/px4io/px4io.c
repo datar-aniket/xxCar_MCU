@@ -69,6 +69,14 @@
 
 #define PX4IO_RETRIES      3
 
+/* How often the daemon must write PAGE_DIRECT_PWM even when the setpoint has not
+ * changed, purely to keep IO believing the FMU exists. IO gives up after
+ * PX4IO_FMU_DROP_LIMIT_US (500 ms), so 100 ms leaves a 5x margin - enough to ride
+ * out a few failed exchanges without the rails dropping to failsafe.
+ */
+
+#define PX4IO_KEEPALIVE_US 100000
+
 /* The daemon nests a fair amount: px4io_reg_read builds two 68-byte IOPackets on
  * the stack, px4io_drain adds a 64-byte scratch buffer, then poll()/read() and a
  * uORB publish go on top. 2048 left very little headroom, and a stack overflow
@@ -822,6 +830,9 @@ int px4io_rc_latest(FAR struct px4io_rc_s *rc)
 static int px4io_daemon(int argc, FAR char *argv[])
 {
   struct px4io_s io;
+  uint16_t sent[PX4IO_SERVO_COUNT];
+  uint64_t last_pwm_us = 0;
+  uint64_t now;
   useconds_t period_us;
   int period_ms;
   int rc_divisor;
@@ -892,32 +903,55 @@ static int px4io_daemon(int argc, FAR char *argv[])
       rc_divisor = 1;
     }
 
+  /* Seed the "last sent" setpoint with a value no real setpoint can take, so the
+   * very first cycle always writes. Leaving it zeroed would make it compare equal
+   * to the initial (zero) setpoint, and the first write - the one that raises
+   * FMU_OK and RAW_PWM - could be skipped.
+   */
+
+  memset(sent, 0xff, sizeof(sent));
+
   while (!g_should_stop)
     {
       struct px4io_rc_s rc;
       uint16_t pwm[PX4IO_SERVO_COUNT];
 
-      /* Send the setpoint, unconditionally, every cycle. This is the heartbeat.
+      /* Push the setpoint to IO when it has changed, and otherwise at least
+       * every PX4IO_KEEPALIVE_US, because writing PAGE_DIRECT_PWM is the ONLY
+       * thing that tells IO the FMU is still alive.
        *
-       * Writing PAGE_DIRECT_PWM is the ONLY thing that tells IO the FMU is still
-       * alive: it is the one and only place IO stamps fmu_data_received_time
-       * (px4iofirmware/registers.c), and register *reads* do not count. Go quiet
-       * for FMU_INPUT_DROP_LIMIT_US (500 ms) and IO clears FMU_OK and drops the
-       * rails to failsafe. The same write is also what raises RAW_PWM, which is
-       * the other half of what arms the outputs.
+       * That write is the one and only place IO stamps fmu_data_received_time
+       * (px4iofirmware/registers.c); register *reads* do not count. Go quiet for
+       * FMU_INPUT_DROP_LIMIT_US (500 ms) and IO clears FMU_OK and drops the rails
+       * to failsafe. The same write is also what raises RAW_PWM, the other half
+       * of what arms the outputs. So it happens even when nobody has asked for a
+       * servo position: g_pwm starts zeroed, and zero on this page means "emit no
+       * pulses", so an idle daemon announces itself without driving anything.
        *
-       * So this write happens even when nobody has asked for a servo position
-       * yet. g_pwm starts zeroed, and zero on this page means "emit no pulses on
-       * that channel" - so an idle daemon announces itself to IO without driving
-       * anything. Gating the write on "has a setpoint" is what left FMU_OK and
-       * RAW_PWM clear on the bench.
+       * But it does NOT have to happen every cycle. Re-sending an unchanged
+       * setpoint at 333 Hz is pure waste - IO only needs to hear from us twice a
+       * second. Sending on change (so steering is still applied at the full loop
+       * rate the moment it moves) plus a slow keepalive keeps an idle daemon
+       * nearly free, instead of burning CPU to tell IO the same thing 333 times a
+       * second.
        */
 
       pthread_mutex_lock(&g_lock);
       memcpy(pwm, g_pwm, sizeof(pwm));
       pthread_mutex_unlock(&g_lock);
 
-      px4io_reg_write(&io, PX4IO_PAGE_DIRECT_PWM, 0, pwm, PX4IO_SERVO_COUNT);
+      now = px4io_now_us();
+
+      if (memcmp(pwm, sent, sizeof(pwm)) != 0 ||
+          (now - last_pwm_us) >= PX4IO_KEEPALIVE_US)
+        {
+          if (px4io_reg_write(&io, PX4IO_PAGE_DIRECT_PWM, 0,
+                              pwm, PX4IO_SERVO_COUNT) == OK)
+            {
+              memcpy(sent, pwm, sizeof(sent));
+              last_pwm_us = now;
+            }
+        }
 
       if (++cycle >= rc_divisor)
         {

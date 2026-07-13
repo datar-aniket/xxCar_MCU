@@ -363,7 +363,12 @@ int ms5611_register(FAR struct i2c_master_s *i2c, int devno, uint8_t addr)
   snprintf(arg1, sizeof(arg1), "%p", dev);
   argv[0] = arg1;
   argv[1] = NULL;
-  ret = kthread_create("ms5611", SCHED_PRIORITY_DEFAULT, 1024,
+  /* 2048, not 1024: with CONFIG_STACK_COLORATION on, `ps` showed this thread at
+   * 62.8% of a 1024-byte stack - ~360 bytes of headroom, and a stack overflow
+   * here would take the board down with no crash dump. Matches the IMU threads.
+   */
+
+  ret = kthread_create("ms5611", SCHED_PRIORITY_DEFAULT, 2048,
                        ms5611_thread, argv);
   if (ret < 0)
     {
