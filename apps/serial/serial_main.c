@@ -35,6 +35,7 @@
 #include <string.h>
 #include <inttypes.h>
 #include <errno.h>
+#include <strings.h>
 
 #include "serial.h"
 #include "../param/param.h"
@@ -148,13 +149,55 @@ int main(int argc, FAR char *argv[])
        * ("/dev/ttyACM0"), because both are natural things to type.
        */
 
+      FAR const struct serial_port_s *ports = serial_ports();
+      int port = -1;
+      int i;
+
+      /* Resolve a connector name ("USB", "telem2") OR a device path
+       * ("/dev/ttyACM0") to the same port, so that either spelling goes through
+       * the one-shell-per-port guard. Two shells on one tty split the input
+       * between them and the port stops responding.
+       */
+
+      for (i = 0; i < serial_port_count(); i++)
+        {
+          if (strcasecmp(ports[i].name, argv[2]) == 0 ||
+              strcmp(ports[i].devpath, argv[2]) == 0)
+            {
+              port = i;
+              break;
+            }
+        }
+
+      if (port >= 0)
+        {
+          ret = serial_start_nsh(port);
+
+          if (ret == -EALREADY)
+            {
+              fprintf(stderr, "ser: %s already has a shell\n", ports[port].name);
+              return 1;
+            }
+
+          if (ret < 0)
+            {
+              fprintf(stderr, "ser: cannot start NSH on %s: %d\n",
+                      argv[2], ret);
+              return 1;
+            }
+
+          printf("ser: NSH started on %s (%s)%s\n",
+                 ports[port].name, ports[port].devpath,
+                 ports[port].removable ? " (waits for a host to attach)" : "");
+          return 0;
+        }
+
+      /* Not one of ours - but a device path is still allowed, so a shell can be
+       * put on anything that behaves like a tty.
+       */
+
       if (argv[2][0] == '/')
         {
-          /* A USB CDC port does not exist until a host attaches, so a shell on
-           * one has to wait for the cable rather than fail. Nothing else on this
-           * board is removable, so recognising ACM is enough.
-           */
-
           bool removable = (strstr(argv[2], "ACM") != NULL);
 
           ret = serial_start_nsh_dev(argv[2], removable);
@@ -169,31 +212,10 @@ int main(int argc, FAR char *argv[])
                  removable ? " (waits for a host to attach)" : "");
           return 0;
         }
-      else
-        {
-          int port = serial_find(argv[2]);
 
-          if (port < 0)
-            {
-              fprintf(stderr, "ser: unknown port '%s'\n", argv[2]);
-              fprintf(stderr, "  try: ser status\n");
-              return 1;
-            }
-
-          ret = serial_start_nsh(port);
-          if (ret < 0)
-            {
-              fprintf(stderr, "ser: cannot start NSH on %s: %d\n",
-                      argv[2], ret);
-              return 1;
-            }
-
-          printf("ser: NSH started on %s (%s)%s\n",
-                 serial_ports()[port].name, serial_ports()[port].devpath,
-                 serial_ports()[port].removable ?
-                   " (waits for a host to attach)" : "");
-          return 0;
-        }
+      fprintf(stderr, "ser: unknown port '%s'\n", argv[2]);
+      fprintf(stderr, "  try: ser status\n");
+      return 1;
     }
 
   serial_usage();

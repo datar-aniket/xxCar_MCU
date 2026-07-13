@@ -83,6 +83,16 @@ static const struct serial_port_s g_ports[] =
 
 static bool g_console_nsh;
 
+/* Which ports already have a shell.
+ *
+ * A tty has exactly one useful reader. Put two shells on one port and every
+ * character you type goes to whichever happens to wake first, so neither ever
+ * assembles a whole line and the port looks dead - which is precisely what
+ * running the manager twice used to do.
+ */
+
+static bool g_nsh_running[SERIAL_NPORTS];
+
 
 /****************************************************************************
  * Private Functions
@@ -306,17 +316,35 @@ int serial_start_nsh_dev(FAR const char *devpath, bool removable)
 
 int serial_start_nsh(int port)
 {
+  int ret;
+
   if (port < 0 || port >= SERIAL_NPORTS)
     {
       return -EINVAL;
     }
 
-  return serial_start_nsh_dev(g_ports[port].devpath, g_ports[port].removable);
+  /* One shell per port. Two readers on one tty split the input between them and
+   * the port stops responding.
+   */
+
+  if (g_nsh_running[port])
+    {
+      return -EALREADY;
+    }
+
+  ret = serial_start_nsh_dev(g_ports[port].devpath, g_ports[port].removable);
+  if (ret == OK)
+    {
+      g_nsh_running[port] = true;
+    }
+
+  return ret;
 }
 
 int serial_manager_start(void)
 {
   bool have_nsh = false;
+  int ret;
   int i;
 
   param_init();
@@ -380,7 +408,14 @@ int serial_manager_start(void)
       switch (func)
         {
           case SER_FUNC_NSH:
-            if (serial_start_nsh(i) == OK)
+            ret = serial_start_nsh(i);
+
+            if (ret == -EALREADY)
+              {
+                syslog(LOG_INFO, "serial: %s already has a shell\n", p->name);
+                have_nsh = true;
+              }
+            else if (ret == OK)
               {
                 if (p->removable)
                   {
@@ -398,7 +433,8 @@ int serial_manager_start(void)
               }
             else
               {
-                syslog(LOG_ERR, "serial: %s: NSH failed to start\n", p->name);
+                syslog(LOG_ERR, "serial: %s: NSH failed to start: %d\n",
+                       p->name, ret);
               }
             break;
 
