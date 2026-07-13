@@ -439,6 +439,25 @@ int stm32_bringup(void)
     }
 #endif /* CONFIG_CDCACM & !CONFIG_CDCACM_CONSOLE */
 
+#ifdef CONFIG_USBDEV_COMPOSITE
+  /* Bring up USB as CDC/ACM only (configid 0). The board keeps the microSD
+   * mounted at /fs/microsd. `sdmsc on` swaps to the CDC+MSC function set to
+   * hand the card to the host (see stm32_composite.c).
+   */
+
+  board_composite_initialize(0);
+
+  if (board_composite_connect(0, 0) == NULL)
+    {
+      syslog(LOG_ERR, "ERROR: Failed to connect USB device\n");
+    }
+  else
+    {
+      syslog(LOG_INFO,
+             "[usb] CDC/ACM up (sdmsc on -> export microSD to host)\n");
+    }
+#endif
+
 #if defined(CONFIG_RNDIS) && !defined(CONFIG_RNDIS_COMPOSITE)
   uint8_t mac[6];
   mac[0] = 0xa0; /* TODO */
@@ -458,6 +477,34 @@ int stm32_bringup(void)
     {
       syslog(LOG_ERR, "Failed to initialize SD slot %d: %d\n",
              CONFIG_NSH_MMCSDMINOR, ret);
+    }
+#endif
+
+#ifdef CONFIG_MMCSD_SDIO
+  /* microSD on SDMMC2 -> /dev/mmcsd0, mounted as FAT at /fs/microsd. This is
+   * the store for logs, parameters and config. A missing/unformatted card is
+   * non-fatal: the board still boots, just without persistent storage.
+   */
+
+  ret = stm32_sdio_initialize();
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: microSD (SDMMC2) init failed: %d\n", ret);
+    }
+  else
+    {
+      ret = nx_mount("/dev/mmcsd0", FMUV6C_MICROSD_MOUNTPOINT, "vfat", 0,
+                     NULL);
+      if (ret < 0)
+        {
+          syslog(LOG_ERR, "ERROR: Failed to mount %s: %d (card present?)\n",
+                 FMUV6C_MICROSD_MOUNTPOINT, ret);
+        }
+      else
+        {
+          syslog(LOG_INFO, "[fs] microSD mounted at %s\n",
+                 FMUV6C_MICROSD_MOUNTPOINT);
+        }
     }
 #endif
 
@@ -495,6 +542,24 @@ int stm32_bringup(void)
   /* Initialize the watchdog timer */
 
   stm32_iwdginitialize("/dev/watchdog0", STM32_LSI_FREQUENCY);
+#endif
+
+#ifdef CONFIG_STM32H7_SPI1
+  /* Configure the SPI1 (internal IMU bus) chip-select / DRDY GPIOs */
+
+  stm32_spidev_initialize();
+#endif
+
+#if defined(CONFIG_SPI) && defined(CONFIG_I2C)
+  /* Stage 2 - Task 1: synchronous sensor discovery (logs a PASS/FAIL table) */
+
+  fmuv6c_sensor_probe();
+#endif
+
+#ifdef CONFIG_SENSORS
+  /* Stage 2 - Task 2: register onboard sensors on the uorb framework */
+
+  fmuv6c_sensors_initialize();
 #endif
 
   return OK;

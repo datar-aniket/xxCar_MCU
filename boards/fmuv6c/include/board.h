@@ -30,6 +30,7 @@
 #include <nuttx/config.h>
 
 #ifndef __ASSEMBLY__
+#  include <stdbool.h>
 #  include <stdint.h>
 #endif
 
@@ -282,18 +283,41 @@
 
 /* SDMMC definitions ********************************************************/
 
-/* Init 400kHz, PLL1Q/(2*250) */
-
-#define STM32_SDMMC_INIT_CLKDIV     (250 << STM32_SDMMC_CLKCR_CLKDIV_SHIFT)
-
-/* Just set these to 25 MHz for now,
- * PLL1Q/(2*4), for default speed 12.5MB/s
+/* Clock dividers use PX4's values for this exact board (fmu-v6c): init well
+ * under 400 kHz, transfers at PLL1Q/(2*5). These are more conservative than the
+ * generic template values and are hardware-proven on the 6C.
  */
 
-#define STM32_SDMMC_MMCXFR_CLKDIV   (4 << STM32_SDMMC_CLKCR_CLKDIV_SHIFT)
-#define STM32_SDMMC_SDXFR_CLKDIV    (4 << STM32_SDMMC_CLKCR_CLKDIV_SHIFT)
+#define STM32_SDMMC_INIT_CLKDIV     (300 << STM32_SDMMC_CLKCR_CLKDIV_SHIFT)
+
+#if defined(CONFIG_STM32H7_SDMMC_IDMA)
+#  define STM32_SDMMC_MMCXFR_CLKDIV (5 << STM32_SDMMC_CLKCR_CLKDIV_SHIFT)
+#  define STM32_SDMMC_SDXFR_CLKDIV  (5 << STM32_SDMMC_CLKCR_CLKDIV_SHIFT)
+#else
+#  define STM32_SDMMC_MMCXFR_CLKDIV (100 << STM32_SDMMC_CLKCR_CLKDIV_SHIFT)
+#  define STM32_SDMMC_SDXFR_CLKDIV  (100 << STM32_SDMMC_CLKCR_CLKDIV_SHIFT)
+#endif
 
 #define STM32_SDMMC_CLKCR_EDGE      STM32_SDMMC_CLKCR_NEGEDGE
+
+/* SDMMC2 = the microSD slot. There is no card-detect line on the FMUv6C, so
+ * the board logic reports the card as always present.
+ *
+ *   SDMMC2_CK   PD6     SDMMC2_D0   PB14
+ *   SDMMC2_CMD  PD7     SDMMC2_D1   PB15
+ *                       SDMMC2_D2   PB3
+ *                       SDMMC2_D3   PB4
+ *
+ * With the non-legacy pinmap every SDMMC pin must be selected explicitly here,
+ * even the ones that have only a single option.
+ */
+
+#define GPIO_SDMMC2_CK    GPIO_SDMMC2_CK_1   /* PD6  */
+#define GPIO_SDMMC2_CMD   GPIO_SDMMC2_CMD_1  /* PD7  */
+#define GPIO_SDMMC2_D0    GPIO_SDMMC2_D0_0   /* PB14 */
+#define GPIO_SDMMC2_D1    GPIO_SDMMC2_D1_0   /* PB15 */
+#define GPIO_SDMMC2_D2    GPIO_SDMMC2_D2_2   /* PB3  */
+#define GPIO_SDMMC2_D3    GPIO_SDMMC2_D3_0   /* PB4  */
 
 /* Ethernet definitions *****************************************************/
 
@@ -407,28 +431,35 @@
 #define GPIO_UART7_RX     (GPIO_UART7_RX_3 | GPIO_SPEED_100MHz) /* PE7 */
 #define GPIO_UART7_TX     (GPIO_UART7_TX_3 | GPIO_SPEED_100MHz) /* PE8 */
 
-/* USART6 (Arduino Serial Shield) */
+/* USART6 = FMUv6C link to the PX4IO co-processor (PC6/PC7, AF7). Not used yet. */
 
-#define GPIO_USART6_RX    (GPIO_USART6_RX_2 | GPIO_SPEED_100MHz) /* PG9 */
-#define GPIO_USART6_TX    (GPIO_USART6_TX_2 | GPIO_SPEED_100MHz) /* PG14 */
+#define GPIO_USART6_RX    (GPIO_USART6_RX_1 | GPIO_SPEED_100MHz) /* PC7 */
+#define GPIO_USART6_TX    (GPIO_USART6_TX_1 | GPIO_SPEED_100MHz) /* PC6 */
 
-/* I2C1 Use Nucleo I2C1 pins */
+/* I2C1 - external / expansion bus (PB8/PB7) */
 
-#define GPIO_I2C1_SCL     (GPIO_I2C1_SCL_2 | GPIO_SPEED_50MHz) /* PB8 - D15 */
-#define GPIO_I2C1_SDA     (GPIO_I2C1_SDA_2 | GPIO_SPEED_50MHz) /* PB9 - D14 */
+#define GPIO_I2C1_SCL     (GPIO_I2C1_SCL_2 | GPIO_SPEED_50MHz) /* PB8 */
+#define GPIO_I2C1_SDA     (GPIO_I2C1_SDA_1 | GPIO_SPEED_50MHz) /* PB7 */
 
-/* I2C2 Use Nucleo I2C2 pins */
+/* I2C2 - external I2C connector (PB10/PB11) */
 
-#define GPIO_I2C2_SCL     (GPIO_I2C2_SCL_2  | GPIO_SPEED_50MHz) /* PF1 - D69 */
-#define GPIO_I2C2_SDA     (GPIO_I2C2_SDA_2  | GPIO_SPEED_50MHz) /* PF0 - D68 */
-#define GPIO_I2C2_SMBA    (GPIO_I2C2_SMBA_2 | GPIO_SPEED_50MHz) /* PF2 - D70 */
+#define GPIO_I2C2_SCL     (GPIO_I2C2_SCL_1 | GPIO_SPEED_50MHz) /* PB10 */
+#define GPIO_I2C2_SDA     (GPIO_I2C2_SDA_1 | GPIO_SPEED_50MHz) /* PB11 */
 
-/* SPI3 */
+/* I2C4 - INTERNAL bus: onboard barometer (MS5611) + magnetometer (IST8310)
+ * + calibration EEPROM. This is where Task 1 sensor discovery scans.
+ */
 
-#define GPIO_SPI3_MISO    (GPIO_SPI3_MISO_1 | GPIO_SPEED_50MHz) /* PB4 */
-#define GPIO_SPI3_MOSI    (GPIO_SPI3_MOSI_4 | GPIO_SPEED_50MHz) /* PB5 */
-#define GPIO_SPI3_SCK     (GPIO_SPI3_SCK_1 | GPIO_SPEED_50MHz)  /* PB3 */
-#define GPIO_SPI3_NSS     (GPIO_SPI3_NSS_2 | GPIO_SPEED_50MHz)  /* PA4 */
+#define GPIO_I2C4_SCL     (GPIO_I2C4_SCL_1 | GPIO_SPEED_50MHz) /* PD12 */
+#define GPIO_I2C4_SDA     (GPIO_I2C4_SDA_1 | GPIO_SPEED_50MHz) /* PD13 */
+
+/* SPI1 - INTERNAL sensor bus: ICM-42688-P + BMI088 IMUs (PA5/PA6/PA7).
+ * Chip-select and DRDY GPIOs are in src/fmuv6c.h, driven by stm32_spi.c.
+ */
+
+#define GPIO_SPI1_SCK     (GPIO_SPI1_SCK_1  | GPIO_SPEED_50MHz) /* PA5 */
+#define GPIO_SPI1_MISO    (GPIO_SPI1_MISO_1 | GPIO_SPEED_50MHz) /* PA6 */
+#define GPIO_SPI1_MOSI    (GPIO_SPI1_MOSI_1 | GPIO_SPEED_50MHz) /* PA7 */
 
 /* TIM1 - Advanced Timer 16-bit (4 channels) */
 #define GPIO_TIM1_CH1IN   (GPIO_TIM1_CH1IN_2)   /* PE9  */
@@ -506,6 +537,9 @@
 
 /* DMA **********************************************************************/
 
+#define DMAMAP_SPI1_RX DMAMAP_DMA12_SPI1RX_0 /* DMA1 - internal IMU bus */
+#define DMAMAP_SPI1_TX DMAMAP_DMA12_SPI1TX_0 /* DMA1 - internal IMU bus */
+
 #define DMAMAP_SPI3_RX DMAMAP_DMA12_SPI3RX_0 /* DMA1 */
 #define DMAMAP_SPI3_TX DMAMAP_DMA12_SPI3TX_0 /* DMA1 */
 
@@ -530,6 +564,34 @@ extern "C"
 /****************************************************************************
  * Public Function Prototypes
  ****************************************************************************/
+
+#ifdef CONFIG_USBMSC_COMPOSITE
+
+/****************************************************************************
+ * Name: fmuv6c_msc_export / fmuv6c_msc_release / fmuv6c_msc_is_exported
+ *
+ * Description:
+ *   Hand the microSD to the USB host, or take it back. The CDC/ACM serial
+ *   function of the composite device is unaffected either way - only the
+ *   mass-storage media is toggled.
+ *
+ *   Exactly one side owns the card at a time: export() unmounts /fs/microsd
+ *   locally BEFORE binding the LUN, and release() unbinds the LUN BEFORE
+ *   remounting. Declared here (rather than in the private board header) so
+ *   NSH applications can drive them; this is a flat build, so apps link
+ *   directly against the board code.
+ *
+ * Returned Value:
+ *   OK on success; a negated errno on failure (-ENODEV if USB is not up,
+ *   -EBUSY if something still holds /fs/microsd open).
+ *
+ ****************************************************************************/
+
+int  fmuv6c_msc_export(void);
+int  fmuv6c_msc_release(void);
+bool fmuv6c_msc_is_exported(void);
+
+#endif /* CONFIG_USBMSC_COMPOSITE */
 
 #undef EXTERN
 #if defined(__cplusplus)

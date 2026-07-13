@@ -1,0 +1,30 @@
+diff --git a/drivers/usbdev/cdcacm.c b/drivers/usbdev/cdcacm.c
+index 63f9a5db..5f78376a 100644
+--- a/drivers/usbdev/cdcacm.c
++++ b/drivers/usbdev/cdcacm.c
+@@ -2071,9 +2071,23 @@ static void cdcacm_suspend(FAR struct usbdevclass_driver_s *driver,
+ 
+   priv = ((FAR struct cdcacm_driver_s *)driver)->dev;
+ 
+-  /* And let the "upper half" driver now that we are suspended */
++  UNUSED(priv);
+ 
+-  uart_connected(&priv->serdev, false);
++  /* Do NOT mark the upper-half serial device as disconnected here.
++   *
++   * A USB SUSPEND only means the host stopped sending SOFs (bus idle for
++   * >= 3ms); the device is still attached and still configured.  Calling
++   * uart_connected(dev, false) sets dev->disconnected, which makes every
++   * subsequent uart_open() fail with -ENOTCONN (errno 107) and wedges
++   * /dev/ttyACM0 until a matching RESUME arrives *and* priv->config is
++   * still set (see cdcacm_resume()).  If that resume is missed, the port
++   * never comes back.
++   *
++   * A genuine detach is already handled independently: both
++   * cdcacm_disconnect() and cdcacm_resetconfig() call uart_connected(false)
++   * on their own, so nothing is lost by not conflating suspend with
++   * disconnect here.
++   */
+ }
+ #endif
+ 

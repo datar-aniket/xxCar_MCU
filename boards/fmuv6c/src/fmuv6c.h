@@ -222,6 +222,43 @@
 
 #define NUCLEOH743ZI_PWMTIMER 1
 
+/* SPI1 - internal IMU bus chip-selects (active-low) and DRDY inputs.
+ * Verified against PX4 fmu-v6c and live on the board.
+ *
+ *   ICM-42688-P  : CS PC13, DRDY PE6   (primary IMU)
+ *   BMI088 accel : CS PC15, DRDY PE4
+ *   BMI088 gyro  : CS PC14, DRDY PE5
+ */
+
+#define GPIO_SPI1_CS_ICM42688     (GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_SPEED_50MHz | \
+                                   GPIO_OUTPUT_SET | GPIO_PORTC | GPIO_PIN13)
+#define GPIO_SPI1_CS_BMI088_ACCEL (GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_SPEED_50MHz | \
+                                   GPIO_OUTPUT_SET | GPIO_PORTC | GPIO_PIN15)
+#define GPIO_SPI1_CS_BMI088_GYRO  (GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_SPEED_50MHz | \
+                                   GPIO_OUTPUT_SET | GPIO_PORTC | GPIO_PIN14)
+
+#define GPIO_DRDY_ICM42688        (GPIO_INPUT | GPIO_FLOAT | GPIO_PORTE | GPIO_PIN6)
+#define GPIO_DRDY_BMI088_ACCEL    (GPIO_INPUT | GPIO_FLOAT | GPIO_PORTE | GPIO_PIN4)
+#define GPIO_DRDY_BMI088_GYRO     (GPIO_INPUT | GPIO_FLOAT | GPIO_PORTE | GPIO_PIN5)
+
+/* SPIDEV_ACCELEROMETER(n) indices used by stm32_spi1select() */
+
+#define FMUV6C_SPIDEV_BMI088_ACCEL 0
+#define FMUV6C_SPIDEV_BMI088_GYRO  1
+#define FMUV6C_SPIDEV_ICM42688     0  /* SPIDEV_IMU(0) */
+
+/* I2C bus numbers */
+
+#define FMUV6C_I2C_INTERNAL 4   /* MS5611 baro + IST8310 mag + EEPROM */
+#define FMUV6C_I2C_EXTERNAL 2   /* external I2C connector */
+
+/* microSD (SDMMC2). Single source of truth for the mountpoint: logs, params,
+ * config and the USB mass-storage export all refer to this.
+ */
+
+#define FMUV6C_MICROSD_BLOCKDEV   "/dev/mmcsd0"
+#define FMUV6C_MICROSD_MOUNTPOINT "/fs/microsd"
+
 /****************************************************************************
  * Public Function Prototypes
  ****************************************************************************/
@@ -242,6 +279,28 @@
  ****************************************************************************/
 
 int stm32_bringup(void);
+
+/****************************************************************************
+ * Name: fmuv6c_sensor_probe
+ *
+ * Description:
+ *   Synchronously probe every onboard sensor (SPI1 IMUs + I2C4 baro/mag/EEPROM)
+ *   and log a PASS/FAIL table via syslog. No threads, no uorb, no float.
+ ****************************************************************************/
+
+int fmuv6c_sensor_probe(void);
+
+/****************************************************************************
+ * Name: fmuv6c_sensors_initialize
+ *
+ * Description:
+ *   Register the onboard sensors (starting with MS5611 baro) on the uorb
+ *   framework. Called from board bring-up under CONFIG_SENSORS.
+ ****************************************************************************/
+
+#ifdef CONFIG_SENSORS
+int fmuv6c_sensors_initialize(void);
+#endif
 
 /****************************************************************************
  * Name: stm32_spidev_initialize
@@ -400,6 +459,20 @@ int stm32_progmem_init(void);
 
 #ifdef CONFIG_MMCSD_SPI
 int stm32_mmcsd_initialize(int minor);
+#endif
+
+/****************************************************************************
+ * Name: stm32_sdio_initialize
+ *
+ * Description:
+ *   Initialize the microSD slot on SDMMC2 and bind it to the MMC/SD block
+ *   driver (-> /dev/mmcsd0). The FMUv6C has no card-detect line, so the card
+ *   is reported present unconditionally.
+ *
+ ****************************************************************************/
+
+#ifdef CONFIG_MMCSD_SDIO
+int stm32_sdio_initialize(void);
 #endif
 
 #endif /* __BOARDS_ARM_STM32H7_NUCLEO_H743ZI_SRC_NUCLEO_H743ZI_H */

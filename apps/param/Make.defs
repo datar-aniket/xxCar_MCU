@@ -1,0 +1,9 @@
+############################################################################
+# apps/param/Make.defs
+#
+# SPDX-License-Identifier: Apache-2.0
+############################################################################
+
+ifneq ($(CONFIG_XXCAR_PARAM),)
+CONFIGURED_APPS += $(APPDIR)/xxcar/param
+endif

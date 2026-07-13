@@ -1,0 +1,32 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config XXCAR_PARAM
+	tristate "param: configuration parameter system"
+	default n
+	---help---
+		Typed, bounded, named parameters with defaults, persisted to the
+		microSD as human-readable text (/fs/microsd/params.txt) so they can
+		be edited from a Linux host over USB mass storage.
+
+		Backs the serial port functions (incl. which port runs NSH), RC
+		protocol, sensor rates, MAVLink IDs, logging selection and sensor
+		calibration.
+
+if XXCAR_PARAM
+
+config XXCAR_PARAM_PROGNAME
+	string "Program name"
+	default "param"
+
+config XXCAR_PARAM_PRIORITY
+	int "param task priority"
+	default 100
+
+config XXCAR_PARAM_STACKSIZE
+	int "param stack size"
+	default 4096
+
+endif

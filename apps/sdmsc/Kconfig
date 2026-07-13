@@ -1,0 +1,32 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config XXCAR_SDMSC
+	tristate "sdmsc: export the microSD to the USB host"
+	default n
+	depends on USBMSC_COMPOSITE && MMCSD_SDIO
+	---help---
+		Toggle ownership of the microSD card between the board and the USB
+		host. The CDC/ACM serial port of the composite device is unaffected.
+
+		  sdmsc on     unmount /fs/microsd, export the card to the host
+		  sdmsc off    reclaim the card, remount /fs/microsd
+		  sdmsc status show which side owns the card
+
+if XXCAR_SDMSC
+
+config XXCAR_SDMSC_PROGNAME
+	string "Program name"
+	default "sdmsc"
+
+config XXCAR_SDMSC_PRIORITY
+	int "sdmsc task priority"
+	default 100
+
+config XXCAR_SDMSC_STACKSIZE
+	int "sdmsc stack size"
+	default 2048
+
+endif

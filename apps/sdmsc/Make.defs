@@ -1,0 +1,9 @@
+############################################################################
+# apps/sdmsc/Make.defs
+#
+# SPDX-License-Identifier: Apache-2.0
+############################################################################
+
+ifneq ($(CONFIG_XXCAR_SDMSC),)
+CONFIGURED_APPS += $(APPDIR)/xxcar/sdmsc
+endif

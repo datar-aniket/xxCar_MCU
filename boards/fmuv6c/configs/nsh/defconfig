@@ -1,15 +1,14 @@
 #
-# xxCar_MCU / FMUv6C barebone NuttX config (Stage 1)
+# xxCar_MCU / FMUv6C config (Stage 2 - Task 1: buses + sensor discovery)
 #
 # Console : NSH shell on TELEM1 (UART7, PE7/PE8) @115200 8N1.
-# USB     : CDC-ACM auto-registered at boot as /dev/ttyACM0 (raw data port,
-#           NOT a shell) for the future ROS 2 / DDS / MAVLink link to the Jetson.
-#           Host sees VID 0x3162 / PID 0x0053 -> /dev/pixhawk_6c. Auto-connect is
-#           done in stm32_bringup.c (cdcacm_initialize) since CDCACM is not the
-#           console.
+# Logging : syslog -> BOTH the TELEM1 console (live) AND RAMLOG (/dev/ramlog),
+#           readable after boot with `cat /dev/ramlog` or `dmesg`.
+# Buses   : I2C4 (internal: MS5611+IST8310+EEPROM), I2C2 (external), SPI1 (IMUs).
+# USB     : CDC-ACM raw data port /dev/ttyACM0 (VID 0x3162/PID 0x0053).
+# Float/libc: full float + libc extension set enabled up front.
 #
 # Regenerate after menuconfig with:  make -C deps/nuttx savedefconfig
-# and copy nuttx/defconfig back here.
 #
 # CONFIG_ARCH_BOARD_COMMON is not set
 # CONFIG_NSH_DISABLE_IFCONFIG is not set
@@ -53,9 +52,17 @@ CONFIG_FS_PROCFS=y
 CONFIG_FS_PROCFS_REGISTER=y
 CONFIG_HAVE_CXX=y
 CONFIG_HAVE_CXXINITIALIZE=y
+CONFIG_I2C=y
+CONFIG_I2C_DRIVER=y
+CONFIG_I2CTOOL_MAXBUS=4
 CONFIG_IDLETHREAD_STACKSIZE=3072
 CONFIG_INIT_ENTRYPOINT="nsh_main"
 CONFIG_INTELHEX_BINARY=y
+CONFIG_LIBC_FLOATINGPOINT=y
+CONFIG_LIBC_LONG_LONG=y
+CONFIG_LIBC_NUMBERED_ARGS=y
+CONFIG_LIBC_SCANSET=y
+CONFIG_LIBM=y
 CONFIG_LINE_MAX=64
 CONFIG_MM_REGIONS=4
 CONFIG_NSH_ARCHINIT=y
@@ -64,19 +71,175 @@ CONFIG_NSH_CONSOLE=y
 CONFIG_NSH_FILEIOSIZE=512
 CONFIG_NSH_READLINE=y
 CONFIG_PREALLOC_TIMERS=4
+CONFIG_RAMLOG=y
+CONFIG_RAMLOG_BUFSIZE=8192
+CONFIG_RAMLOG_SYSLOG=y
 CONFIG_RAM_SIZE=245760
 CONFIG_RAM_START=0x20010000
 CONFIG_RAW_BINARY=y
 CONFIG_RR_INTERVAL=200
 CONFIG_SCHED_WAITPID=y
+CONFIG_SENSORS=y
+CONFIG_SPI=y
 CONFIG_START_DAY=6
 CONFIG_START_MONTH=12
 CONFIG_START_YEAR=2011
 CONFIG_STM32H7_HSI48=y
+CONFIG_STM32H7_I2C2=y
+CONFIG_STM32H7_I2C4=y
 CONFIG_STM32H7_OTGFS=y
+CONFIG_STM32H7_SPI1=y
 CONFIG_STM32H7_UART7=y
+CONFIG_SYSLOG_CONSOLE=y
+CONFIG_SYSLOG_MAX_CHANNELS=2
+CONFIG_SYSTEM_DMESG=y
+CONFIG_SYSTEM_I2CTOOL=y
 CONFIG_SYSTEM_NSH=y
 CONFIG_TASK_NAME_SIZE=24
 CONFIG_UART7_BAUD=115200
 CONFIG_UART7_SERIAL_CONSOLE=y
+CONFIG_UORB=y
+CONFIG_UORB_LISTENER=y
+# uorb_listener formats 5-6 %f fields per sample when CONFIG_DEBUG_UORB prints
+# values. NuttX float printf (double->string + buffers) is stack-hungry and the
+# default 2048 (DEFAULT_TASK_STACKSIZE) is marginal: it overflows intermittently
+# and reboots the board with NO assert output (the assert handler needs stack
+# too, so it dies as well). 4096 gives float printf room.
+CONFIG_UORB_STACKSIZE=4096
 CONFIG_USBDEV=y
+CONFIG_USENSOR=y
+CONFIG_DEBUG_UORB=y
+
+CONFIG_ENABLE_ALL_SIGNALS=y
+CONFIG_SIG_DEFAULT=y
+CONFIG_SIG_SIGKILL_ACTION=y
+
+CONFIG_SERIAL=y
+CONFIG_SERIAL_TERMIOS=y
+CONFIG_TTY_SIGINT=y
+CONFIG_TTY_SIGINT_CHAR=0x03
+
+# System tick = 1 kHz (1000 us/tick). Raised from the NuttX default 100 Hz for
+# two reasons: (1) 1 ms usleep granularity for future higher-rate periodic tasks
+# (control loops, polled sensors); (2) it makes the SYSCLK CPU-load sampler 10x
+# finer, shrinking the tick-phase-locking artifact where periodic threads that
+# wake on a tick boundary get over-credited a whole tick of CPU. The H7 @480 MHz
+# handles a 1 kHz tick trivially (PX4 runs the same).
+CONFIG_USEC_PER_TICK=1000
+
+# CPU-load accounting via SYSCLK tick-sampling. TICKSPERSEC MUST equal the system
+# tick rate (1e6/USEC_PER_TICK = 1000 Hz): the sampler re-arms every
+# (TICK_PER_SEC/TICKSPERSEC) ticks, so any value > the tick rate floors that
+# period to 0 -> a 0-tick self-rearming watchdog that spins forever in the timer
+# ISR and HARD-HANGS the board. You cannot sample CPU load faster than the tick.
+# NOTE: even at 1 kHz this remains a sampling estimate, not exact per-thread
+# cycle accounting; treat single-thread % for tick-aligned periodic threads as
+# an upper bound (the DWT/CRITMONITOR alternative faulted at boot on this H7).
+CONFIG_SCHED_CPULOAD_SYSCLK=y
+CONFIG_SCHED_CPULOAD_TICKSPERSEC=1000
+
+CONFIG_CDCACM=y
+CONFIG_SERIAL_REMOVABLE=y
+
+# USB = permanent CDC/ACM + Mass Storage composite. The CDC serial data port is
+# always enumerated, so it never disappears. Only the mass-storage MEDIA is
+# toggled at runtime (see boards/fmuv6c/src/stm32_composite.c):
+#
+#   boot      -> SD mounted locally at /fs/microsd; the MSC LUN is left UNBOUND
+#                so the host sees "no medium" and cannot touch the card.
+#   sdmsc on  -> unmount locally, THEN bind the LUN: the host owns the card.
+#   sdmsc off -> unbind the LUN, THEN remount locally.
+#
+# Binding the LUN at composite-connect time (as the reference boards do) would
+# export the card while NuttX still had it mounted - Linux would auto-mount it
+# and both sides would write the same FAT. Exactly one owner at a time.
+#
+# VID/PID are kept at the Stage 1 values so the existing udev rule still binds.
+# SYSTEM_CDCACM (sercon/serdis) is dropped: it calls cdcacm_initialize() for a
+# STANDALONE CDC device, which conflicts with the composite.
+CONFIG_USBDEV_COMPOSITE=y
+CONFIG_COMPOSITE_IAD=y
+CONFIG_CDCACM_COMPOSITE=y
+CONFIG_USBMSC=y
+CONFIG_USBMSC_COMPOSITE=y
+CONFIG_USBMSC_REMOVABLE=y
+CONFIG_COMPOSITE_VENDORID=0x3162
+CONFIG_COMPOSITE_PRODUCTID=0x0053
+CONFIG_COMPOSITE_VENDORSTR="Holybro"
+CONFIG_COMPOSITE_PRODUCTSTR="Pixhawk6C xxCar"
+
+# Mass-storage bulk transfer sizing. These Kconfig values default to 512 only
+# when USBDEV_DUALSPEED is set; our OTG_FS is full-speed only, so they silently
+# fall back to the 64-byte MINIMUM. That dribbles every 512-byte sector through
+# 8 tiny USB requests and bulk copies crawl to ~0 B/s (small directory reads
+# still work, which makes it look like a glitch rather than a config problem).
+# NuttX's own help says the request buffer should be one block-device sector.
+CONFIG_USBMSC_BULKINREQLEN=512
+CONFIG_USBMSC_BULKOUTREQLEN=512
+CONFIG_USBMSC_NRDREQS=8
+CONFIG_USBMSC_NWRREQS=8
+
+# Our out-of-tree apps (apps/ -> nuttx-apps/xxcar symlink, made by build.sh)
+CONFIG_XXCAR_SDMSC=y
+CONFIG_XXCAR_PARAM=y
+
+# SPI1 DMA for the IMU bus. Polled H7 SPI does a CSTART/CSUSP handshake PER BYTE
+# (real CPU on every byte of an IMU burst); DMA turns a burst into one hardware
+# transfer while the thread sleeps on a completion semaphore (~0% CPU). Required
+# for the ICM-42688-P FIFO+DRDY 2 kHz streaming (watermark reads are hundreds of
+# bytes). The driver bounces through a static AXI-SRAM buffer (.bss is at
+# 0x24000000, DMA-accessible) with cache clean/invalidate, so caller buffers may
+# live anywhere (incl. DTCM). SPI1_DMA selects STM32H7_SPI_DMA and needs a DMA
+# controller enabled; the 512 B bounce buffer covers a full FIFO watermark read.
+CONFIG_STM32H7_DMA1=y
+CONFIG_STM32H7_DMA2=y
+CONFIG_STM32H7_SPI1_DMA=y
+CONFIG_STM32H7_SPI1_DMA_BUFFER=512
+
+# Crash/hang recovery. Two independent layers, because they catch different
+# failures:
+#
+# 1. BOARD_RESET_ON_ASSERT=1 -> reset only on a KERNEL panic: an assert from an
+#    interrupt handler or a kernel thread calls board_reset(). A crash in a
+#    plain user thread does NOT reboot the board - NuttX just kills that thread
+#    and the system keeps running (=2 would reset for user threads too, which
+#    is too aggressive: one bad app shouldn't take the vehicle down).
+#
+# 2. IWDG hardware watchdog -> catches HANGS, where nothing asserts and the
+#    system just stops making progress (e.g. a spin inside the timer ISR). The
+#    IWDG is independent of the main clock and can only be stopped by a reset.
+#    It is auto-fed BY_WORKER (a low-priority work-queue task) rather than from
+#    a timer ISR on purpose: that proves the SCHEDULER is still alive, so a task
+#    spinning and starving the system still trips the watchdog. A 2 s timeout
+#    (fed every 1 s) is far longer than any legitimate stall at our ~8% load.
+#    NOTE: the IWDG runs off the ~32 kHz LSI with a 12-bit reload, so its max
+#    timeout is ~32 s - the 60 s Kconfig default would be unreachable.
+CONFIG_BOARD_RESET_ON_ASSERT=1
+CONFIG_SCHED_LPWORK=y
+CONFIG_STM32H7_IWDG=y
+CONFIG_WATCHDOG_AUTOMONITOR=y
+CONFIG_WATCHDOG_AUTOMONITOR_BY_WORKER=y
+CONFIG_WATCHDOG_AUTOMONITOR_TIMEOUT=2000
+
+# microSD on SDMMC2 (4-bit SDIO, internal DMA) -> /dev/mmcsd0, mounted FAT at
+# /fs/microsd at boot. This is the store for logs, params and config, and the
+# volume exported over USB mass storage. No card-detect line on the FMUv6C, so
+# MMCSD_HAVE_CARDDETECT stays off and the board reports the card present.
+# The SDMMC driver's media-change callback support requires the HIGH-priority
+# work queue specifically (LPWORK alone is not enough).
+CONFIG_SCHED_HPWORK=y
+CONFIG_STM32H7_SDMMC2=y
+CONFIG_STM32H7_SDMMC_IDMA=y
+CONFIG_MMCSD=y
+CONFIG_MMCSD_SDIO=y
+CONFIG_MMCSD_SDIOWAIT_WRCOMPLETE=y
+# This board has an SDIO microSD only: no card-detect, no write-protect, no
+# SPI-attached card and no eMMC. Leaving these Kconfig defaults on would pull in
+# the SPI MMC path (which wants a stm32_mmcsd_initialize() we don't have).
+# CONFIG_MMCSD_SPI is not set
+# CONFIG_MMCSD_HAVE_CARDDETECT is not set
+# CONFIG_MMCSD_HAVE_WRITEPROTECT is not set
+# CONFIG_MMCSD_MMCSUPPORT is not set
+CONFIG_FS_FAT=y
+CONFIG_FAT_LFN=y
+CONFIG_FS_FATTIME=y

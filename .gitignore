@@ -50,8 +50,21 @@ CMakeCache.txt
 cmake_install.cmake
 Makefile
 !/Makefile
+# Our own Makefiles are SOURCE, not generated: the board overlay's src/Makefile
+# carries the CSRCS build list, and each app's Makefile declares its PROGNAME.
+# Without these a clean clone builds neither the drivers nor the apps.
+!/boards/fmuv6c/src/Makefile
+!/apps/Makefile
+!/apps/*/Makefile
 install_manifest.txt
 compile_commands.json
+
+# NuttX build artifacts that land in-tree (apps/ and boards/ get these when the
+# build runs against the symlinked source dirs).
+.built
+.depend
+.kconfig
+Make.dep
 
 # Temporary files
 *.tmp

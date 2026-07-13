@@ -1,0 +1,7 @@
+############################################################################
+# apps/Make.defs  (xxCar out-of-tree applications)
+#
+# SPDX-License-Identifier: Apache-2.0
+############################################################################
+
+include $(wildcard $(APPDIR)/xxcar/*/Make.defs)
