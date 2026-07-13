@@ -109,6 +109,7 @@ static int serial_nsh_task(int argc, FAR char *argv[])
 {
   FAR const char *devpath;
   bool removable;
+  bool waiting = false;
   int fd;
 
   if (argc < 2)
@@ -124,44 +125,72 @@ static int serial_nsh_task(int argc, FAR char *argv[])
       fd = open(devpath, O_RDWR);
       if (fd < 0)
         {
-          if (!removable)
-            {
-              syslog(LOG_ERR, "serial: cannot open %s for NSH: %d\n",
-                     devpath, errno);
-              return EXIT_FAILURE;
-            }
+          int err = errno;
 
-          /* No host attached yet (-ENOTCONN). Keep waiting: the cable may be
-           * plugged in at any time, and a shell that gave up at boot would
-           * never come back.
+          /* ONLY "no host attached" is worth waiting on. Everything else -
+           * a device that does not exist, a driver that is not there - is a
+           * real error, and retrying it forever would hide the problem behind
+           * a task that looks alive but silently does nothing. Which is exactly
+           * what an earlier version of this loop did.
            */
 
-          usleep(250000);
-          continue;
+          if (removable && (err == ENOTCONN || err == ENODEV))
+            {
+              if (!waiting)
+                {
+                  syslog(LOG_INFO,
+                         "serial: NSH on %s waiting for a host to attach\n",
+                         devpath);
+                  waiting = true;
+                }
+
+              usleep(250000);
+              continue;
+            }
+
+          syslog(LOG_ERR, "serial: cannot open %s for NSH: errno %d\n",
+                 devpath, err);
+          return EXIT_FAILURE;
         }
 
-      dup2(fd, 0);
-      dup2(fd, 1);
-      dup2(fd, 2);
+      waiting = false;
+
+      /* Point the standard streams at this port. NSH reads fd 0 and writes fd 1
+       * directly (nsh_console.c: read(INFD)/write(OUTFD) with INFD=STDIN_FILENO,
+       * OUTFD=STDOUT_FILENO), so redirecting the descriptors is all it takes -
+       * NSH itself needs to know nothing about which port it is on.
+       */
+
+      if (dup2(fd, 0) < 0 || dup2(fd, 1) < 0 || dup2(fd, 2) < 0)
+        {
+          syslog(LOG_ERR, "serial: %s: cannot redirect stdio: errno %d\n",
+                 devpath, errno);
+          close(fd);
+          return EXIT_FAILURE;
+        }
 
       if (fd > 2)
         {
           close(fd);
         }
 
-      /* Returns when the port goes away under it - i.e. when the USB cable is
+      syslog(LOG_INFO, "serial: NSH attached to %s\n", devpath);
+
+      /* Returns when the port goes away under it - i.e. when a USB cable is
        * unplugged and reads start failing.
        */
 
       nsh_consolemain(0, NULL);
+
+      syslog(LOG_INFO, "serial: NSH on %s ended\n", devpath);
 
       if (!removable)
         {
           return EXIT_SUCCESS;
         }
 
-      /* Host gone. Settle, then wait for it to come back. The sleep also stops
-       * this becoming a busy loop if the port is openable but immediately
+      /* Host gone. Settle, then wait for it to come back. The sleep also keeps
+       * this from becoming a busy loop if the port opens but is immediately
        * unreadable.
        */
 
