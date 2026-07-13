@@ -181,8 +181,13 @@ int px4io_set_disarmed_pwm(FAR struct px4io_s *io, FAR const uint16_t *values,
  * A background task - not a pthread - because it has to outlive the NSH command
  * that started it, and because it needs its own file descriptor table.
  *
- * It keeps the link alive (without which IO failsafes the rails after 500 ms),
- * refreshes the RC snapshot, and re-sends the current PWM setpoint every cycle.
+ * It refreshes the RC snapshot and re-sends the PWM setpoint every cycle. That
+ * second job is also what keeps the link alive: writing PAGE_DIRECT_PWM is the
+ * only thing IO accepts as proof the FMU still exists, so without this daemon IO
+ * clears FMU_OK after 500 ms and drops the rails to failsafe.
+ *
+ * Returns -EALREADY if a daemon is already running (the rate is not changed;
+ * stop it first).
  ****************************************************************************/
 
 int  px4io_start(int rate_hz);

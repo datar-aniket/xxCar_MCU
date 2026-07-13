@@ -57,6 +57,24 @@ CONFIG_I2C_DRIVER=y
 CONFIG_I2CTOOL_MAXBUS=4
 CONFIG_IDLETHREAD_STACKSIZE=3072
 CONFIG_INIT_ENTRYPOINT="nsh_main"
+
+# Stack for the NSH console task. Raised from the 2048 default because `ps`
+# OVERFLOWED IT and reset the board with no crash dump.
+#
+# `ps` is an NSH *internal* command, so it runs on this stack, not on one of its
+# own. nsh_foreach_direntry() puts a struct dirent on it (d_name alone is
+# NAME_MAX+1 = 256 bytes), ps_record()/ps_output() nest on top, and
+# LIBC_FLOATINGPOINT makes the printf path stack-hungry too. The failure is
+# silent because the assert handler needs stack of its own and has none left -
+# the same signature as the uorb_listener reboot we chased earlier.
+CONFIG_INIT_STACKSIZE=4096
+
+# Paint every stack at creation so NuttX can SEE how deep a task actually went.
+# Without this, `ps` cannot report stack used (only the size), and an overflow is
+# undetectable: it just corrupts memory and the board resets with nothing printed.
+# We have now been bitten by that twice. The cost is a memset per task creation.
+CONFIG_STACK_COLORATION=y
+
 CONFIG_INTELHEX_BINARY=y
 CONFIG_LIBC_FLOATINGPOINT=y
 CONFIG_LIBC_LONG_LONG=y

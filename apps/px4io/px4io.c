@@ -69,7 +69,13 @@
 
 #define PX4IO_RETRIES      3
 
-#define PX4IO_DAEMON_STACK 2048
+/* The daemon nests a fair amount: px4io_reg_read builds two 68-byte IOPackets on
+ * the stack, px4io_drain adds a 64-byte scratch buffer, then poll()/read() and a
+ * uORB publish go on top. 2048 left very little headroom, and a stack overflow
+ * here would be silent (the assert handler needs stack of its own).
+ */
+
+#define PX4IO_DAEMON_STACK 3072
 #define PX4IO_DAEMON_PRIO  (SCHED_PRIORITY_DEFAULT + 10)
 
 /****************************************************************************
@@ -86,12 +92,15 @@ static volatile bool     g_running;
 static volatile bool     g_should_stop;
 static int               g_rate_hz = 50;
 
-/* The PWM setpoint the daemon keeps re-sending. IO failsafes the outputs if the
- * FMU goes quiet for 500ms, so a setpoint has to be refreshed, not just sent.
+/* The PWM setpoint the daemon re-sends every cycle.
+ *
+ * Zero-initialised, and that is a valid state, not an "unset" one: zero on
+ * PAGE_DIRECT_PWM means "emit no pulses on that channel". So the daemon can send
+ * this from the moment it starts - which it must, because that write is IO's only
+ * proof the FMU is alive (see the heartbeat comment in px4io_daemon()).
  */
 
 static uint16_t          g_pwm[PX4IO_SERVO_COUNT];
-static bool              g_pwm_valid;
 
 /* Last RC frame the daemon saw. */
 
@@ -668,7 +677,6 @@ int px4io_set_setpoint(FAR const uint16_t *values, unsigned count)
   pthread_mutex_lock(&g_lock);
   memset(g_pwm, 0, sizeof(g_pwm));
   memcpy(g_pwm, values, count * sizeof(uint16_t));
-  g_pwm_valid = true;
   pthread_mutex_unlock(&g_lock);
 
   return OK;
@@ -888,23 +896,28 @@ static int px4io_daemon(int argc, FAR char *argv[])
     {
       struct px4io_rc_s rc;
       uint16_t pwm[PX4IO_SERVO_COUNT];
-      bool have_pwm;
 
-      /* Re-send the setpoint first: it is what the servos are waiting on, and
-       * writing DIRECT_PWM also raises IO's RAW_PWM status flag, which is the
-       * other half of what keeps the outputs armed.
+      /* Send the setpoint, unconditionally, every cycle. This is the heartbeat.
+       *
+       * Writing PAGE_DIRECT_PWM is the ONLY thing that tells IO the FMU is still
+       * alive: it is the one and only place IO stamps fmu_data_received_time
+       * (px4iofirmware/registers.c), and register *reads* do not count. Go quiet
+       * for FMU_INPUT_DROP_LIMIT_US (500 ms) and IO clears FMU_OK and drops the
+       * rails to failsafe. The same write is also what raises RAW_PWM, which is
+       * the other half of what arms the outputs.
+       *
+       * So this write happens even when nobody has asked for a servo position
+       * yet. g_pwm starts zeroed, and zero on this page means "emit no pulses on
+       * that channel" - so an idle daemon announces itself to IO without driving
+       * anything. Gating the write on "has a setpoint" is what left FMU_OK and
+       * RAW_PWM clear on the bench.
        */
 
       pthread_mutex_lock(&g_lock);
-      have_pwm = g_pwm_valid;
       memcpy(pwm, g_pwm, sizeof(pwm));
       pthread_mutex_unlock(&g_lock);
 
-      if (have_pwm)
-        {
-          px4io_reg_write(&io, PX4IO_PAGE_DIRECT_PWM, 0,
-                          pwm, PX4IO_SERVO_COUNT);
-        }
+      px4io_reg_write(&io, PX4IO_PAGE_DIRECT_PWM, 0, pwm, PX4IO_SERVO_COUNT);
 
       if (++cycle >= rc_divisor)
         {
@@ -955,9 +968,17 @@ int px4io_start(int rate_hz)
   int pid;
   int i;
 
+  /* Report "already running" rather than silently succeeding. The caller asked
+   * for a particular rate, and we are about to not give it to them - saying OK
+   * would let the requested rate and the running rate drift apart unnoticed
+   * (which is exactly what produced a nonsense "50 Hz is not a whole number of
+   * ticks" message on the bench, comparing the request against the rate a
+   * previous start had left behind).
+   */
+
   if (g_running)
     {
-      return OK;
+      return -EALREADY;
     }
 
   /* Must stay comfortably above IO's 500ms failsafe timeout at the bottom, and

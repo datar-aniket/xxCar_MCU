@@ -201,6 +201,14 @@ int main(int argc, FAR char *argv[])
       int actual;
 
       ret = px4io_start(rate);
+
+      if (ret == -EALREADY)
+        {
+          printf("px4io: already running at %d Hz\n", px4io_daemon_rate());
+          printf("  'px4io stop' first to change the rate.\n");
+          return 0;
+        }
+
       if (ret < 0)
         {
           fprintf(stderr, "px4io: start failed: %d\n", ret);
@@ -217,7 +225,7 @@ int main(int argc, FAR char *argv[])
       /* The 1 kHz system tick can only express whole-millisecond periods, so
        * some rates simply do not exist. Say so rather than let the number the
        * user typed and the rate the loop actually runs at drift apart in
-       * silence.
+       * silence. Only meaningful when we really did just start the daemon.
        */
 
       if (actual != rate)

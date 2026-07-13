@@ -32,6 +32,6 @@ config XXCAR_PX4IO_PRIORITY
 
 config XXCAR_PX4IO_STACKSIZE
 	int "px4io stack size"
-	default 2048
+	default 3072
 
 endif
