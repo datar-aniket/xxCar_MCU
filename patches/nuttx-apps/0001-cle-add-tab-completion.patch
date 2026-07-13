@@ -214,7 +214,7 @@ index 12b89c5..0a7c61b 100644
  	bool "Command line history"
  	default n
 diff --git a/system/cle/cle.c b/system/cle/cle.c
-index 21b4428..e68770b 100644
+index 21b4428..10311ef 100644
 --- a/system/cle/cle.c
 +++ b/system/cle/cle.c
 @@ -42,6 +42,10 @@
@@ -243,7 +243,40 @@ index 21b4428..e68770b 100644
  /* Command history
   *
   *   g_cmd_history[][]             Circular buffer
-@@ -675,6 +687,225 @@ static void cle_insertch(FAR struct cle_s *priv, char ch)
+@@ -590,13 +602,29 @@ static void cle_showtext(FAR struct cle_s *priv)
+ 
+   cle_cursoroff(priv);
+ 
+-  /* Set the cursor position to the beginning of this row */
++  /* Redraw from a KNOWN state rather than from a remembered one: carriage
++   * return to column 0, clear the line, reprint the prompt.
++   *
++   * Every cursor calculation in this editor is relative to priv->realpos, its
++   * model of where the terminal cursor is - and that model is only as good as
++   * the assumption that nothing else ever writes to the terminal. That
++   * assumption does not hold. VT100_CLEARLINE (ESC[2K) clears a line without
++   * homing the cursor, command output need not end on a newline, and on a
++   * console shared with syslog a log line can land in the middle of an edit.
++   * Any of those leaves realpos describing a column the cursor is not at, and
++   * from then on the redraw walks the line sideways - the prompt gets
++   * overwritten, or the text marches off to the right.
++   *
++   * Re-establishing the origin costs a few bytes per keypress and cannot drift.
++   */
+ 
+ #ifdef CONFIG_SYSTEM_COLOR_CLE
+   cle_setcolor(priv, COLOR_COMMAND);
+ #endif
+-  cle_setcursor(priv, 0);
+-  cle_clrtoeol(priv);
++  cle_putch(priv, '\r');
++  cle_clrtoeol(priv);          /* from column 0, this clears the whole line */
++  cle_outputprompt(priv);
++  priv->realpos = priv->coloffs;
+ 
+   /* Loop for each column */
+ 
+@@ -675,6 +703,227 @@ static void cle_insertch(FAR struct cle_s *priv, char ch)
   *
   ****************************************************************************/
  
@@ -415,9 +448,9 @@ index 21b4428..e68770b 100644
 +      common = j;
 +    }
 +
-+  /* More than one match: show them, on their own line, then put the prompt and
-+   * the line back. realpos has to be told the cursor is sitting just after the
-+   * prompt again, or the redraw will position itself against a stale column.
++  /* More than one match: list them on their own line. The prompt and the line
++   * come back by themselves, because cle_showtext() redraws from column 0 on
++   * the next pass.
 +   */
 +
 +  if (nmatches > 1)
@@ -438,8 +471,10 @@ index 21b4428..e68770b 100644
 +        }
 +
 +      cle_putch(priv, '\n');
-+      cle_outputprompt(priv);
-+      priv->realpos = priv->coloffs;
++
++      /* No need to reprint the prompt: cle_showtext() re-establishes the whole
++       * line - carriage return, clear, prompt, text - on the next pass.
++       */
 +    }
 +
 +  /* Type in whatever the matches agreed on. With a single match that finishes
@@ -469,7 +504,7 @@ index 21b4428..e68770b 100644
  static int cle_editloop(FAR struct cle_s *priv)
  {
    /* Loop while we are in command mode */
-@@ -993,6 +1224,24 @@ static int cle_editloop(FAR struct cle_s *priv)
+@@ -993,6 +1242,24 @@ static int cle_editloop(FAR struct cle_s *priv)
  
          case '\n': /* LF terminates line */
            {
@@ -494,7 +529,7 @@ index 21b4428..e68770b 100644
              /* Add the newline to the buffer at the end of the line */
  
              priv->curpos = priv->nchars;
-@@ -1001,6 +1250,14 @@ static int cle_editloop(FAR struct cle_s *priv)
+@@ -1001,6 +1268,14 @@ static int cle_editloop(FAR struct cle_s *priv)
            }
            break;
  
@@ -509,7 +544,7 @@ index 21b4428..e68770b 100644
          /* Text to insert or unimplemented/invalid keypresses */
  
          default:
-@@ -1152,3 +1409,18 @@ int cle(FAR char *line, FAR const char *prompt, uint16_t linelen,
+@@ -1152,3 +1427,18 @@ int cle(FAR char *line, FAR const char *prompt, uint16_t linelen,
    return cle_fd(line, prompt, linelen, instream_fd, outstream_fd);
  }
  #endif
