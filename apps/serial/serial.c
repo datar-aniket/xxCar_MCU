@@ -19,6 +19,7 @@
 #include <termios.h>
 #include <sched.h>
 #include <syslog.h>
+#include <signal.h>
 
 #include <nshlib/nshlib.h>
 
@@ -83,15 +84,44 @@ static const struct serial_port_s g_ports[] =
 
 static bool g_console_nsh;
 
-/* Which ports already have a shell.
+/* The shell task on each port, or 0 for none.
  *
  * A tty has exactly one useful reader. Put two shells on one port and every
  * character you type goes to whichever happens to wake first, so neither ever
- * assembles a whole line and the port looks dead - which is precisely what
- * running the manager twice used to do.
+ * assembles a whole line and the port looks dead.
+ *
+ * This holds the pid rather than a bool because a shell can go away on its own:
+ * typing `exit` makes NSH call nsh_exit(), which ends the TASK. A flag would
+ * stay set and the port would be locked out for good, so instead the pid is
+ * checked for life before it is believed.
  */
 
-static bool g_nsh_running[SERIAL_NPORTS];
+static pid_t g_nsh_pid[SERIAL_NPORTS];
+
+/* Is the recorded shell for this port still alive?
+ *
+ * kill(pid, 0) sends no signal - it only reports whether the process exists.
+ */
+
+static bool serial_nsh_alive(int port)
+{
+  if (g_nsh_pid[port] <= 0)
+    {
+      return false;
+    }
+
+  if (kill(g_nsh_pid[port], 0) == 0)
+    {
+      return true;
+    }
+
+  /* It exited (`exit` at the prompt, most likely). Forget it, so the port can
+   * be given a new shell.
+   */
+
+  g_nsh_pid[port] = 0;
+  return false;
+}
 
 
 /****************************************************************************
@@ -358,7 +388,11 @@ int serial_start_nsh_dev(FAR const char *devpath, bool removable)
       return -errno;
     }
 
-  return OK;
+  /* The pid, not OK: the caller tracks it so that a shell which exits can be
+   * told apart from one that is still running.
+   */
+
+  return pid;
 }
 
 int serial_start_nsh(int port)
@@ -370,19 +404,20 @@ int serial_start_nsh(int port)
       return -EINVAL;
     }
 
-  /* One shell per port. Two readers on one tty split the input between them and
-   * the port stops responding.
+  /* One shell per port, but only if the last one is still alive - a shell that
+   * was exited must not lock the port out for ever.
    */
 
-  if (g_nsh_running[port])
+  if (serial_nsh_alive(port))
     {
       return -EALREADY;
     }
 
   ret = serial_start_nsh_dev(g_ports[port].devpath, g_ports[port].removable);
-  if (ret == OK)
+  if (ret > 0)
     {
-      g_nsh_running[port] = true;
+      g_nsh_pid[port] = (pid_t)ret;
+      ret = OK;
     }
 
   return ret;

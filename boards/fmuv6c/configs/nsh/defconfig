@@ -100,6 +100,24 @@ CONFIG_NSH_BUILTIN_APPS=y
 CONFIG_NSH_CONSOLE=y
 CONFIG_NSH_FILEIOSIZE=512
 CONFIG_NSH_READLINE=y
+
+# Shell line editing.
+#
+# TAB completes builtin and NSH command names (NSH registers the extra matcher
+# in nsh_init.c, which is why READLINE_HAVE_EXTMATCH matters - without it TAB
+# would only complete the apps, not `ls`/`ps`/`cat`).
+#
+# UP/DOWN walk the command history. The escape bytes reach readline intact even
+# with driver ECHO on, because the driver's echo path skips escape sequences
+# rather than printing them as garbage (serial.c: `if (ch == ASCII_ESC)`).
+#
+# LEFT/RIGHT cursor movement inside a line is NOT available: NuttX's readline
+# simply does not implement it (readline_common.c decodes only 'A' and 'B').
+# That needs the other editor, CONFIG_NSH_CLE - see the note in apps/serial.
+CONFIG_READLINE_TABCOMPLETION=y
+CONFIG_READLINE_CMD_HISTORY=y
+CONFIG_READLINE_CMD_HISTORY_LEN=64
+CONFIG_READLINE_CMD_HISTORY_LINELEN=200
 CONFIG_PREALLOC_TIMERS=4
 CONFIG_RAMLOG=y
 CONFIG_RAMLOG_BUFSIZE=8192

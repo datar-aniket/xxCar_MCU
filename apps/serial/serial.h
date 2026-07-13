@@ -101,6 +101,7 @@ int serial_start_nsh(int port);
  */
 
 int serial_start_nsh_dev(FAR const char *devpath, bool removable);
+/* ^ returns the new task's pid (>0), or a negated errno. */
 
 /* Read every SER_*_FUNC / SER_*_BAUD and start what they ask for.
  *
