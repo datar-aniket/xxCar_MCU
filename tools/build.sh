@@ -17,6 +17,27 @@ command -v kconfig-tweak >/dev/null 2>&1 || \
 command -v arm-none-eabi-gcc >/dev/null 2>&1 || \
   { echo "error: arm-none-eabi-gcc not found (install the arm-gnu-toolchain, 12.x+ recommended)"; exit 1; }
 
+# We build against a pinned, *unforked* upstream NuttX, so the handful of fixes
+# we need in the NuttX tree itself live here as patches rather than as commits in
+# the submodule. Anything else would mean a clean clone silently builds different
+# firmware than the one on the bench. Applying is idempotent: a patch that is
+# already in the tree reverse-applies cleanly, so we skip it.
+if compgen -G "$REPO/patches/nuttx/*.patch" >/dev/null; then
+  echo ">> applying NuttX patches (patches/nuttx/)"
+  for p in "$REPO"/patches/nuttx/*.patch; do
+    name="$(basename "$p")"
+    if git -C "$NUTTX" apply --reverse --check "$p" >/dev/null 2>&1; then
+      echo "   [already applied] $name"
+    elif git -C "$NUTTX" apply "$p" >/dev/null 2>&1; then
+      echo "   [applied]         $name"
+    else
+      echo "error: patch does not apply and is not already applied: $name" >&2
+      echo "       the pinned NuttX version probably moved. re-roll the patch." >&2
+      exit 1
+    fi
+  done
+fi
+
 # Our out-of-tree apps (apps/) are pulled into the NuttX apps tree as a
 # top-level directory. nuttx-apps builds any top-level dir that has a Make.defs
 # (BUILDIRS := $(dir $(wildcard $(APPDIR)/*/Make.defs))), so a symlink is all
