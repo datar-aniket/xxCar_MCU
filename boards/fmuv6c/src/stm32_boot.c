@@ -33,6 +33,7 @@
 
 #include "arm_internal.h"
 #include "stm32_start.h"
+#include "stm32_gpio.h"
 #include "fmuv6c.h"
 
 /****************************************************************************
@@ -52,6 +53,20 @@
 
 void stm32_boardinitialize(void)
 {
+  /* Turn on the peripheral 5V rails as early as possible, so anything hanging
+   * off a TELEM or GPS connector (a GPS, an RC receiver, the MTF-02) has power
+   * before it is probed. Both enables are active-low and the GPIOs are defined
+   * OUTPUT_CLEAR, so configuring them is what switches the rails on.
+   *
+   *   VDD_5V_PERIPH  -> the 5V pin on TELEM1/2/3 and GPS1/2
+   *   VDD_5V_HIPOWER -> the higher-current 5V (servo / RC power)
+   */
+
+  stm32_configgpio(GPIO_VDD_5V_PERIPH_nEN);
+  stm32_configgpio(GPIO_VDD_5V_PERIPH_nOC);
+  stm32_configgpio(GPIO_VDD_5V_HIPOWER_nEN);
+  stm32_configgpio(GPIO_VDD_5V_HIPOWER_nOC);
+
 #ifdef CONFIG_ARCH_LEDS
   /* Configure on-board LEDs if LED support has been selected. */
 

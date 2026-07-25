@@ -170,18 +170,30 @@
 #define BOARD_NGPIOOUT    1 /* Amount of GPIO Output pins */
 #define BOARD_NGPIOINT    1 /* Amount of GPIO Input w/ Interruption pins */
 
-/* Example, used free Ports on the board */
+/* Peripheral power rails.
+ *
+ * The 5V that the TELEM and GPS connectors provide is NOT free - it comes from
+ * the VDD_5V_PERIPH rail, and the higher-current 5V (servo/RC power) from
+ * VDD_5V_HIPOWER. Each is gated by an active-LOW enable that the firmware must
+ * assert. PX4 does exactly this at boot (boards/px4/fmu-v6c/src/init.c calls
+ * VDD_5V_PERIPH_EN(true) / VDD_5V_HIPOWER_EN(true)); our earlier bring-up left
+ * PE2 and PC10 unconfigured, so the connectors had no 5V at all.
+ *
+ * Defined OUTPUT_CLEAR so stm32_configgpio() drives the enable low - i.e. ON -
+ * the instant it runs, with no separate write needed. Pin/polarity/port are
+ * cross-checked against PX4's board_config.h. (These reclaim PE2, which the
+ * Nucleo template had as a stray "free port" GPIO_IN1.)
+ *
+ * The matching nOC pins are the regulators' over-current flags (active low);
+ * defined for completeness and future monitoring, not driven.
+ */
 
-#define GPIO_IN1          (GPIO_INPUT | GPIO_FLOAT | GPIO_PORTE | GPIO_PIN2)
-#define GPIO_OUT1         (GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_SPEED_50MHz | \
-                           GPIO_OUTPUT_SET | GPIO_PORTE | GPIO_PIN4)
-#define GPIO_INT1         (GPIO_INPUT | GPIO_FLOAT | GPIO_PORTE | GPIO_PIN5)
-
-/* X-NUCLEO IKS01A2 */
-
-#define GPIO_LPS22HB_INT1 (GPIO_INPUT | GPIO_FLOAT | GPIO_PORTB | GPIO_PIN10)
-#define GPIO_LSM6DSL_INT1 (GPIO_INPUT | GPIO_FLOAT | GPIO_PORTB | GPIO_PIN4)
-#define GPIO_LSM6DSL_INT2 (GPIO_INPUT | GPIO_FLOAT | GPIO_PORTB | GPIO_PIN5)
+#define GPIO_VDD_5V_PERIPH_nEN  (GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_SPEED_2MHz | \
+                                 GPIO_OUTPUT_CLEAR | GPIO_PORTE | GPIO_PIN2)
+#define GPIO_VDD_5V_PERIPH_nOC  (GPIO_INPUT | GPIO_FLOAT | GPIO_PORTE | GPIO_PIN3)
+#define GPIO_VDD_5V_HIPOWER_nEN (GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_SPEED_2MHz | \
+                                 GPIO_OUTPUT_CLEAR | GPIO_PORTC | GPIO_PIN10)
+#define GPIO_VDD_5V_HIPOWER_nOC (GPIO_INPUT | GPIO_FLOAT | GPIO_PORTC | GPIO_PIN11)
 
 /* NRF24L01
  * CS  - PA4
