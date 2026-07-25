@@ -298,7 +298,7 @@ static void mav_handle_distance(FAR const mavlink_message_t *msg, int ds_fd)
  * The daemon
  ****************************************************************************/
 
-static FAR void *mav_thread(FAR void *arg)
+static int mav_daemon(int argc, FAR char *argv[])
 {
   mavlink_message_t msg;
   mavlink_status_t  parse;
@@ -310,14 +310,15 @@ static FAR void *mav_thread(FAR void *arg)
   int               ds_fd;
   int               fd;
 
-  UNUSED(arg);
+  UNUSED(argc);
+  UNUSED(argv);
 
   fd = open(g_devpath, O_RDWR | O_NOCTTY);
   if (fd < 0)
     {
       syslog(LOG_ERR, "mavlink: cannot open %s: %d\n", g_devpath, errno);
       g_running = false;
-      return NULL;
+      return EXIT_FAILURE;
     }
 
   /* Raw 8N1 at the requested baud. The framing lives entirely in the MAVLink
@@ -448,7 +449,7 @@ static FAR void *mav_thread(FAR void *arg)
 
   close(fd);
   g_running = false;
-  return NULL;
+  return EXIT_SUCCESS;
 }
 
 /****************************************************************************
@@ -457,10 +458,7 @@ static FAR void *mav_thread(FAR void *arg)
 
 int mavlink_start(FAR const char *devpath, int32_t baud)
 {
-  pthread_attr_t attr;
-  struct sched_param sparam;
-  pthread_t tid;
-  int ret;
+  int pid;
 
   if (g_running)
     {
@@ -482,23 +480,19 @@ int mavlink_start(FAR const char *devpath, int32_t baud)
   g_status.sysid  = (uint8_t)param_i32("MAV_SYS_ID");
   g_status.compid = (uint8_t)param_i32("MAV_COMP_ID");
 
-  pthread_attr_init(&attr);
-  pthread_attr_setstacksize(&attr, MAV_STACK);
-  sparam.sched_priority = MAV_PRIO;
-  pthread_attr_setschedparam(&attr, &sparam);
-
   g_running = true;
-  ret = pthread_create(&tid, &attr, mav_thread, NULL);
-  pthread_attr_destroy(&attr);
 
-  if (ret != 0)
+  /* A task, not a pthread - the daemon must outlive the `mav start` command that
+   * may spawn it (a detached pthread dies when its parent task group exits). Same
+   * as apps/px4io, apps/rc, apps/logger.
+   */
+
+  pid = task_create("mavlink", MAV_PRIO, MAV_STACK, mav_daemon, NULL);
+  if (pid < 0)
     {
       g_running = false;
-      return -ret;
+      return -errno;
     }
-
-  pthread_setname_np(tid, "mavlink");
-  pthread_detach(tid);
 
   return OK;
 }

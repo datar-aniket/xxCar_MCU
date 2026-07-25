@@ -208,7 +208,7 @@ static bool rc_probe(int fd, uint8_t proto, FAR struct rc_frame_s *out)
   return false;
 }
 
-static FAR void *rc_thread(FAR void *arg)
+static int rc_daemon(int argc, FAR char *argv[])
 {
   struct rc_decoder_s dec;
   struct rc_frame_s frame;
@@ -218,14 +218,15 @@ static FAR void *rc_thread(FAR void *arg)
   int rcfd;
   int fd;
 
-  UNUSED(arg);
+  UNUSED(argc);
+  UNUSED(argv);
 
   fd = open(g_devpath, O_RDWR | O_NOCTTY);
   if (fd < 0)
     {
       syslog(LOG_ERR, "rc: cannot open %s: %d\n", g_devpath, errno);
       g_running = false;
-      return NULL;
+      return EXIT_FAILURE;
     }
 
   rcfd = rc_in_advertise();
@@ -359,15 +360,12 @@ static FAR void *rc_thread(FAR void *arg)
 out:
   close(fd);
   g_running = false;
-  return NULL;
+  return EXIT_SUCCESS;
 }
 
 int rc_start(FAR const char *devpath, int32_t proto_param)
 {
-  pthread_attr_t attr;
-  struct sched_param sparam;
-  pthread_t tid;
-  int ret;
+  int pid;
 
   if (g_running)
     {
@@ -404,24 +402,20 @@ int rc_start(FAR const char *devpath, int32_t proto_param)
   g_should_stop = false;
 
   memset(&g_status, 0, sizeof(g_status));
-
-  pthread_attr_init(&attr);
-  pthread_attr_setstacksize(&attr, RC_STACK);
-  sparam.sched_priority = RC_PRIO;
-  pthread_attr_setschedparam(&attr, &sparam);
-
   g_running = true;
-  ret = pthread_create(&tid, &attr, rc_thread, NULL);
-  pthread_attr_destroy(&attr);
 
-  if (ret != 0)
+  /* A task, not a pthread: the driver must outlive whatever started it. Started
+   * from the `rc start` command, a detached pthread would be killed the instant
+   * that command returned (its task group is torn down on exit). A task is its
+   * own group. See apps/px4io and apps/logger for the same reason.
+   */
+
+  pid = task_create("rc", RC_PRIO, RC_STACK, rc_daemon, NULL);
+  if (pid < 0)
     {
       g_running = false;
-      return -ret;
+      return -errno;
     }
-
-  pthread_setname_np(tid, "rc");
-  pthread_detach(tid);
 
   return OK;
 }
