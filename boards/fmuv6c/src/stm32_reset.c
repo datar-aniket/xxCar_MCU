@@ -73,12 +73,29 @@ int board_reset(int status)
        *   2. the backup-domain write protection (PWR_CR1 DBP).
        *
        * Both are single bits, so set them directly rather than pull in the PWR
-       * driver. Then write the magic. No need to undo either: a reset follows.
+       * driver.
+       *
+       * The readbacks matter, and getting this wrong is why the first cut of
+       * this failed - the magic never stuck and the bootloader booted straight
+       * through. On the H7 there is a delay between enabling a peripheral clock
+       * and the peripheral actually being clocked; the reference manual's fix is
+       * to read the RCC register back before touching the peripheral (NuttX does
+       * the same in its clock config). Without that, the write to BK0R below runs
+       * before the RTC APB clock is live and is lost. The final readback of BK0R
+       * flushes the write across the backup-domain clock boundary before the
+       * reset, so it is committed by the time the bootloader looks.
        */
 
       modifyreg32(STM32_RCC_APB4ENR, 0, RCC_APB4ENR_RTCAPBEN);
+      (void)getreg32(STM32_RCC_APB4ENR);     /* let the RTC APB clock come up */
+
       modifyreg32(STM32_PWR_CR1, 0, PWR_CR1_DBP);
+      (void)getreg32(STM32_PWR_CR1);         /* DBP effective before the write */
+
       putreg32(BOOTLOADER_MAGIC, STM32_RTC_BK0R);
+      (void)getreg32(STM32_RTC_BK0R);        /* flush it out before we reset */
+
+      UP_DSB();
     }
 
   up_systemreset();
