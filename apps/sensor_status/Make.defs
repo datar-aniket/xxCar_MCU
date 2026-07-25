@@ -1,0 +1,9 @@
+############################################################################
+# apps/sensor_status/Make.defs
+#
+# SPDX-License-Identifier: Apache-2.0
+############################################################################
+
+ifneq ($(CONFIG_XXCAR_SENSOR_STATUS),)
+CONFIGURED_APPS += $(APPDIR)/xxcar/sensor_status
+endif

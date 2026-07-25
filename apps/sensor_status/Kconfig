@@ -1,0 +1,33 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config XXCAR_SENSOR_STATUS
+	tristate "sensor_status: per-sensor rate + live reading"
+	default n
+	depends on UORB && SENSORS
+	---help---
+		One line per onboard sensor: whether it is streaming, the measured
+		rate (Hz), and its current reading.
+
+		Answers "what rate is each sensor at?" without the uorb_listener
+		trade-off - listener prints nothing with CONFIG_DEBUG_UORB off and a
+		flood of every field with it on. Rate here is measured from the topic
+		generation counter, so it needs neither.
+
+if XXCAR_SENSOR_STATUS
+
+config XXCAR_SENSOR_STATUS_PROGNAME
+	string "Program name"
+	default "sensor_status"
+
+config XXCAR_SENSOR_STATUS_PRIORITY
+	int "task priority"
+	default 100
+
+config XXCAR_SENSOR_STATUS_STACKSIZE
+	int "stack size"
+	default 3072
+
+endif
