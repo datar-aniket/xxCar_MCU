@@ -375,7 +375,7 @@ static int log_open_session(FAR char *path, size_t pathlen)
  * The daemon
  ****************************************************************************/
 
-static FAR void *log_thread(FAR void *arg)
+static int log_daemon(int argc, FAR char *argv[])
 {
   struct log_sub_s subs[NTOPICS];
   struct pollfd    pfd[NTOPICS];
@@ -387,7 +387,8 @@ static FAR void *log_thread(FAR void *arg)
   int              nsubs = 0;
   int              i;
 
-  UNUSED(arg);
+  UNUSED(argc);
+  UNUSED(argv);
 
   /* LOG_RATE 0 means every sample - full native rate. Otherwise it is a
    * per-topic ceiling, applied as a minimum spacing between logged samples.
@@ -437,7 +438,7 @@ static FAR void *log_thread(FAR void *arg)
       syslog(LOG_WARNING,
              "logger: nothing selected (set LOG_IMU0 / LOG_MAG / ...)\n");
       g_running = false;
-      return NULL;
+      return EXIT_FAILURE;
     }
 
   g_fd = log_open_session(path, sizeof(path));
@@ -451,7 +452,7 @@ static FAR void *log_thread(FAR void *arg)
         }
 
       g_running = false;
-      return NULL;
+      return EXIT_FAILURE;
     }
 
   g_buflen = 0;
@@ -559,7 +560,7 @@ static FAR void *log_thread(FAR void *arg)
          g_status.samples, g_status.bytes, g_status.dropped);
 
   g_running = false;
-  return NULL;
+  return EXIT_SUCCESS;
 }
 
 /****************************************************************************
@@ -568,10 +569,8 @@ static FAR void *log_thread(FAR void *arg)
 
 int logger_start(void)
 {
-  pthread_attr_t attr;
-  struct sched_param sparam;
-  pthread_t tid;
-  int ret;
+  int pid;
+  int i;
 
   if (g_running)
     {
@@ -581,23 +580,27 @@ int logger_start(void)
   g_should_stop = false;
   memset(&g_status, 0, sizeof(g_status));
 
-  pthread_attr_init(&attr);
-  pthread_attr_setstacksize(&attr, LOG_STACK);
-  sparam.sched_priority = LOG_PRIO;
-  pthread_attr_setschedparam(&attr, &sparam);
+  /* task_create, NOT pthread_create. The logger has to outlive whatever started
+   * it - typically the short-lived `log start` command - and a detached pthread
+   * is a child of that command's task group, so it is killed the instant the
+   * command returns (group_kill_children on task exit). A task is its own group
+   * and survives. Same reason apps/px4io runs its daemon as a task.
+   */
 
-  g_running = true;
-  ret = pthread_create(&tid, &attr, log_thread, NULL);
-  pthread_attr_destroy(&attr);
-
-  if (ret != 0)
+  pid = task_create("logger", LOG_PRIO, LOG_STACK, log_daemon, NULL);
+  if (pid < 0)
     {
-      g_running = false;
-      return -ret;
+      return -errno;
     }
 
-  pthread_setname_np(tid, "logger");
-  pthread_detach(tid);
+  /* Wait for it to open the file (or fail), so `log start` can report the real
+   * outcome rather than a hopeful one.
+   */
+
+  for (i = 0; i < 100 && !g_running; i++)
+    {
+      usleep(10000);
+    }
 
   return OK;
 }
