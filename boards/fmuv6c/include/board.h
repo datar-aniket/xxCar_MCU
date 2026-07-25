@@ -612,6 +612,18 @@
 #define DMAMAP_USART6_RX DMAMAP_DMA12_USART6RX_1
 #define DMAMAP_USART6_TX DMAMAP_DMA12_USART6TX_0
 
+/* Reboot targets, passed as the `status` argument of boardctl(BOARDIOC_RESET).
+ *
+ * 0 is an ordinary reset (NuttX's own default). BOARD_REBOOT_TO_BOOTLOADER asks
+ * board_reset() (boards/fmuv6c/src/stm32_reset.c) to leave the magic that makes
+ * PX4's bootloader stay in upload mode. Shared here so the `reboot` app and the
+ * board code agree on the value; the specific number is arbitrary, only that
+ * they match.
+ */
+
+#define BOARD_REBOOT_NORMAL          0
+#define BOARD_REBOOT_TO_BOOTLOADER   3
+
 /****************************************************************************
  * Public Data
  ****************************************************************************/

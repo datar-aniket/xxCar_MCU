@@ -1,0 +1,9 @@
+############################################################################
+# apps/reboot/Make.defs
+#
+# SPDX-License-Identifier: Apache-2.0
+############################################################################
+
+ifneq ($(CONFIG_XXCAR_REBOOT),)
+CONFIGURED_APPS += $(APPDIR)/xxcar/reboot
+endif

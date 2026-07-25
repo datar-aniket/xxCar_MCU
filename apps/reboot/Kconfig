@@ -1,0 +1,31 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config XXCAR_REBOOT
+	tristate "reboot: restart, optionally into the bootloader (-b)"
+	default n
+	depends on BOARDCTL_RESET
+	---help---
+		Replaces NuttX's builtin reboot to add '-b', which restarts into the
+		bootloader so the next flash needs no unplug/replug. A plain 'reboot'
+		behaves as before.
+
+		Set CONFIG_NSH_DISABLE_REBOOT=y so this is the only 'reboot' command.
+
+if XXCAR_REBOOT
+
+config XXCAR_REBOOT_PROGNAME
+	string "Program name"
+	default "reboot"
+
+config XXCAR_REBOOT_PRIORITY
+	int "task priority"
+	default 100
+
+config XXCAR_REBOOT_STACKSIZE
+	int "stack size"
+	default 1024
+
+endif
