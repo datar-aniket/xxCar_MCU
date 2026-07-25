@@ -30,6 +30,10 @@
 #  include "../rc/rc.h"
 #endif
 
+#ifdef CONFIG_XXCAR_MAVLINK
+#  include "../mavlink/mavlink.h"
+#endif
+
 /****************************************************************************
  * Pre-processor Definitions
  ****************************************************************************/
@@ -556,17 +560,35 @@ int serial_manager_start(void)
             break;
 
           case SER_FUNC_MAVLINK:
+#ifdef CONFIG_XXCAR_MAVLINK
+            ret = mavlink_start(p->devpath, baud);
+
+            if (ret < 0 && ret != -EALREADY)
+              {
+                syslog(LOG_ERR, "serial: %s: MAVLink failed to start: %d\n",
+                       p->name, ret);
+              }
+            else
+              {
+                syslog(LOG_INFO, "serial: %s (%s) MAVLink @ %" PRId32 "\n",
+                       p->name, p->devpath, baud);
+              }
+#else
+            syslog(LOG_WARNING,
+                   "serial: %s: MAVLink requested but XXCAR_MAVLINK is not "
+                   "built in\n", p->name);
+#endif
+            break;
+
           case SER_FUNC_GPS:
 
-            /* Owners for these arrive with the MAVLink and GPS drivers. The
-             * port is configured and reserved; nothing consumes it yet. Say so
-             * plainly rather than pretend it is running.
+            /* The GPS driver is not written yet. The port is configured and
+             * reserved; nothing consumes it. Say so plainly.
              */
 
             syslog(LOG_WARNING,
-                   "serial: %s (%s) @ %" PRId32 ": function %" PRId32
-                   " not implemented yet\n",
-                   p->name, p->devpath, baud, func);
+                   "serial: %s (%s) @ %" PRId32 ": GPS not implemented yet\n",
+                   p->name, p->devpath, baud);
             break;
 
           default:

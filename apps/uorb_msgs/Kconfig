@@ -1,0 +1,17 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config XXCAR_UORB_MSGS
+	bool "uorb_msgs: extra uORB topics (optical_flow, distance_sensor)"
+	default n
+	depends on UORB
+	---help---
+		Defines the optical_flow and distance_sensor uORB topics. A library,
+		not a command: these topics are produced by one subsystem (MAVLink
+		today, DroneCAN later) and consumed by another (navigation/fusion), so
+		the definition belongs to neither and lives here.
+
+		Watch them with:  uorb_listener optical_flow
+		                  uorb_listener distance_sensor

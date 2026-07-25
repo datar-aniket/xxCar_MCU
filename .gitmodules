@@ -4,3 +4,6 @@
 [submodule "deps/nuttx-apps"]
 	path = deps/nuttx-apps
 	url = https://github.com/apache/nuttx-apps.git
+[submodule "deps/mavlink"]
+	path = deps/mavlink
+	url = https://github.com/mavlink/c_library_v2.git

@@ -1,0 +1,9 @@
+############################################################################
+# apps/uorb_msgs/Make.defs
+#
+# SPDX-License-Identifier: Apache-2.0
+############################################################################
+
+ifneq ($(CONFIG_XXCAR_UORB_MSGS),)
+CONFIGURED_APPS += $(APPDIR)/xxcar/uorb_msgs
+endif

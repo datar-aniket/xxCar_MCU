@@ -1,0 +1,36 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config XXCAR_MAVLINK
+	tristate "mav: MAVLink on a serial port"
+	default n
+	depends on SERIAL_TERMIOS && UORB
+	select XXCAR_PARAM
+	select XXCAR_SERIAL
+	select XXCAR_UORB_MSGS
+	---help---
+		MAVLink on whichever serial port has SER_*_FUNC = MAVLink.
+
+		Uses the official generated c_library_v2 codec (deps/mavlink), so every
+		message decodes - not just the ones acted on. Today it routes the
+		MTF-02's OPTICAL_FLOW_RAD and DISTANCE_SENSOR to uORB, runs the PARAM
+		protocol so a GCS can read/write parameters, and sends a 1 Hz HEARTBEAT.
+		A new MAVLink sensor is one more switch case, not a new wire format.
+
+if XXCAR_MAVLINK
+
+config XXCAR_MAVLINK_PROGNAME
+	string "Program name"
+	default "mav"
+
+config XXCAR_MAVLINK_PRIORITY
+	int "mav task priority"
+	default 100
+
+config XXCAR_MAVLINK_STACKSIZE
+	int "mav (command) stack size"
+	default 2048
+
+endif

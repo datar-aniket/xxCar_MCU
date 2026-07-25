@@ -1,0 +1,9 @@
+############################################################################
+# apps/mavlink/Make.defs
+#
+# SPDX-License-Identifier: Apache-2.0
+############################################################################
+
+ifneq ($(CONFIG_XXCAR_MAVLINK),)
+CONFIGURED_APPS += $(APPDIR)/xxcar/mavlink
+endif
