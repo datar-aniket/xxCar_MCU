@@ -29,12 +29,14 @@
 #include <uORB/uORB.h>
 #include <nuttx/uorb.h>
 
+#include "../uorb_msgs/uorb_msgs.h"
+
 /****************************************************************************
  * Private Types
  ****************************************************************************/
 
 /* What kind of payload a topic carries, so we can print one sensible line of
- * values for it. The onboard sensors are only ever these four shapes.
+ * values for it.
  */
 
 enum sens_kind_e
@@ -43,31 +45,44 @@ enum sens_kind_e
   KIND_GYRO,    /* x y z (rad/s) */
   KIND_MAG,     /* x y z (gauss) */
   KIND_BARO,    /* pressure (hPa) */
+  KIND_FLOW,    /* optical flow (MTF-02 over MAVLink) */
+  KIND_DIST,    /* ranged distance */
 };
 
 struct sens_row_s
 {
-  FAR const char        *name;   /* uORB topic name */
-  FAR const char        *label;  /* human label + which chip */
-  enum sens_kind_e       kind;
+  FAR const char                *name;  /* uORB topic name */
+  FAR const char                *label; /* human label + which chip */
+  enum sens_kind_e               kind;
+  FAR const struct orb_metadata *meta;  /* non-NULL for our own topics, which
+                                         * are not in uORB's built-in name list;
+                                         * NULL means look up by name */
 };
 
 /****************************************************************************
  * Private Data
  ****************************************************************************/
 
-/* The onboard sensors, in the order they read best on screen. Instance is
- * encoded in the name (…0 primary, …1 secondary) as uORB registers them.
+/* Every sensor topic on the vehicle, onboard and off. Instance is encoded in
+ * the name (…0 primary, …1 secondary) as uORB registers them.
+ *
+ * The onboard sensors are built-in uORB topics, found by name. The MAVLink
+ * sensors (optical_flow, distance_sensor) are ours, so they carry a direct
+ * ORB_ID - orb_get_meta() only knows the built-in list. They read "absent"
+ * until the MAVLink daemon advertises them, and "stalled" if it is running but
+ * the MTF-02 is not actually sending.
  */
 
 static const struct sens_row_s g_rows[] =
 {
-  { "sensor_accel0", "accel0  ICM-42688", KIND_ACCEL },
-  { "sensor_gyro0",  "gyro0   ICM-42688", KIND_GYRO  },
-  { "sensor_accel1", "accel1  BMI055",    KIND_ACCEL },
-  { "sensor_gyro1",  "gyro1   BMI055",    KIND_GYRO  },
-  { "sensor_mag0",   "mag0    IST8310",   KIND_MAG   },
-  { "sensor_baro0",  "baro0   MS5611",    KIND_BARO  },
+  { "sensor_accel0", "accel0  ICM-42688", KIND_ACCEL, NULL },
+  { "sensor_gyro0",  "gyro0   ICM-42688", KIND_GYRO,  NULL },
+  { "sensor_accel1", "accel1  BMI055",    KIND_ACCEL, NULL },
+  { "sensor_gyro1",  "gyro1   BMI055",    KIND_GYRO,  NULL },
+  { "sensor_mag0",   "mag0    IST8310",   KIND_MAG,   NULL },
+  { "sensor_baro0",  "baro0   MS5611",    KIND_BARO,  NULL },
+  { "optical_flow",  "flow    MTF-02",    KIND_FLOW,  ORB_ID(optical_flow) },
+  { "distance_sensor", "range MTF-02",    KIND_DIST,  ORB_ID(distance_sensor) },
 };
 
 #define NROWS ((int)(sizeof(g_rows) / sizeof(g_rows[0])))
@@ -81,10 +96,12 @@ static void sensor_status_values(int fd, enum sens_kind_e kind,
 {
   union
   {
-    struct sensor_accel accel;
-    struct sensor_gyro  gyro;
-    struct sensor_mag   mag;
-    struct sensor_baro  baro;
+    struct sensor_accel      accel;
+    struct sensor_gyro       gyro;
+    struct sensor_mag        mag;
+    struct sensor_baro       baro;
+    struct optical_flow_s    flow;
+    struct distance_sensor_s dist;
   } d;
 
   if (orb_copy(meta, fd, &d) < 0)
@@ -113,6 +130,21 @@ static void sensor_status_values(int fd, enum sens_kind_e kind,
         printf("  %9.2f hPa            %5.1fC",
                d.baro.pressure, d.baro.temperature);
         break;
+
+      case KIND_FLOW:
+
+        /* Flow is integrated; divide by the window to get an average rate. A
+         * negative distance means the sensor could not range the surface.
+         */
+
+        printf("  q=%-3u fx=% .3f fy=% .3f  h=%.2fm",
+               d.flow.quality, d.flow.integrated_x, d.flow.integrated_y,
+               d.flow.distance);
+        break;
+
+      case KIND_DIST:
+        printf("  %.2f m", d.dist.current_distance);
+        break;
     }
 }
 
@@ -137,7 +169,8 @@ static void sensor_status_run(int window_ms)
 
   for (i = 0; i < NROWS; i++)
     {
-      FAR const struct orb_metadata *meta = orb_get_meta(g_rows[i].name);
+      FAR const struct orb_metadata *meta =
+        g_rows[i].meta ? g_rows[i].meta : orb_get_meta(g_rows[i].name);
       struct orb_state st;
 
       fd[i]   = -1;
@@ -167,7 +200,8 @@ static void sensor_status_run(int window_ms)
 
   for (i = 0; i < NROWS; i++)
     {
-      FAR const struct orb_metadata *meta = orb_get_meta(g_rows[i].name);
+      FAR const struct orb_metadata *meta =
+        g_rows[i].meta ? g_rows[i].meta : orb_get_meta(g_rows[i].name);
       struct orb_state st;
       double hz = 0.0;
 

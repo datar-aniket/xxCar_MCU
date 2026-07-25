@@ -7,6 +7,7 @@ config XXCAR_SENSOR_STATUS
 	tristate "sensor_status: per-sensor rate + live reading"
 	default n
 	depends on UORB && SENSORS
+	select XXCAR_UORB_MSGS
 	---help---
 		One line per onboard sensor: whether it is streaming, the measured
 		rate (Hz), and its current reading.
