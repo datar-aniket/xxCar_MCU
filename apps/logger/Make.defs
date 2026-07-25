@@ -1,0 +1,9 @@
+############################################################################
+# apps/logger/Make.defs
+#
+# SPDX-License-Identifier: Apache-2.0
+############################################################################
+
+ifneq ($(CONFIG_XXCAR_LOGGER),)
+CONFIGURED_APPS += $(APPDIR)/xxcar/logger
+endif

@@ -91,7 +91,12 @@
 #  include "../../../apps/px4io/px4io.h"
 #endif
 
-#if defined(CONFIG_XXCAR_SERIAL) || defined(CONFIG_XXCAR_PX4IO)
+#ifdef CONFIG_XXCAR_LOGGER
+#  include "../../../apps/logger/logger.h"
+#endif
+
+#if defined(CONFIG_XXCAR_SERIAL) || defined(CONFIG_XXCAR_PX4IO) || \
+    defined(CONFIG_XXCAR_LOGGER)
 #  include "../../../apps/param/param.h"
 #endif
 
@@ -630,6 +635,24 @@ int stm32_bringup(void)
               px4io_set_pwm_rate(&io, (uint16_t)param_i32("PX4IO_PWM_HZ"));
               px4io_close(&io);
             }
+        }
+    }
+#endif
+
+#ifdef CONFIG_XXCAR_LOGGER
+  /* Start logging at boot only if asked. The logger is on-request by design, so
+   * this is off unless LOG_ENABLE is set - a card should not silently fill.
+   */
+
+  if (param_i32("LOG_ENABLE") != 0)
+    {
+      if (logger_start() < 0)
+        {
+          syslog(LOG_ERR, "[log] boot start failed\n");
+        }
+      else
+        {
+          syslog(LOG_INFO, "[log] logging from boot (LOG_ENABLE=1)\n");
         }
     }
 #endif

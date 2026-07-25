@@ -1,0 +1,38 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config XXCAR_LOGGER
+	tristate "log: on-request ULog logger"
+	default n
+	depends on UORB && SENSORS
+	select XXCAR_PARAM
+	select XXCAR_RC_IN
+	---help---
+		Records the uORB topics chosen by LOG_IMU / LOG_MAG / LOG_BARO / LOG_RC
+		to a ULog file on the microSD, at their native rate (LOG_RATE=0) or
+		capped to LOG_RATE Hz.
+
+		ULog rather than CSV so native-rate IMU (2 kHz per IMU) is practical:
+		each sample is its raw record plus a 3-byte header, not a line of
+		formatted floats. Files open in pyulog / PlotJuggler / FlightPlot.
+
+		On request only: 'log start' / 'log stop', or LOG_ENABLE=1 to start at
+		boot.
+
+if XXCAR_LOGGER
+
+config XXCAR_LOGGER_PROGNAME
+	string "Program name"
+	default "log"
+
+config XXCAR_LOGGER_PRIORITY
+	int "log (command) task priority"
+	default 100
+
+config XXCAR_LOGGER_STACKSIZE
+	int "log (command) stack size"
+	default 2048
+
+endif

@@ -1,0 +1,638 @@
+/****************************************************************************
+ * apps/logger/logger.c
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * On-request ULog logger. See logger.h.
+ *
+ * ULog in brief: a 16-byte header (magic + start timestamp), then a definition
+ * section of 'F' (format) messages, then a data section of 'A' (subscription)
+ * and 'D' (data) messages. Every message is prefixed with a 3-byte header:
+ * uint16 payload-size, uint8 type. Every logged message's first field must be
+ * uint64 timestamp - all our topics satisfy that. The reader (pyulog) recovers
+ * everything from the 'F' strings, so the field lists here must match the C
+ * structs byte-for-byte, padding included.
+ ****************************************************************************/
+
+#include <nuttx/config.h>
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <inttypes.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <dirent.h>
+#include <poll.h>
+#include <pthread.h>
+#include <sched.h>
+#include <syslog.h>
+#include <sys/stat.h>
+#include <sys/time.h>
+
+#include <uORB/uORB.h>
+
+#include "logger.h"
+#include "../param/param.h"
+#include "../rc_in/rc_in.h"
+
+/****************************************************************************
+ * Pre-processor Definitions
+ ****************************************************************************/
+
+#define LOG_STACK     4096
+#define LOG_PRIO      (SCHED_PRIORITY_DEFAULT + 2)   /* below the sensors, so
+                                                      * logging never delays a
+                                                      * sample being produced */
+
+#define LOG_DIR       "/fs/microsd/log"
+
+/* Write buffer. At 2 kHz across the IMUs the logger produces a record every few
+ * hundred microseconds; a write() per record would swamp the FAT layer. Records
+ * accumulate here and go to the card in one write when the buffer fills. 8 KB is
+ * several FAT sectors and about 30 ms of full-rate IMU data.
+ */
+
+#define LOG_BUFSIZE   8192
+
+/* Largest record we serialise (rc_in, 56 bytes). */
+
+#define LOG_RECMAX    64
+
+/* ULog message types. */
+
+#define ULOG_MSG_FORMAT  'F'
+#define ULOG_MSG_ADD_SUB 'A'
+#define ULOG_MSG_DATA    'D'
+
+/* Which LOG_* parameter gates a topic. */
+
+enum log_group_e
+{
+  GRP_IMU,   /* LOG_IMU  - both IMUs' accel and gyro */
+  GRP_MAG,   /* LOG_MAG  */
+  GRP_BARO,  /* LOG_BARO */
+  GRP_RC,    /* LOG_RC   */
+};
+
+/****************************************************************************
+ * Private Types
+ ****************************************************************************/
+
+/* A loggable topic: how to find it, its ULog identity, and how many bytes of
+ * the sample go into the file.
+ */
+
+struct log_topic_s
+{
+  FAR const char     *orb_name;   /* orb_get_meta() name, or NULL for a direct
+                                   * topic (rc_in) */
+  bool                is_rc;      /* rc_in: use ORB_ID(rc_in) directly */
+  FAR const char     *ulog_name;  /* ULog message name */
+  uint8_t             multi_id;   /* ULog instance (accel0 vs accel1) */
+  uint16_t            rec_size;   /* bytes of the sample to write */
+  enum log_group_e    group;
+};
+
+/* Per-subscription runtime state. */
+
+struct log_sub_s
+{
+  FAR const struct log_topic_s *topic;
+  FAR const struct orb_metadata *meta;
+  int      fd;
+  uint16_t msg_id;
+  uint64_t last_us;   /* for LOG_RATE decimation */
+};
+
+/****************************************************************************
+ * Private Data
+ ****************************************************************************/
+
+/* The ULog format strings, one per distinct message name. Field lists mirror
+ * the C structs exactly (see nuttx/uorb.h and rc_in.h), padding included, or
+ * pyulog would mis-decode every field after the gap.
+ */
+
+static const struct
+{
+  FAR const char *name;
+  FAR const char *fields;
+}
+g_formats[] =
+{
+  { "sensor_accel",
+    "uint64_t timestamp;float x;float y;float z;float temperature;" },
+  { "sensor_gyro",
+    "uint64_t timestamp;float x;float y;float z;float temperature;" },
+  { "sensor_baro",
+    "uint64_t timestamp;float pressure;float temperature;" },
+  { "sensor_mag",
+    "uint64_t timestamp;float x;float y;float z;float temperature;"
+    "int32_t status;" },
+  { "rc_input",
+    "uint64_t timestamp;uint16_t[18] channel;uint16_t frames;"
+    "uint16_t lost_frames;uint8_t count;uint8_t rssi;uint8_t ok;"
+    "uint8_t failsafe;uint8_t source;" },
+};
+
+#define NFORMATS ((int)(sizeof(g_formats) / sizeof(g_formats[0])))
+
+/* The candidate topics. rec_size is the number of MEANINGFUL bytes to write -
+ * the fields, without any trailing C padding.
+ *
+ * This is not sizeof for the padded structs, and that is deliberate: pyulog
+ * strips a trailing _padding field from both the record's expected size and its
+ * maximum, so it wants the bytes without the pad. sensor_mag is 28 (sizeof 32),
+ * rc_in is 53 (sizeof 56). Neither struct has *internal* padding, so the first
+ * rec_size bytes are exactly the fields, contiguous. accel/gyro/baro have no
+ * padding at all, so there rec_size == sizeof.
+ */
+
+static const struct log_topic_s g_topics[] =
+{
+  { "sensor_accel0", false, "sensor_accel", 0, 24, GRP_IMU  },
+  { "sensor_gyro0",  false, "sensor_gyro",  0, 24, GRP_IMU  },
+  { "sensor_accel1", false, "sensor_accel", 1, 24, GRP_IMU  },
+  { "sensor_gyro1",  false, "sensor_gyro",  1, 24, GRP_IMU  },
+  { "sensor_mag0",   false, "sensor_mag",   0, 28, GRP_MAG  },
+  { "sensor_baro0",  false, "sensor_baro",  0, 16, GRP_BARO },
+  { NULL,            true,  "rc_input",     0, 53, GRP_RC   },
+};
+
+#define NTOPICS ((int)(sizeof(g_topics) / sizeof(g_topics[0])))
+
+static pthread_mutex_t   g_lock = PTHREAD_MUTEX_INITIALIZER;
+static volatile bool     g_running;
+static volatile bool     g_should_stop;
+static struct logger_status_s g_status;
+
+/* Writer state. */
+
+static int      g_fd = -1;
+static uint8_t  g_buf[LOG_BUFSIZE];
+static size_t   g_buflen;
+
+/****************************************************************************
+ * Private Functions - the buffered ULog writer
+ ****************************************************************************/
+
+static uint64_t log_now_us(void)
+{
+  struct timespec ts;
+
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)(ts.tv_nsec / 1000);
+}
+
+/* Push the buffer to the card. Returns false if the write fell short - a full
+ * or failing card - so the caller can count the loss.
+ */
+
+static bool log_flush(void)
+{
+  ssize_t n;
+
+  if (g_buflen == 0)
+    {
+      return true;
+    }
+
+  n = write(g_fd, g_buf, g_buflen);
+
+  if (n == (ssize_t)g_buflen)
+    {
+      pthread_mutex_lock(&g_lock);
+      g_status.bytes += g_buflen;
+      pthread_mutex_unlock(&g_lock);
+      g_buflen = 0;
+      return true;
+    }
+
+  /* Short write: the card cannot keep up. Drop what is buffered rather than
+   * block the loop and fall further behind.
+   */
+
+  g_buflen = 0;
+  return false;
+}
+
+/* Append bytes, flushing first if they will not fit. */
+
+static bool log_put(FAR const void *data, size_t len)
+{
+  if (len > LOG_BUFSIZE)
+    {
+      return false;
+    }
+
+  if (g_buflen + len > LOG_BUFSIZE && !log_flush())
+    {
+      return false;
+    }
+
+  memcpy(g_buf + g_buflen, data, len);
+  g_buflen += len;
+  return true;
+}
+
+/* Write one ULog message: the 3-byte header then the payload. */
+
+static bool log_msg(uint8_t type, FAR const void *payload, uint16_t len)
+{
+  uint8_t hdr[3];
+
+  hdr[0] = (uint8_t)(len & 0xff);
+  hdr[1] = (uint8_t)(len >> 8);
+  hdr[2] = type;
+
+  return log_put(hdr, sizeof(hdr)) && log_put(payload, len);
+}
+
+/* Write a 'D' data message: header, then uint16 msg_id, then the record. */
+
+static bool log_data(uint16_t msg_id, FAR const void *rec, uint16_t rec_size)
+{
+  uint8_t hdr[3];
+  uint8_t id[2];
+  uint16_t len = (uint16_t)(2 + rec_size);
+
+  hdr[0] = (uint8_t)(len & 0xff);
+  hdr[1] = (uint8_t)(len >> 8);
+  hdr[2] = ULOG_MSG_DATA;
+
+  id[0] = (uint8_t)(msg_id & 0xff);
+  id[1] = (uint8_t)(msg_id >> 8);
+
+  return log_put(hdr, sizeof(hdr)) && log_put(id, sizeof(id)) &&
+         log_put(rec, rec_size);
+}
+
+static bool log_write_header(void)
+{
+  static const uint8_t magic[8] =
+  {
+    0x55, 0x4c, 0x6f, 0x67, 0x01, 0x12, 0x35, 0x01
+  };
+
+  /* The flag-bits message: compat[8], incompat[8], appended_offsets[3]*u64, all
+   * zero - no optional features, no crash data appended. pyulog parses without
+   * it, but every real ULog carries it and the stricter readers (FlightPlot,
+   * QGC) expect it, so it is cheap insurance. It must be the first message after
+   * the 16-byte header.
+   */
+
+  uint8_t flags[40];
+  uint64_t start = log_now_us();
+
+  memset(flags, 0, sizeof(flags));
+
+  return log_put(magic, sizeof(magic)) &&
+         log_put(&start, sizeof(start)) &&
+         log_msg('B', flags, sizeof(flags));
+}
+
+static bool log_write_formats(void)
+{
+  int i;
+
+  for (i = 0; i < NFORMATS; i++)
+    {
+      char fmt[256];
+      int n = snprintf(fmt, sizeof(fmt), "%s:%s",
+                       g_formats[i].name, g_formats[i].fields);
+
+      if (!log_msg(ULOG_MSG_FORMAT, fmt, (uint16_t)n))
+        {
+          return false;
+        }
+    }
+
+  return true;
+}
+
+static bool log_write_subscription(FAR const struct log_sub_s *sub)
+{
+  uint8_t payload[64];
+  size_t namelen = strlen(sub->topic->ulog_name);
+  size_t len = 0;
+
+  payload[len++] = sub->topic->multi_id;
+  payload[len++] = (uint8_t)(sub->msg_id & 0xff);
+  payload[len++] = (uint8_t)(sub->msg_id >> 8);
+  memcpy(payload + len, sub->topic->ulog_name, namelen);
+  len += namelen;
+
+  return log_msg(ULOG_MSG_ADD_SUB, payload, (uint16_t)len);
+}
+
+/****************************************************************************
+ * Private Functions - session setup
+ ****************************************************************************/
+
+/* Pick the next free /fs/microsd/log/log_NNN.ulg. */
+
+static int log_open_session(FAR char *path, size_t pathlen)
+{
+  FAR DIR *dir;
+  FAR struct dirent *ent;
+  int next = 1;
+
+  mkdir(LOG_DIR, 0777);   /* harmless if it already exists */
+
+  dir = opendir(LOG_DIR);
+  if (dir != NULL)
+    {
+      while ((ent = readdir(dir)) != NULL)
+        {
+          int n;
+
+          if (sscanf(ent->d_name, "log_%d.ulg", &n) == 1 && n >= next)
+            {
+              next = n + 1;
+            }
+        }
+
+      closedir(dir);
+    }
+
+  snprintf(path, pathlen, "%s/log_%03d.ulg", LOG_DIR, next);
+
+  return open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+}
+
+/****************************************************************************
+ * The daemon
+ ****************************************************************************/
+
+static FAR void *log_thread(FAR void *arg)
+{
+  struct log_sub_s subs[NTOPICS];
+  struct pollfd    pfd[NTOPICS];
+  char             path[48];
+  uint8_t          rec[LOG_RECMAX];
+  uint64_t         last_flush;
+  int32_t          rate;
+  uint32_t         min_interval;
+  int              nsubs = 0;
+  int              i;
+
+  UNUSED(arg);
+
+  /* LOG_RATE 0 means every sample - full native rate. Otherwise it is a
+   * per-topic ceiling, applied as a minimum spacing between logged samples.
+   */
+
+  rate = param_i32("LOG_RATE");
+  min_interval = (rate > 0) ? (uint32_t)(1000000 / rate) : 0;
+
+  /* Which groups are on. */
+
+  bool on[4];
+  on[GRP_IMU]  = param_i32("LOG_IMU")  != 0;
+  on[GRP_MAG]  = param_i32("LOG_MAG")  != 0;
+  on[GRP_BARO] = param_i32("LOG_BARO") != 0;
+  on[GRP_RC]   = param_i32("LOG_RC")   != 0;
+
+  /* Subscribe to each enabled topic that actually exists. A blocking subscribe
+   * so poll() wakes the moment a sample is published.
+   */
+
+  for (i = 0; i < NTOPICS; i++)
+    {
+      FAR const struct log_topic_s *t = &g_topics[i];
+      FAR const struct orb_metadata *meta;
+      int fd;
+
+      if (!on[t->group])
+        {
+          continue;
+        }
+
+      meta = t->is_rc ? ORB_ID(rc_in) : orb_get_meta(t->orb_name);
+      if (meta == NULL)
+        {
+          continue;
+        }
+
+      fd = orb_subscribe(meta);
+      if (fd < 0)
+        {
+          continue;
+        }
+
+      subs[nsubs].topic   = t;
+      subs[nsubs].meta    = meta;
+      subs[nsubs].fd      = fd;
+      subs[nsubs].msg_id  = (uint16_t)nsubs;
+      subs[nsubs].last_us = 0;
+      nsubs++;
+    }
+
+  if (nsubs == 0)
+    {
+      syslog(LOG_WARNING,
+             "logger: nothing selected (set LOG_IMU / LOG_MAG / ...)\n");
+      g_running = false;
+      return NULL;
+    }
+
+  g_fd = log_open_session(path, sizeof(path));
+  if (g_fd < 0)
+    {
+      syslog(LOG_ERR, "logger: cannot create log in %s: %d\n", LOG_DIR, errno);
+
+      for (i = 0; i < nsubs; i++)
+        {
+          orb_unsubscribe(subs[i].fd);
+        }
+
+      g_running = false;
+      return NULL;
+    }
+
+  g_buflen = 0;
+
+  /* Definition section, then the subscriptions. */
+
+  log_write_header();
+  log_write_formats();
+
+  for (i = 0; i < nsubs; i++)
+    {
+      log_write_subscription(&subs[i]);
+      pfd[i].fd     = subs[i].fd;
+      pfd[i].events = POLLIN;
+    }
+
+  pthread_mutex_lock(&g_lock);
+  strlcpy(g_status.path, path, sizeof(g_status.path));
+  g_status.topics = nsubs;
+  g_status.rate   = rate;
+  pthread_mutex_unlock(&g_lock);
+
+  syslog(LOG_INFO, "logger: %s, %d topic(s), rate %s\n",
+         path, nsubs, rate > 0 ? "capped" : "native");
+
+  last_flush = log_now_us();
+  g_running  = true;
+
+  while (!g_should_stop)
+    {
+      uint64_t now;
+
+      if (poll(pfd, nsubs, 100) > 0)
+        {
+          for (i = 0; i < nsubs; i++)
+            {
+              if ((pfd[i].revents & POLLIN) == 0)
+                {
+                  continue;
+                }
+
+              if (orb_copy(subs[i].meta, subs[i].fd, rec) < 0)
+                {
+                  continue;
+                }
+
+              /* The sample's own timestamp is its first 8 bytes. Use it for
+               * decimation so the spacing is measured in sample time, not
+               * loop-wakeup time.
+               */
+
+              if (min_interval > 0)
+                {
+                  uint64_t ts;
+
+                  memcpy(&ts, rec, sizeof(ts));
+
+                  if (ts - subs[i].last_us < min_interval)
+                    {
+                      continue;
+                    }
+
+                  subs[i].last_us = ts;
+                }
+
+              if (log_data(subs[i].msg_id, rec, subs[i].topic->rec_size))
+                {
+                  pthread_mutex_lock(&g_lock);
+                  g_status.samples++;
+                  pthread_mutex_unlock(&g_lock);
+                }
+              else
+                {
+                  pthread_mutex_lock(&g_lock);
+                  g_status.dropped++;
+                  pthread_mutex_unlock(&g_lock);
+                }
+            }
+        }
+
+      /* Flush at least a few times a second, so a short session or a sudden
+       * power loss keeps most of what was recorded.
+       */
+
+      now = log_now_us();
+      if (now - last_flush >= 250000)
+        {
+          log_flush();
+          last_flush = now;
+        }
+    }
+
+  log_flush();
+  fsync(g_fd);
+  close(g_fd);
+  g_fd = -1;
+
+  for (i = 0; i < nsubs; i++)
+    {
+      orb_unsubscribe(subs[i].fd);
+    }
+
+  syslog(LOG_INFO, "logger: stopped (%" PRIu32 " samples, %" PRIu32 " bytes, "
+                   "%" PRIu32 " dropped)\n",
+         g_status.samples, g_status.bytes, g_status.dropped);
+
+  g_running = false;
+  return NULL;
+}
+
+/****************************************************************************
+ * Public Functions
+ ****************************************************************************/
+
+int logger_start(void)
+{
+  pthread_attr_t attr;
+  struct sched_param sparam;
+  pthread_t tid;
+  int ret;
+
+  if (g_running)
+    {
+      return -EALREADY;
+    }
+
+  g_should_stop = false;
+  memset(&g_status, 0, sizeof(g_status));
+
+  pthread_attr_init(&attr);
+  pthread_attr_setstacksize(&attr, LOG_STACK);
+  sparam.sched_priority = LOG_PRIO;
+  pthread_attr_setschedparam(&attr, &sparam);
+
+  g_running = true;
+  ret = pthread_create(&tid, &attr, log_thread, NULL);
+  pthread_attr_destroy(&attr);
+
+  if (ret != 0)
+    {
+      g_running = false;
+      return -ret;
+    }
+
+  pthread_setname_np(tid, "logger");
+  pthread_detach(tid);
+
+  return OK;
+}
+
+void logger_stop(void)
+{
+  int i;
+
+  if (!g_running)
+    {
+      return;
+    }
+
+  g_should_stop = true;
+
+  for (i = 0; i < 200 && g_running; i++)
+    {
+      usleep(10000);
+    }
+}
+
+bool logger_is_running(void)
+{
+  return g_running;
+}
+
+int logger_get_status(FAR struct logger_status_s *status)
+{
+  if (status == NULL)
+    {
+      return -EINVAL;
+    }
+
+  pthread_mutex_lock(&g_lock);
+  *status = g_status;
+  status->running = g_running;
+  pthread_mutex_unlock(&g_lock);
+
+  return OK;
+}
