@@ -29,6 +29,8 @@
 
 #include <nuttx/config.h>
 
+#include <unistd.h>
+
 #include <stdbool.h>
 #include <debug.h>
 #include <errno.h>
@@ -264,8 +266,17 @@ int fmuv6c_msc_export(void)
       return OK;                  /* already handed over */
     }
 
-  /* Drop our mount first. -ENOENT/-EINVAL just means it was not mounted
-   * (e.g. no card), which is fine - carry on.
+  /* Push everything to the card before letting go of it. nx_umount2 flushes the
+   * FAT itself, but sync() first is cheap insurance: it commits every dirty
+   * buffer on every mount, so nothing a program wrote is left in RAM when the
+   * host takes over. Without a flush the host reads stale blocks and a file that
+   * `ls` shows on the board is simply absent over USB.
+   */
+
+  sync();
+
+  /* Drop our mount. -ENOENT/-EINVAL just means it was not mounted (e.g. no
+   * card), which is fine - carry on.
    */
 
   ret = nx_umount2(FMUV6C_MICROSD_MOUNTPOINT, 0);

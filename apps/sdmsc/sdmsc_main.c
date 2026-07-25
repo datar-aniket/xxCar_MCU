@@ -27,6 +27,10 @@
 
 #include <arch/board/board.h>
 
+#ifdef CONFIG_XXCAR_LOGGER
+#  include "../logger/logger.h"
+#endif
+
 /****************************************************************************
  * Private Functions
  ****************************************************************************/
@@ -63,6 +67,20 @@ int main(int argc, FAR char *argv[])
 
   if (strcmp(argv[1], "on") == 0)
     {
+#ifdef CONFIG_XXCAR_LOGGER
+      /* The logger holds a file open on the card, which blocks the unmount that
+       * export needs (nx_umount2 returns -EBUSY). Stop it first so the card can
+       * be handed over cleanly - and so everything it wrote is flushed and the
+       * host sees the finished .ulg.
+       */
+
+      if (logger_is_running())
+        {
+          printf("sdmsc: stopping the logger to release the card\n");
+          logger_stop();
+        }
+#endif
+
       ret = fmuv6c_msc_export();
       if (ret < 0)
         {
