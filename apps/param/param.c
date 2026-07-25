@@ -130,12 +130,27 @@ static const struct param_def_s g_params[] =
 
   { "LOG_ENABLE", PARAM_TYPE_INT32, I32(0), I32(0), I32(1),
     "Start logging at boot" },
-  { "LOG_RATE",   PARAM_TYPE_INT32, I32(50), I32(1), I32(500),
-    "Log sample rate (Hz)" },
-  { "LOG_IMU",    PARAM_TYPE_INT32, I32(1), I32(0), I32(1), "Log IMU" },
-  { "LOG_MAG",    PARAM_TYPE_INT32, I32(1), I32(0), I32(1), "Log magnetometer" },
-  { "LOG_BARO",   PARAM_TYPE_INT32, I32(1), I32(0), I32(1), "Log barometer" },
-  { "LOG_RC",     PARAM_TYPE_INT32, I32(0), I32(0), I32(1), "Log RC input" },
+  { "LOG_RATE",   PARAM_TYPE_INT32, I32(0), I32(0), I32(2000),
+    "Log rate cap, Hz (0 = every sample / native)" },
+
+  /* One switch per sensor, so a session can be exactly the data you want. Add a
+   * new sensor here and in apps/logger's table; nothing else changes.
+   */
+
+  { "LOG_IMU0",   PARAM_TYPE_INT32, I32(1), I32(0), I32(1),
+    "Log IMU0 (ICM-42688 accel+gyro)" },
+  { "LOG_IMU1",   PARAM_TYPE_INT32, I32(0), I32(0), I32(1),
+    "Log IMU1 (BMI055 accel+gyro)" },
+  { "LOG_MAG",    PARAM_TYPE_INT32, I32(1), I32(0), I32(1),
+    "Log magnetometer (IST8310)" },
+  { "LOG_BARO",   PARAM_TYPE_INT32, I32(1), I32(0), I32(1),
+    "Log barometer (MS5611)" },
+  { "LOG_RC",     PARAM_TYPE_INT32, I32(0), I32(0), I32(1),
+    "Log RC input" },
+  { "LOG_FLOW",   PARAM_TYPE_INT32, I32(0), I32(0), I32(1),
+    "Log optical flow (MTF-02)" },
+  { "LOG_DIST",   PARAM_TYPE_INT32, I32(0), I32(0), I32(1),
+    "Log distance sensor" },
 
   /* ---- Calibration ------------------------------------------------------
    * Written by the calibration app. Gyro offsets are rad/s, accel offsets

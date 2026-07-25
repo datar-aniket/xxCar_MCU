@@ -9,6 +9,8 @@ struct accel { uint64_t t; float x,y,z,temp; };
 struct baro  { uint64_t t; float p,temp; };
 struct mag   { uint64_t t; float x,y,z,temp; int32_t st; uint8_t pad[4]; };
 struct rc    { uint64_t t; uint16_t ch[18]; uint16_t fr,lost; uint8_t cnt,rssi,ok,fs,src,pad[3]; };
+struct flow  { uint64_t t; uint32_t it,tdd; float ix,iy,ixg,iyg,izg,dist; int16_t temp; uint8_t q,sid,pad[4]; };
+struct dist  { uint64_t t; float cur,mn,mx; uint8_t type,ori,cov,sq; };
 #pragma pack(pop)
 int main(void){
   f=fopen("all.ulg","wb");
@@ -18,15 +20,19 @@ int main(void){
     "sensor_accel:uint64_t timestamp;float x;float y;float z;float temperature;",
     "sensor_baro:uint64_t timestamp;float pressure;float temperature;",
     "sensor_mag:uint64_t timestamp;float x;float y;float z;float temperature;int32_t status;",
-    "rc_input:uint64_t timestamp;uint16_t[18] channel;uint16_t frames;uint16_t lost_frames;uint8_t count;uint8_t rssi;uint8_t ok;uint8_t failsafe;uint8_t source;"};
-  for(int i=0;i<4;i++) msg('F',F[i],strlen(F[i]));
-  const char*N[]={"sensor_accel","sensor_baro","sensor_mag","rc_input"};
-  for(uint16_t id=0;id<4;id++){uint8_t a[40];size_t l=0;a[l++]=0;a[l++]=id&0xff;a[l++]=id>>8;memcpy(a+l,N[id],strlen(N[id]));l+=strlen(N[id]);msg('A',a,l);}
+    "rc_input:uint64_t timestamp;uint16_t[18] channel;uint16_t frames;uint16_t lost_frames;uint8_t count;uint8_t rssi;uint8_t ok;uint8_t failsafe;uint8_t source;",
+    "optical_flow:uint64_t timestamp;uint32_t integration_time_us;uint32_t time_delta_distance_us;float integrated_x;float integrated_y;float integrated_xgyro;float integrated_ygyro;float integrated_zgyro;float distance;int16_t temperature;uint8_t quality;uint8_t sensor_id;",
+    "distance_sensor:uint64_t timestamp;float current_distance;float min_distance;float max_distance;uint8_t type;uint8_t orientation;uint8_t covariance;uint8_t signal_quality;"};
+  for(int i=0;i<6;i++) msg('F',F[i],strlen(F[i]));
+  const char*N[]={"sensor_accel","sensor_baro","sensor_mag","rc_input","optical_flow","distance_sensor"};
+  for(uint16_t id=0;id<6;id++){uint8_t a[40];size_t l=0;a[l++]=0;a[l++]=id&0xff;a[l++]=id>>8;memcpy(a+l,N[id],strlen(N[id]));l+=strlen(N[id]);msg('A',a,l);}
   for(int k=0;k<4;k++){
     struct accel a={.t=1000+k*500,.x=0.10f*k,.y=-0.20f,.z=9.81f,.temp=34.5f}; dat(0,&a,24);
     struct baro  b={.t=1000+k*500,.p=1013.25f,.temp=27.9f};                   dat(1,&b,16);
     struct mag   m={.t=1000+k*500,.x=0.21f,.y=0.11f,.z=0.41f,.temp=33.0f,.st=1}; dat(2,&m,28);
     struct rc    r={.t=1000+k*500,.cnt=16,.rssi=200,.ok=1}; r.ch[0]=1500; r.ch[1]=1000; dat(3,&r,53);
+    struct flow  fl={.t=1000+k*500,.it=10000,.ix=0.05f,.iy=-0.03f,.dist=1.25f,.q=200}; dat(4,&fl,44);
+    struct dist  ds={.t=1000+k*500,.cur=1.30f,.mn=0.1f,.mx=8.0f,.sq=90}; dat(5,&ds,24);
   }
   fclose(f); return 0;
 }

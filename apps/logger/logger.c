@@ -36,6 +36,7 @@
 #include "logger.h"
 #include "../param/param.h"
 #include "../rc_in/rc_in.h"
+#include "../uorb_msgs/uorb_msgs.h"
 
 /****************************************************************************
  * Pre-processor Definitions
@@ -66,33 +67,29 @@
 #define ULOG_MSG_ADD_SUB 'A'
 #define ULOG_MSG_DATA    'D'
 
-/* Which LOG_* parameter gates a topic. */
-
-enum log_group_e
-{
-  GRP_IMU,   /* LOG_IMU  - both IMUs' accel and gyro */
-  GRP_MAG,   /* LOG_MAG  */
-  GRP_BARO,  /* LOG_BARO */
-  GRP_RC,    /* LOG_RC   */
-};
-
 /****************************************************************************
  * Private Types
  ****************************************************************************/
 
-/* A loggable topic: how to find it, its ULog identity, and how many bytes of
- * the sample go into the file.
+/* A loggable topic: how to find it, its ULog identity, how many bytes of the
+ * sample go into the file, and the LOG_* parameter that turns it on.
+ *
+ * Adding a sensor is one row here plus one LOG_* parameter - nothing else in the
+ * logger changes. That is the whole reason the gate is a parameter name rather
+ * than a hard-coded group.
  */
 
 struct log_topic_s
 {
-  FAR const char     *orb_name;   /* orb_get_meta() name, or NULL for a direct
-                                   * topic (rc_in) */
-  bool                is_rc;      /* rc_in: use ORB_ID(rc_in) directly */
-  FAR const char     *ulog_name;  /* ULog message name */
-  uint8_t             multi_id;   /* ULog instance (accel0 vs accel1) */
-  uint16_t            rec_size;   /* bytes of the sample to write */
-  enum log_group_e    group;
+  FAR const char                *orb_name;    /* orb_get_meta() name, or NULL */
+  FAR const struct orb_metadata *direct_meta; /* non-NULL for our own topics
+                                               * (rc_in, optical_flow, ...),
+                                               * which orb_get_meta cannot find
+                                               * by name */
+  FAR const char                *ulog_name;   /* ULog message name */
+  uint8_t                        multi_id;    /* ULog instance */
+  uint16_t                       rec_size;    /* meaningful bytes to write */
+  FAR const char                *param;       /* "LOG_IMU0", ... */
 };
 
 /* Per-subscription runtime state. */
@@ -135,6 +132,15 @@ g_formats[] =
     "uint64_t timestamp;uint16_t[18] channel;uint16_t frames;"
     "uint16_t lost_frames;uint8_t count;uint8_t rssi;uint8_t ok;"
     "uint8_t failsafe;uint8_t source;" },
+  { "optical_flow",
+    "uint64_t timestamp;uint32_t integration_time_us;"
+    "uint32_t time_delta_distance_us;float integrated_x;float integrated_y;"
+    "float integrated_xgyro;float integrated_ygyro;float integrated_zgyro;"
+    "float distance;int16_t temperature;uint8_t quality;uint8_t sensor_id;" },
+  { "distance_sensor",
+    "uint64_t timestamp;float current_distance;float min_distance;"
+    "float max_distance;uint8_t type;uint8_t orientation;uint8_t covariance;"
+    "uint8_t signal_quality;" },
 };
 
 #define NFORMATS ((int)(sizeof(g_formats) / sizeof(g_formats[0])))
@@ -152,13 +158,16 @@ g_formats[] =
 
 static const struct log_topic_s g_topics[] =
 {
-  { "sensor_accel0", false, "sensor_accel", 0, 24, GRP_IMU  },
-  { "sensor_gyro0",  false, "sensor_gyro",  0, 24, GRP_IMU  },
-  { "sensor_accel1", false, "sensor_accel", 1, 24, GRP_IMU  },
-  { "sensor_gyro1",  false, "sensor_gyro",  1, 24, GRP_IMU  },
-  { "sensor_mag0",   false, "sensor_mag",   0, 28, GRP_MAG  },
-  { "sensor_baro0",  false, "sensor_baro",  0, 16, GRP_BARO },
-  { NULL,            true,  "rc_input",     0, 53, GRP_RC   },
+  /* orb_name        direct_meta                 ulog_name         mid sz  param */
+  { "sensor_accel0", NULL,                       "sensor_accel",    0, 24, "LOG_IMU0" },
+  { "sensor_gyro0",  NULL,                       "sensor_gyro",     0, 24, "LOG_IMU0" },
+  { "sensor_accel1", NULL,                       "sensor_accel",    1, 24, "LOG_IMU1" },
+  { "sensor_gyro1",  NULL,                       "sensor_gyro",     1, 24, "LOG_IMU1" },
+  { "sensor_mag0",   NULL,                       "sensor_mag",      0, 28, "LOG_MAG"  },
+  { "sensor_baro0",  NULL,                       "sensor_baro",     0, 16, "LOG_BARO" },
+  { NULL,            ORB_ID(rc_in),              "rc_input",        0, 53, "LOG_RC"   },
+  { NULL,            ORB_ID(optical_flow),       "optical_flow",    0, 44, "LOG_FLOW" },
+  { NULL,            ORB_ID(distance_sensor),    "distance_sensor", 0, 24, "LOG_DIST" },
 };
 
 #define NTOPICS ((int)(sizeof(g_topics) / sizeof(g_topics[0])))
@@ -387,16 +396,9 @@ static FAR void *log_thread(FAR void *arg)
   rate = param_i32("LOG_RATE");
   min_interval = (rate > 0) ? (uint32_t)(1000000 / rate) : 0;
 
-  /* Which groups are on. */
-
-  bool on[4];
-  on[GRP_IMU]  = param_i32("LOG_IMU")  != 0;
-  on[GRP_MAG]  = param_i32("LOG_MAG")  != 0;
-  on[GRP_BARO] = param_i32("LOG_BARO") != 0;
-  on[GRP_RC]   = param_i32("LOG_RC")   != 0;
-
-  /* Subscribe to each enabled topic that actually exists. A blocking subscribe
-   * so poll() wakes the moment a sample is published.
+  /* Subscribe to each enabled topic that actually exists. Each topic's own
+   * LOG_* parameter decides whether it is in. A blocking subscribe so poll()
+   * wakes the moment a sample is published.
    */
 
   for (i = 0; i < NTOPICS; i++)
@@ -405,12 +407,12 @@ static FAR void *log_thread(FAR void *arg)
       FAR const struct orb_metadata *meta;
       int fd;
 
-      if (!on[t->group])
+      if (param_i32(t->param) == 0)
         {
           continue;
         }
 
-      meta = t->is_rc ? ORB_ID(rc_in) : orb_get_meta(t->orb_name);
+      meta = t->direct_meta ? t->direct_meta : orb_get_meta(t->orb_name);
       if (meta == NULL)
         {
           continue;
@@ -433,7 +435,7 @@ static FAR void *log_thread(FAR void *arg)
   if (nsubs == 0)
     {
       syslog(LOG_WARNING,
-             "logger: nothing selected (set LOG_IMU / LOG_MAG / ...)\n");
+             "logger: nothing selected (set LOG_IMU0 / LOG_MAG / ...)\n");
       g_running = false;
       return NULL;
     }

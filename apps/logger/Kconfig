@@ -9,6 +9,7 @@ config XXCAR_LOGGER
 	depends on UORB && SENSORS
 	select XXCAR_PARAM
 	select XXCAR_RC_IN
+	select XXCAR_UORB_MSGS
 	---help---
 		Records the uORB topics chosen by LOG_IMU / LOG_MAG / LOG_BARO / LOG_RC
 		to a ULog file on the microSD, at their native rate (LOG_RATE=0) or
