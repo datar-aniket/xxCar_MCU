@@ -332,6 +332,7 @@ CONFIG_XXCAR_LOGGER=y
 CONFIG_XXCAR_REBOOT=y
 CONFIG_XXCAR_MAVLINK=y
 CONFIG_XXCAR_INIT=y
+CONFIG_XXCAR_IMU_CAL=y
 
 # SPI1 DMA for the IMU bus. Polled H7 SPI does a CSTART/CSUSP handshake PER BYTE
 # (real CPU on every byte of an IMU burst); DMA turns a burst into one hardware

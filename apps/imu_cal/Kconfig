@@ -1,0 +1,16 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config XXCAR_IMU_CAL
+	bool "imu_cal: apply stored IMU calibration"
+	default n
+	select XXCAR_PARAM
+	---help---
+		Applies the CAL_* parameters to a raw accel or gyro sample as
+		true = M * (measured - b), with M stored pre-inverted so the
+		correction costs nine multiplies rather than a solve.
+
+		A library, not a command: it is linked by whatever consumes
+		corrected samples (the calibration session, and later the EKF).

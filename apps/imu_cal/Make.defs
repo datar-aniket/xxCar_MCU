@@ -1,0 +1,9 @@
+############################################################################
+# apps/imu_cal/Make.defs
+#
+# SPDX-License-Identifier: Apache-2.0
+############################################################################
+
+ifneq ($(CONFIG_XXCAR_IMU_CAL),)
+CONFIGURED_APPS += $(APPDIR)/xxcar/imu_cal
+endif
