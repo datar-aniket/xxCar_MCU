@@ -37,7 +37,7 @@ static const struct param_def_s g_params[] =
 {
   /* ---- Serial ports -----------------------------------------------------
    * One FUNC + one BAUD per FMU connector. Function:
-   *   0=disabled 1=NSH 2=MAVLink 3=GPS 4=RC_IN
+   *   0=disabled 1=NSH 2=MAVLink 3=GPS 4=RC_IN 5=CAL (GUI, no shell)
    *
    * NSH is not special - it is a function you assign to a port like any other,
    * and it can be moved. TELEM1 has it by default only because that is where
@@ -49,27 +49,27 @@ static const struct param_def_s g_params[] =
    * USART6 is likewise absent; it IS the link to PX4IO.
    */
 
-  { "SER_TEL1_FUNC", PARAM_TYPE_INT32, I32(SER_FUNC_NSH),      I32(0), I32(4),
-    "TELEM1 function (0=off 1=NSH 2=MAVLink 3=GPS 4=RC)", PARAM_RANGE_ENUM },
+  { "SER_TEL1_FUNC", PARAM_TYPE_INT32, I32(SER_FUNC_NSH),      I32(0), I32(5),
+    "TELEM1 func (0=off 1=NSH 2=MAVLink 3=GPS 4=RC 5=CAL)", PARAM_RANGE_ENUM },
   { "SER_TEL1_BAUD", PARAM_TYPE_INT32, I32(115200), I32(1200), I32(3000000),
     "TELEM1 baud rate" },
-  { "SER_TEL2_FUNC", PARAM_TYPE_INT32, I32(SER_FUNC_DISABLED), I32(0), I32(4),
+  { "SER_TEL2_FUNC", PARAM_TYPE_INT32, I32(SER_FUNC_DISABLED), I32(0), I32(5),
     "TELEM2 function", PARAM_RANGE_ENUM },
   { "SER_TEL2_BAUD", PARAM_TYPE_INT32, I32(57600),  I32(1200), I32(3000000),
     "TELEM2 baud rate" },
-  { "SER_TEL3_FUNC", PARAM_TYPE_INT32, I32(SER_FUNC_DISABLED), I32(0), I32(4),
+  { "SER_TEL3_FUNC", PARAM_TYPE_INT32, I32(SER_FUNC_DISABLED), I32(0), I32(5),
     "TELEM3 function", PARAM_RANGE_ENUM },
   { "SER_TEL3_BAUD", PARAM_TYPE_INT32, I32(57600),  I32(1200), I32(3000000),
     "TELEM3 baud rate" },
-  { "SER_GPS1_FUNC", PARAM_TYPE_INT32, I32(SER_FUNC_DISABLED), I32(0), I32(4),
+  { "SER_GPS1_FUNC", PARAM_TYPE_INT32, I32(SER_FUNC_DISABLED), I32(0), I32(5),
     "GPS1 function", PARAM_RANGE_ENUM },
   { "SER_GPS1_BAUD", PARAM_TYPE_INT32, I32(38400),  I32(1200), I32(3000000),
     "GPS1 baud rate" },
-  { "SER_GPS2_FUNC", PARAM_TYPE_INT32, I32(SER_FUNC_DISABLED), I32(0), I32(4),
+  { "SER_GPS2_FUNC", PARAM_TYPE_INT32, I32(SER_FUNC_DISABLED), I32(0), I32(5),
     "GPS2 function", PARAM_RANGE_ENUM },
   { "SER_GPS2_BAUD", PARAM_TYPE_INT32, I32(38400),  I32(1200), I32(3000000),
     "GPS2 baud rate" },
-  { "SER_DBG_FUNC",  PARAM_TYPE_INT32, I32(SER_FUNC_DISABLED), I32(0), I32(4),
+  { "SER_DBG_FUNC",  PARAM_TYPE_INT32, I32(SER_FUNC_DISABLED), I32(0), I32(5),
     "FMU DEBUG connector function", PARAM_RANGE_ENUM },
   { "SER_DBG_BAUD",  PARAM_TYPE_INT32, I32(115200), I32(1200), I32(3000000),
     "FMU DEBUG baud rate" },
@@ -79,7 +79,7 @@ static const struct param_def_s g_params[] =
    * NSH by default - plug a cable in and you get a shell.
    */
 
-  { "SER_USB_FUNC",  PARAM_TYPE_INT32, I32(SER_FUNC_NSH), I32(0), I32(4),
+  { "SER_USB_FUNC",  PARAM_TYPE_INT32, I32(SER_FUNC_NSH), I32(0), I32(5),
     "USB (/dev/ttyACM0) function - no baud, the host sets it",
     PARAM_RANGE_ENUM },
 

@@ -1,0 +1,9 @@
+############################################################################
+# apps/cal/Make.defs
+#
+# SPDX-License-Identifier: Apache-2.0
+############################################################################
+
+ifneq ($(CONFIG_XXCAR_CAL),)
+CONFIGURED_APPS += $(APPDIR)/xxcar/cal
+endif

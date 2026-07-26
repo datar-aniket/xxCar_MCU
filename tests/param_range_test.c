@@ -31,9 +31,26 @@ static void fail(const char *what)
 
 static void test_selector_rejects_and_does_not_move(void)
 {
+  FAR const struct param_def_s *d;
   int32_t before;
   int32_t after;
+  int32_t bad;
+  int idx;
   int ret;
+
+  /* Derive the invalid value from the table rather than hard-coding it, so
+   * adding a serial function does not turn this test red for the wrong reason.
+   */
+
+  idx = param_find("SER_USB_FUNC");
+  if (idx < 0)
+    {
+      fail("selector: SER_USB_FUNC is missing");
+      return;
+    }
+
+  d   = param_def(idx);
+  bad = d->max.i + 1;
 
   if (param_get_i32("SER_USB_FUNC", &before) < 0)
     {
@@ -41,27 +58,24 @@ static void test_selector_rejects_and_does_not_move(void)
       return;
     }
 
-  ret = param_set_i32("SER_USB_FUNC", 5);      /* one past the last function */
+  ret = param_set_i32("SER_USB_FUNC", bad);
 
   if (ret >= 0)
     {
-      fail("selector: out-of-range set was accepted");
+      printf("FAIL selector: out-of-range set (%d) was accepted\n", (int)bad);
+      g_fail++;
     }
+
+  /* The whole point: a refused selector must not move at all. The original bug
+   * clamped it to the maximum, which is a DIFFERENT function - that is how an
+   * SBUS decoder ended up on the USB port.
+   */
 
   if (param_get_i32("SER_USB_FUNC", &after) < 0 || after != before)
     {
       printf("FAIL selector: value moved %d -> %d on a refused set\n",
              (int)before, (int)after);
       g_fail++;
-    }
-
-  /* 4 (RC_IN) is the value the old clamp would have produced. If it ever
-   * appears here again, the regression is back.
-   */
-
-  if (after == 4 && before != 4)
-    {
-      fail("selector: clamped to RC_IN - the original bug");
     }
 }
 
@@ -133,7 +147,7 @@ static void test_other_selector_also_protected(void)
 
   param_get_i32("RC_PROT", &before);
 
-  if (param_set_i32("RC_PROT", 7) >= 0)
+  if (param_set_i32("RC_PROT", 99) >= 0)
     {
       fail("RC_PROT: out-of-range set was accepted");
     }

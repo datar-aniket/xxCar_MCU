@@ -591,6 +591,19 @@ int serial_manager_start(void)
                    p->name, p->devpath, baud);
             break;
 
+          case SER_FUNC_CAL:
+
+            /* Deliberately starts nothing. The value exists so a port can be
+             * marked as belonging to the calibration GUI and, crucially, have
+             * NO shell put on it - a shell here would sit blocked in read()
+             * and steal the session's input. `cal session` opens it on demand.
+             */
+
+            syslog(LOG_INFO,
+                   "serial: %s (%s) reserved for calibration - no shell\n",
+                   p->name, p->devpath);
+            break;
+
           default:
             syslog(LOG_ERR, "serial: %s: unknown function %" PRId32 "\n",
                    p->name, func);
