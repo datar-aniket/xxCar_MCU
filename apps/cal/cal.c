@@ -591,8 +591,8 @@ int cal_session(void)
 
           if (st_sub < 0)
             {
-              cal_emit(fd,
-                       "{\"evt\":\"error\",\"msg\":\"sensor not available\"}\n");
+              cal_emit(fd, "{\"evt\":\"error\","
+                           "\"msg\":\"sensor not available\"}\n");
               continue;
             }
 
