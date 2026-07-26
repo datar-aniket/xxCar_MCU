@@ -626,7 +626,7 @@ int icm42688_register(FAR struct spi_dev_s *spi, int devno)
   snprintf(arg1, sizeof(arg1), "%p", dev);
   argv[0] = arg1;
   argv[1] = NULL;
-  ret = kthread_create("icm42688", SCHED_PRIORITY_DEFAULT, 2048,
+  ret = kthread_create("icm42688", FMUV6C_SENSOR_PRIO, 2048,
                        icm42688_thread, argv);
   if (ret < 0)
     {

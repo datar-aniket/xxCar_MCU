@@ -557,7 +557,7 @@ static int bmi055_init_one(FAR struct spi_dev_s *spi, int devno, bool is_gyro,
   snprintf(arg1, sizeof(arg1), "%p", dev);
   argv[0] = arg1;
   argv[1] = NULL;
-  ret = kthread_create(name, SCHED_PRIORITY_DEFAULT, 2048,
+  ret = kthread_create(name, FMUV6C_SENSOR_PRIO, 2048,
                        bmi055_thread, argv);
   if (ret < 0)
     {

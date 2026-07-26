@@ -30,6 +30,7 @@
 #include <nuttx/i2c/i2c_master.h>
 #include <nuttx/sensors/sensor.h>
 
+#include "fmuv6c.h"
 #include "ist8310.h"
 
 #if defined(CONFIG_SENSORS) && defined(CONFIG_I2C)
@@ -327,7 +328,7 @@ int ist8310_register(FAR struct i2c_master_s *i2c, int devno, uint8_t addr)
    * here would take the board down with no crash dump. Matches the IMU threads.
    */
 
-  ret = kthread_create("ist8310", SCHED_PRIORITY_DEFAULT, 2048,
+  ret = kthread_create("ist8310", FMUV6C_SENSOR_PRIO, 2048,
                        ist8310_thread, argv);
   if (ret < 0)
     {

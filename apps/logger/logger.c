@@ -44,9 +44,17 @@
  ****************************************************************************/
 
 #define LOG_STACK     4096
-#define LOG_PRIO      (SCHED_PRIORITY_DEFAULT + 2)   /* below the sensors, so
-                                                      * logging never delays a
-                                                      * sample being produced */
+/* Below the sensor threads, which run at SCHED_PRIORITY_DEFAULT + 50 (see
+ * FMUV6C_SENSOR_PRIO). That ordering is load-bearing, not a preference: this
+ * task blocks for 50-200 ms on a stalling card, and the ICM-42688's FIFO only
+ * holds about 51 ms at 2 kHz. Preempting the sensor threads for a card write
+ * loses samples in hardware, where nothing downstream can see it happen.
+ *
+ * The comment here used to claim it was below the sensors while the numbers
+ * said otherwise - the sensors were at DEFAULT and this was DEFAULT + 2.
+ */
+
+#define LOG_PRIO      (SCHED_PRIORITY_DEFAULT + 2)
 
 #define LOG_DIR       "/fs/microsd/log"
 

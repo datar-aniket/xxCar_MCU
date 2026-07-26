@@ -32,6 +32,7 @@
 #include <nuttx/i2c/i2c_master.h>
 #include <nuttx/sensors/sensor.h>
 
+#include "fmuv6c.h"
 #include "ms5611.h"
 
 #if defined(CONFIG_SENSORS) && defined(CONFIG_I2C)
@@ -368,7 +369,7 @@ int ms5611_register(FAR struct i2c_master_s *i2c, int devno, uint8_t addr)
    * here would take the board down with no crash dump. Matches the IMU threads.
    */
 
-  ret = kthread_create("ms5611", SCHED_PRIORITY_DEFAULT, 2048,
+  ret = kthread_create("ms5611", FMUV6C_SENSOR_PRIO, 2048,
                        ms5611_thread, argv);
   if (ret < 0)
     {

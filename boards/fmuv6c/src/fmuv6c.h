@@ -28,6 +28,8 @@
  ****************************************************************************/
 
 #include <nuttx/config.h>
+
+#include <sched.h>
 #include <nuttx/compiler.h>
 
 #include <stdint.h>
@@ -506,6 +508,34 @@ int stm32_sdio_initialize(void);
 int board_composite_initialize(int port);
 FAR void *board_composite_connect(int port, int configid);
 #endif
+
+/* Priority for the sensor FIFO-drain threads.
+ *
+ * Sampling is the one hard-real-time job on this board. The ICM-42688's FIFO
+ * holds 2048 bytes - 102 packets, about 51 ms at 2 kHz - and a thread starved
+ * for longer than that loses samples in HARDWARE, before uORB or any consumer
+ * sees them. Nothing downstream can detect or recover that.
+ *
+ * The stock NuttX sensor drivers all use SCHED_PRIORITY_DEFAULT, which is
+ * right when nothing else runs above it. On this board the logger, mavlink, rc
+ * and px4io tasks were all placed above DEFAULT, so the sensors sat at the
+ * BOTTOM of the ladder - and a logger blocked on a 64 KB SD write, which stalls
+ * 50-200 ms on a real card, would preempt them well past the 51 ms budget.
+ *
+ * So sensors go above every application task, and stay below HPWORK (224):
+ * that queue services SDMMC completion, and starving it would break the very
+ * writes the logger is waiting on.
+ *
+ *   224  HPWORK          SDMMC completion, watchdog
+ *   150  sensors         <- this
+ *   110  px4io           servo frames, soft deadline
+ *   105  rc
+ *   104  mavlink
+ *   102  logger
+ *   100  NSH, LPWORK
+ */
+
+#define FMUV6C_SENSOR_PRIO  (SCHED_PRIORITY_DEFAULT + 50)
 
 /****************************************************************************
  * Name: stm32_dma_alloc_init
