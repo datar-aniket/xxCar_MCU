@@ -92,3 +92,4 @@ boards/*/src/*.o
 # one machine's home directory into the repo, and it churns every time an app is
 # added. The build regenerates it, so it must not be tracked.
 /apps/Kconfig
+__pycache__/
