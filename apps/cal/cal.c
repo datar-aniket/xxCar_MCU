@@ -18,8 +18,11 @@
 #include <poll.h>
 #include <stdbool.h>
 
+#include <uORB/uORB.h>
+
 #include "cal.h"
 #include "cal_proto.h"
+#include "cal_still.h"
 #include "../imu_cal/imu_cal.h"
 #include "../param/param.h"
 
@@ -180,6 +183,22 @@ int cal_session(void)
     bool done = false;
     bool overlong = false;
 
+    FAR const struct orb_metadata *acc_meta;
+    FAR const struct orb_metadata *gyr_meta;
+    int acc_fd;
+    int gyr_fd;
+
+    /* A missing sensor must not crash the session - get/set/commit still
+     * work without one. CAPTURE alone needs both fds and reports an error
+     * event if either is unavailable.
+     */
+
+    acc_meta = orb_get_meta("sensor_accel0");
+    acc_fd   = acc_meta != NULL ? orb_subscribe(acc_meta) : -1;
+
+    gyr_meta = orb_get_meta("sensor_gyro0");
+    gyr_fd   = gyr_meta != NULL ? orb_subscribe(gyr_meta) : -1;
+
     ret = OK;
 
     while (!done)
@@ -266,10 +285,103 @@ int cal_session(void)
                     done = true;
                     break;
 
-                  /* Task 5 adds CAPTURE; GET/SET/COMMIT follow with it. */
+                  case CAL_CMD_CAPTURE:
+                    if (acc_fd < 0 || gyr_fd < 0)
+                      {
+                        n = cal_proto_error(evt, sizeof(evt),
+                                            "sensor not available");
+                      }
+                    else
+                      {
+                        struct cal_still_s still;
+                        struct sensor_accel a;
+                        struct sensor_gyro  g;
+                        float acc[3];
+                        float gyr[3];
+                        int   waited = 0;
+
+                        /* 0.02 rad/s is about a degree per second - below
+                         * what a hand on a bench can hold steady, above the
+                         * gyro's own noise. This loop usleep(1000)s between
+                         * samples, i.e. it samples at ~1kHz, so the
+                         * 500-sample window is ~500ms, not a quarter second
+                         * at 2kHz.
+                         */
+
+                        cal_still_reset(&still, 0.02f, 0.05f, 500);
+
+                        while (waited < 10000)
+                          {
+                            if (orb_copy(acc_meta, acc_fd, &a) < 0 ||
+                                orb_copy(gyr_meta, gyr_fd, &g) < 0)
+                              {
+                                usleep(1000);
+                                waited++;
+                                continue;
+                              }
+
+                            acc[0] = a.x; acc[1] = a.y; acc[2] = a.z;
+                            gyr[0] = g.x; gyr[1] = g.y; gyr[2] = g.z;
+
+                            if (cal_still_update(&still, acc, gyr))
+                              {
+                                break;
+                              }
+
+                            usleep(1000);
+                            waited++;
+                          }
+
+                        if (waited >= 10000)
+                          {
+                            n = cal_proto_error(evt, sizeof(evt),
+                                    "still not steady - hold it and retry");
+                          }
+                        else
+                          {
+                            float macc[3];
+                            float mgyr[3];
+
+                            cal_still_mean(&still, macc, mgyr);
+                            n = cal_proto_captured(evt, sizeof(evt),
+                                                   still.count, macc, mgyr,
+                                                   a.temperature);
+                          }
+                      }
+                    break;
+
+                  case CAL_CMD_GET:
+                    {
+                      char msg[64];
+
+                      snprintf(msg, sizeof(msg), "%s=%.6f", c.name,
+                               (double)param_f32(c.name));
+                      n = cal_proto_ok(evt, sizeof(evt), msg);
+                    }
+                    break;
+
+                  case CAL_CMD_SET:
+                    n = param_set_f32(c.name, c.fval) < 0
+                          ? cal_proto_error(evt, sizeof(evt),
+                                            "no such parameter")
+                          : cal_proto_ok(evt, sizeof(evt), "set");
+                    break;
+
+                  case CAL_CMD_COMMIT:
+
+                    /* One write, at the end. The USB port dies on cable
+                     * pull, and a half-written calibration is worse than
+                     * none.
+                     */
+
+                    n = param_save() < 0
+                          ? cal_proto_error(evt, sizeof(evt),
+                                            "param save failed")
+                          : cal_proto_ok(evt, sizeof(evt), "committed");
+                    break;
 
                   default:
-                    n = cal_proto_error(evt, sizeof(evt), "not implemented yet");
+                    n = cal_proto_error(evt, sizeof(evt), "unknown command");
                     break;
                 }
             }
@@ -279,6 +391,16 @@ int cal_session(void)
               write(fd, evt, (size_t)n);
             }
         }
+      }
+
+    if (acc_fd >= 0)
+      {
+        orb_unsubscribe(acc_fd);
+      }
+
+    if (gyr_fd >= 0)
+      {
+        orb_unsubscribe(gyr_fd);
       }
   }
 
