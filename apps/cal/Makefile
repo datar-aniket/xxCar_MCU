@@ -11,8 +11,8 @@ PRIORITY  = $(CONFIG_XXCAR_CAL_PRIORITY)
 STACKSIZE = $(CONFIG_XXCAR_CAL_STACKSIZE)
 MODULE    = $(CONFIG_XXCAR_CAL)
 
-# cal.c is the session; cal_main.c is the `cal` command.
-CSRCS    += cal.c
+# cal.c is the session, cal_proto.c the wire format; cal_main.c is the command.
+CSRCS    += cal.c cal_proto.c
 MAINSRC   = cal_main.c
 
 include $(APPDIR)/Application.mk

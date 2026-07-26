@@ -15,8 +15,11 @@
 #include <errno.h>
 #include <termios.h>
 #include <inttypes.h>
+#include <poll.h>
+#include <stdbool.h>
 
 #include "cal.h"
+#include "cal_proto.h"
 #include "../imu_cal/imu_cal.h"
 #include "../param/param.h"
 
@@ -166,9 +169,92 @@ int cal_session(void)
 
   printf("cal: session open on %s - drive it from the host\n", CAL_DEVPATH);
 
-  /* Task 4 replaces this with the protocol event loop. */
+  /* Read a line at a time. poll() rather than a blocking read so a cable pull
+   * (POLLHUP) ends the session instead of hanging the shell forever.
+   */
 
-  ret = OK;
+  {
+    char line[96];
+    char evt[256];
+    size_t fill = 0;
+    bool done = false;
+
+    ret = OK;
+
+    while (!done)
+      {
+        struct pollfd pfd;
+        char ch;
+        ssize_t got;
+
+        pfd.fd     = fd;
+        pfd.events = POLLIN;
+
+        if (poll(&pfd, 1, 500) <= 0)
+          {
+            continue;
+          }
+
+        if ((pfd.revents & (POLLHUP | POLLERR)) != 0)
+          {
+            /* Cable pulled. Nothing has been written to the parameter store,
+             * so there is nothing to unwind.
+             */
+
+            ret = -ENOTCONN;
+            break;
+          }
+
+        got = read(fd, &ch, 1);
+        if (got <= 0)
+          {
+            continue;
+          }
+
+        if (ch != '\n' && fill < sizeof(line) - 1)
+          {
+            line[fill++] = ch;
+            continue;
+          }
+
+        line[fill] = '\0';
+        fill = 0;
+
+        {
+          struct cal_cmd_s c;
+          int n = 0;
+
+          cal_proto_parse(line, &c);
+
+          switch (c.cmd)
+            {
+              case CAL_CMD_NONE:
+                continue;
+
+              case CAL_CMD_HELLO:
+                n = cal_proto_hello(evt, sizeof(evt));
+                break;
+
+              case CAL_CMD_QUIT:
+              case CAL_CMD_ABORT:
+                n = cal_proto_ok(evt, sizeof(evt), "bye");
+                done = true;
+                break;
+
+              /* Task 5 adds CAPTURE; GET/SET/COMMIT follow with it. */
+
+              default:
+                n = cal_proto_error(evt, sizeof(evt), "not implemented yet");
+                break;
+            }
+
+          if (n > 0)
+            {
+              write(fd, evt, (size_t)n);
+            }
+        }
+      }
+  }
 
   tcsetattr(fd, TCSANOW, &saved);
   close(fd);
