@@ -10,6 +10,7 @@ config XXCAR_CAL
 	select XXCAR_PARAM
 	select XXCAR_SERIAL
 	select XXCAR_UORB_MSGS
+	select XXCAR_LOGGER
 	---help---
 		Serves the calibration GUI over the USB CDC port: enumerates the
 		sensors it can offer and streams the selected one.

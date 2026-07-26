@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
+#include <inttypes.h>
 #include <string.h>
 #include <stdbool.h>
 #include <unistd.h>
@@ -25,9 +26,14 @@
 #include <nuttx/uorb.h>
 
 #include "cal.h"
+#include "cal_accel.h"
 #include "../param/param.h"
 #include "../serial/serial.h"
 #include "../uorb_msgs/uorb_msgs.h"
+
+#ifdef CONFIG_XXCAR_LOGGER
+#  include "../logger/logger.h"
+#endif
 
 /****************************************************************************
  * Private Types
@@ -362,6 +368,122 @@ static int cal_cmd_list(int fd)
   return cal_emit(fd, "{\"evt\":\"ok\",\"what\":\"list\"}\n");
 }
 
+/* Per-axis offset and scale for one sensor, as stored in the parameters.
+ *
+ *     corrected = (raw - off) * scl
+ *
+ * A gyro has offsets only; its scale stays 1 because nothing here can measure
+ * it - that needs a known rotation, which a desk cannot provide.
+ */
+
+struct cal_apply_s
+{
+  float off[3];
+  float scl[3];
+  bool  on;
+};
+
+static const char *const g_cal_prefix[] =
+{
+  "CAL_ACC0", "CAL_GYRO0", "CAL_ACC1", "CAL_GYRO1"
+};
+
+/* Load the stored calibration for a streaming sensor, if it has one and the
+ * host asked for corrected data. Sensors with no calibration model (baro,
+ * flow, distance) simply stay off.
+ */
+
+static void cal_load_apply(int i, bool want, FAR struct cal_apply_s *a)
+{
+  char name[PARAM_NAME_MAX + 1];
+  FAR const char *pfx = NULL;
+  bool is_accel;
+  int k;
+
+  memset(a, 0, sizeof(*a));
+  a->scl[0] = a->scl[1] = a->scl[2] = 1.0f;
+
+  if (!want || i > 3)
+    {
+      return;                    /* g_sensors 0..3 are the IMU axes */
+    }
+
+  pfx      = g_cal_prefix[i];
+  is_accel = (g_sensors[i].kind == CAL_KIND_ACCEL);
+
+  if (is_accel)
+    {
+      snprintf(name, sizeof(name), "%s_OK", pfx);
+
+      if (param_i32(name) != 1)
+        {
+          return;                /* never calibrated: pass raw through */
+        }
+    }
+
+  for (k = 0; k < 3; k++)
+    {
+      const char axis[3] = { 'X', 'Y', 'Z' };
+
+      snprintf(name, sizeof(name), "%s_%cOFF", pfx, axis[k]);
+      a->off[k] = param_f32(name);
+
+      if (is_accel)
+        {
+          snprintf(name, sizeof(name), "%s_%cSCL", pfx, axis[k]);
+          a->scl[k] = param_f32(name);
+        }
+    }
+
+  a->on = true;
+}
+
+/* Average a stretch of samples and say whether the board was actually still.
+ *
+ * Stillness is judged by the standard deviation over the window, not by
+ * whether any single sample strayed: at +/-16 g the accelerometer's own noise
+ * is around 0.02 m/s^2 RMS, so any excursion threshold tight enough to catch
+ * real motion is tripped constantly by noise alone.
+ *
+ * Blocks for up to `ms`. That is deliberate - the operator is holding a board
+ * still and there is nothing else for the session to do.
+ */
+
+static int cal_capture_still(int i, int sub, int ms, FAR float mean[3],
+                             FAR float sd[3])
+{
+  static float buf[256 * 3];
+  const int want = 200;
+  int n = 0;
+  uint64_t deadline = cal_now_us() + (uint64_t)ms * 1000;
+
+  while (n < want && cal_now_us() < deadline)
+    {
+      float v[CAL_MAX_VALUES];
+      uint32_t t;
+
+      if (cal_read_values(i, sub, v, &t) == OK)
+        {
+          buf[n * 3 + 0] = v[0];
+          buf[n * 3 + 1] = v[1];
+          buf[n * 3 + 2] = v[2];
+          n++;
+        }
+      else
+        {
+          usleep(1000);
+        }
+    }
+
+  if (n < want / 2)
+    {
+      return -ETIMEDOUT;         /* sensor is not producing */
+    }
+
+  cal_stats(buf, n, 3, mean, sd);
+  return n;
+}
+
 /* Raw mode, saving what was there so it can be put back.
  *
  * The protocol frames itself: canonical mode would buffer by line, echo would
@@ -415,6 +537,19 @@ int cal_session(void)
   uint8_t  nbatch = 0;
   uint32_t batch_t0 = 0;
   uint64_t batch_since = 0;
+
+  /* Six-position accelerometer calibration, and whether the stream should send
+   * corrected values. Streaming calibrated is how you confirm a calibration
+   * actually took: a corrected accel reads 9.81 in every orientation.
+   */
+
+  struct cal_accel_s cal6;
+  struct cal_apply_s apply;
+  int  cal6_idx = -1;                /* which sensor is being calibrated */
+  bool want_cal = false;
+
+  cal_accel_reset(&cal6);
+  cal_load_apply(-1, false, &apply);
 
   if (param_i32("SER_USB_FUNC") != SER_FUNC_CAL)
     {
@@ -494,6 +629,16 @@ int cal_session(void)
               if (cal_read_values(st_idx, st_sub, slot, &t_us) != OK)
                 {
                   break;             /* nothing more queued */
+                }
+
+              if (apply.on)
+                {
+                  int k;
+
+                  for (k = 0; k < 3; k++)
+                    {
+                      slot[k] = (slot[k] - apply.off[k]) * apply.scl[k];
+                    }
                 }
 
               if (nbatch == 0)
@@ -698,10 +843,254 @@ int cal_session(void)
           st_idx = i;
           st_seq = 0;
           nbatch = 0;
+          cal_load_apply(i, want_cal, &apply);
 
           cal_emit(fd,
                    "{\"evt\":\"ok\",\"what\":\"stream\",\"name\":\"%s\","
-                   "\"id\":%d,\"hz\":%ld}\n", g_sensors[i].name, i, hz);
+                   "\"id\":%d,\"hz\":%ld,\"cal\":%s}\n",
+                   g_sensors[i].name, i, hz, apply.on ? "true" : "false");
+        }
+      else if (strncmp(line, "calib ", 6) == 0)
+        {
+          want_cal = strcmp(line + 6, "on") == 0;
+
+          if (st_idx >= 0)
+            {
+              cal_load_apply(st_idx, want_cal, &apply);
+            }
+
+          cal_emit(fd, "{\"evt\":\"ok\",\"what\":\"calib\",\"on\":%s}\n",
+                   apply.on ? "true" : "false");
+        }
+      else if (strncmp(line, "record ", 7) == 0)
+        {
+#ifdef CONFIG_XXCAR_LOGGER
+          FAR char *what = line + 7;
+
+          if (strcmp(what, "start") == 0)
+            {
+              struct logger_status_s ls;
+
+              /* Allan variance wants both IMUs, raw, at the native rate and
+               * for hours. LOG_RATE 0 means every sample - decimation would
+               * throw away exactly the short-tau end the analysis needs.
+               */
+
+              param_set_i32("LOG_IMU0", 1);
+              param_set_i32("LOG_IMU1", 1);
+              param_set_i32("LOG_RATE", 0);
+
+              if (logger_is_running())
+                {
+                  cal_emit(fd, "{\"evt\":\"error\","
+                               "\"msg\":\"already recording\"}\n");
+                  continue;
+                }
+
+              if (logger_start() < 0)
+                {
+                  cal_emit(fd, "{\"evt\":\"error\","
+                               "\"msg\":\"logger would not start\"}\n");
+                  continue;
+                }
+
+              logger_get_status(&ls);
+              cal_emit(fd,
+                       "{\"evt\":\"ok\",\"what\":\"record\","
+                       "\"path\":\"%s\",\"topics\":%" PRIu32 "}\n",
+                       ls.path, ls.topics);
+            }
+          else if (strcmp(what, "stop") == 0)
+            {
+              struct logger_status_s ls;
+
+              logger_get_status(&ls);
+              logger_stop();
+              cal_emit(fd,
+                       "{\"evt\":\"ok\",\"what\":\"record stop\","
+                       "\"path\":\"%s\",\"samples\":%" PRIu32 ","
+                       "\"bytes\":%" PRIu32 ",\"dropped\":%" PRIu32 "}\n",
+                       ls.path, ls.samples, ls.bytes, ls.dropped);
+            }
+          else
+            {
+              struct logger_status_s ls;
+
+              logger_get_status(&ls);
+              cal_emit(fd,
+                       "{\"evt\":\"record\",\"running\":%s,\"path\":\"%s\","
+                       "\"samples\":%" PRIu32 ",\"bytes\":%" PRIu32 ","
+                       "\"dropped\":%" PRIu32 "}\n",
+                       ls.running ? "true" : "false", ls.path,
+                       ls.samples, ls.bytes, ls.dropped);
+            }
+#else
+          cal_emit(fd, "{\"evt\":\"error\","
+                       "\"msg\":\"logger not built in\"}\n");
+#endif
+        }
+        else if (strncmp(line, "cal6", 4) == 0)
+        {
+          FAR char *what = line[4] == ' ' ? line + 5 : (FAR char *)"";
+
+          if (strncmp(what, "start ", 6) == 0)
+            {
+              int i;
+
+              for (i = 0; i < CAL_NSENSORS; i++)
+                {
+                  if (strcmp(what + 6, g_sensors[i].name) == 0 &&
+                      g_sensors[i].kind == CAL_KIND_ACCEL)
+                    {
+                      break;
+                    }
+                }
+
+              if (i == CAL_NSENSORS)
+                {
+                  cal_emit(fd, "{\"evt\":\"error\","
+                               "\"msg\":\"not an accelerometer\"}\n");
+                  continue;
+                }
+
+              cal_accel_reset(&cal6);
+              cal6_idx = i;
+              cal_emit(fd,
+                       "{\"evt\":\"ok\",\"what\":\"cal6 start\","
+                       "\"name\":\"%s\",\"need\":%d}\n",
+                       g_sensors[i].name, CAL_NPOS);
+            }
+          else if (strcmp(what, "capture") == 0)
+            {
+              float mean[3];
+              float sd[3];
+              int sub;
+              int n;
+              int pos;
+
+              if (cal6_idx < 0)
+                {
+                  cal_emit(fd, "{\"evt\":\"error\","
+                               "\"msg\":\"cal6 not started\"}\n");
+                  continue;
+                }
+
+              {
+                FAR const struct orb_metadata *m = cal_meta(cal6_idx);
+
+                sub = m != NULL ? orb_subscribe(m) : -1;
+              }
+
+              if (sub < 0)
+                {
+                  cal_emit(fd, "{\"evt\":\"error\","
+                               "\"msg\":\"sensor not available\"}\n");
+                  continue;
+                }
+
+              orb_set_interval(sub, 2000);         /* 500 Hz is ample */
+              n = cal_capture_still(cal6_idx, sub, 4000, mean, sd);
+              orb_unsubscribe(sub);
+
+              if (n < 0)
+                {
+                  cal_emit(fd, "{\"evt\":\"error\","
+                               "\"msg\":\"sensor produced nothing\"}\n");
+                  continue;
+                }
+
+              /* 0.08 m/s^2 is several times the sensor's own noise and well
+               * under what a hand resting on the bench produces.
+               */
+
+              if (sd[0] > 0.08f || sd[1] > 0.08f || sd[2] > 0.08f)
+                {
+                  cal_emit(fd,
+                           "{\"evt\":\"error\",\"msg\":\"not steady\","
+                           "\"sd\":[%.4f,%.4f,%.4f]}\n",
+                           (double)sd[0], (double)sd[1], (double)sd[2]);
+                  continue;
+                }
+
+              pos = cal_accel_add(&cal6, mean);
+
+              if (pos < 0)
+                {
+                  cal_emit(fd,
+                           "{\"evt\":\"error\","
+                           "\"msg\":\"not square to an axis\","
+                           "\"a\":[%.3f,%.3f,%.3f]}\n",
+                           (double)mean[0], (double)mean[1], (double)mean[2]);
+                  continue;
+                }
+
+              cal_emit(fd,
+                       "{\"evt\":\"cal6\",\"pos\":%d,\"have\":%d,"
+                       "\"need\":%d,\"a\":[%.4f,%.4f,%.4f],\"n\":%d}\n",
+                       pos, cal_accel_count(&cal6), CAL_NPOS,
+                       (double)mean[0], (double)mean[1], (double)mean[2], n);
+            }
+          else if (strcmp(what, "save") == 0)
+            {
+              float off[3];
+              float scl[3];
+              float res = 0.0f;
+              char nm[PARAM_NAME_MAX + 1];
+              const char axis[3] = { 'X', 'Y', 'Z' };
+              FAR const char *pfx;
+              int k;
+
+              if (cal6_idx < 0 || cal_accel_solve(&cal6, off, scl, &res) != 0)
+                {
+                  cal_emit(fd,
+                           "{\"evt\":\"error\",\"msg\":\"need all six\","
+                           "\"have\":%d}\n", cal_accel_count(&cal6));
+                  continue;
+                }
+
+              pfx = g_cal_prefix[cal6_idx];
+
+              for (k = 0; k < 3; k++)
+                {
+                  snprintf(nm, sizeof(nm), "%s_%cOFF", pfx, axis[k]);
+                  param_set_f32(nm, off[k]);
+                  snprintf(nm, sizeof(nm), "%s_%cSCL", pfx, axis[k]);
+                  param_set_f32(nm, scl[k]);
+                }
+
+              snprintf(nm, sizeof(nm), "%s_OK", pfx);
+              param_set_i32(nm, 1);
+
+              /* One write, at the end. The USB port dies on cable pull, and a
+               * half-written calibration is worse than none.
+               */
+
+              if (param_save() < 0)
+                {
+                  cal_emit(fd, "{\"evt\":\"error\","
+                               "\"msg\":\"param save failed\"}\n");
+                  continue;
+                }
+
+              if (st_idx == cal6_idx)
+                {
+                  cal_load_apply(st_idx, want_cal, &apply);
+                }
+
+              cal_emit(fd,
+                       "{\"evt\":\"ok\",\"what\":\"cal6 save\","
+                       "\"off\":[%.5f,%.5f,%.5f],\"scl\":[%.5f,%.5f,%.5f],"
+                       "\"residual\":%.4f}\n",
+                       (double)off[0], (double)off[1], (double)off[2],
+                       (double)scl[0], (double)scl[1], (double)scl[2],
+                       (double)res);
+            }
+          else
+            {
+              cal_accel_reset(&cal6);
+              cal6_idx = -1;
+              cal_emit(fd, "{\"evt\":\"ok\",\"what\":\"cal6 abort\"}\n");
+            }
         }
       else if (strcmp(line, "stop") == 0)
         {

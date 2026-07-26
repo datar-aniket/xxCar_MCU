@@ -178,6 +178,45 @@ static const struct param_def_s g_params[] =
     "Accel 0 Y scale" },
   { "CAL_ACC0_ZSCL",  PARAM_TYPE_FLOAT, F32(1.0f), F32(0.8f),  F32(1.2f),
     "Accel 0 Z scale" },
+  /* IMU1 (BMI055). Same model and the same apply convention as IMU0:
+   *
+   *     corrected = (raw - OFF) * SCL
+   *
+   * Six-position calibration solves it in closed form per axis - with the axis
+   * up and then down, OFF is the midpoint of the two readings and SCL is the
+   * gravity span divided by their difference. No solver, and each axis is
+   * independent of the others.
+   */
+
+  { "CAL_GYRO1_XOFF", PARAM_TYPE_FLOAT, F32(0.0f), F32(-1.0f), F32(1.0f),
+    "Gyro 1 X offset (rad/s)" },
+  { "CAL_GYRO1_YOFF", PARAM_TYPE_FLOAT, F32(0.0f), F32(-1.0f), F32(1.0f),
+    "Gyro 1 Y offset (rad/s)" },
+  { "CAL_GYRO1_ZOFF", PARAM_TYPE_FLOAT, F32(0.0f), F32(-1.0f), F32(1.0f),
+    "Gyro 1 Z offset (rad/s)" },
+  { "CAL_ACC1_XOFF",  PARAM_TYPE_FLOAT, F32(0.0f), F32(-10.0f), F32(10.0f),
+    "Accel 1 X offset (m/s2)" },
+  { "CAL_ACC1_YOFF",  PARAM_TYPE_FLOAT, F32(0.0f), F32(-10.0f), F32(10.0f),
+    "Accel 1 Y offset (m/s2)" },
+  { "CAL_ACC1_ZOFF",  PARAM_TYPE_FLOAT, F32(0.0f), F32(-10.0f), F32(10.0f),
+    "Accel 1 Z offset (m/s2)" },
+  { "CAL_ACC1_XSCL",  PARAM_TYPE_FLOAT, F32(1.0f), F32(0.8f),  F32(1.2f),
+    "Accel 1 X scale" },
+  { "CAL_ACC1_YSCL",  PARAM_TYPE_FLOAT, F32(1.0f), F32(0.8f),  F32(1.2f),
+    "Accel 1 Y scale" },
+  { "CAL_ACC1_ZSCL",  PARAM_TYPE_FLOAT, F32(1.0f), F32(0.8f),  F32(1.2f),
+    "Accel 1 Z scale" },
+
+  /* Whether the numbers above mean anything yet. A consumer must be able to
+   * tell "calibrated, and the offsets happen to be near zero" from "never
+   * calibrated", and defaults alone cannot say which.
+   */
+
+  { "CAL_ACC0_OK", PARAM_TYPE_INT32, I32(0), I32(0), I32(1),
+    "Accel 0 calibrated (0 = raw passthrough)" },
+  { "CAL_ACC1_OK", PARAM_TYPE_INT32, I32(0), I32(0), I32(1),
+    "Accel 1 calibrated (0 = raw passthrough)" },
+
   { "CAL_MAG0_XOFF",  PARAM_TYPE_FLOAT, F32(0.0f), F32(-2.0f), F32(2.0f),
     "Mag 0 X offset (Gauss)" },
   { "CAL_MAG0_YOFF",  PARAM_TYPE_FLOAT, F32(0.0f), F32(-2.0f), F32(2.0f),

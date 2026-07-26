@@ -46,6 +46,12 @@ TRACE = ["#ff6b81", "#3ddc84", "#57a6ff", "#ffb74d",
 RATES = (1, 5, 10, 20, 50, 100, 200, 400, 500, 1000, 2000)
 WINDOWS = (1, 2, 5, 10, 20, 30, 60)
 
+# Index matches the board's cal_accel.h: axis * 2, +1 when that axis reads
+# negative. Wording is what the operator does, not what the maths calls it.
+POSITIONS = ("X up  (left side down)", "X down (left side up)",
+             "Y up  (nose down)",      "Y down (nose up)",
+             "Z up  (board level)",    "Z down (upside down)")
+
 
 def crc16(data: bytes) -> int:
     """CRC16-CCITT-FALSE, cross-checked against the board's cal_crc16()."""
@@ -350,6 +356,7 @@ class App(tk.Tk):
         self.t_start = time.time()
         self.axis_vars: list[tk.BooleanVar] = []
         self.paused = False
+        self.cal_have: set[int] = set()
 
         self._fonts()
         self._style()
@@ -490,6 +497,49 @@ class App(tk.Tk):
         ttk.Label(self.axis_box, text="select a sensor",
                   style="Muted.TLabel").pack(anchor="w")
 
+        # ---- six-position accel calibration
+        cb = ttk.Labelframe(p, text=" 6-position accel ", padding=6)
+        cb.pack(fill="x", pady=(10, 0))
+        self.cal_box = cb
+        self.cal_btn = ttk.Button(cb, text="Start calibration",
+                                  command=self._cal_start)
+        self.cal_btn.pack(fill="x")
+        self.cal_hint = ttk.Label(cb, text="select an accelerometer",
+                                  style="Muted.TLabel", wraplength=190,
+                                  justify="left")
+        self.cal_hint.pack(anchor="w", pady=(6, 4))
+        self.pos_labels: list[ttk.Label] = []
+        for name in POSITIONS:
+            lab = ttk.Label(cb, text=f"○  {name}", style="Muted.TLabel")
+            lab.pack(anchor="w")
+            self.pos_labels.append(lab)
+        row = ttk.Frame(cb, style="Card.TFrame")
+        row.pack(fill="x", pady=(6, 0))
+        self.cap_btn = ttk.Button(row, text="Capture", command=self._cal_cap,
+                                  state="disabled")
+        self.cap_btn.pack(side="left", expand=True, fill="x", padx=(0, 3))
+        self.save_btn = ttk.Button(row, text="Save", command=self._cal_save,
+                                   state="disabled")
+        self.save_btn.pack(side="left", expand=True, fill="x", padx=(3, 0))
+
+        # ---- Allan-variance recording
+        rb = ttk.Labelframe(p, text=" record to SD ", padding=6)
+        rb.pack(fill="x", pady=(10, 0))
+        ttk.Label(rb, text="both IMUs, native rate, for Allan variance",
+                  style="Muted.TLabel", wraplength=190,
+                  justify="left").pack(anchor="w")
+        row = ttk.Frame(rb, style="Card.TFrame")
+        row.pack(fill="x", pady=(6, 0))
+        self.rec_btn = ttk.Button(row, text="Start", command=self._rec_toggle)
+        self.rec_btn.pack(side="left", expand=True, fill="x", padx=(0, 3))
+        ttk.Button(row, text="Status",
+                   command=lambda: self.link and self.link.send("record")
+                   ).pack(side="left", expand=True, fill="x", padx=(3, 0))
+        self.rec_lab = ttk.Label(rb, text="idle", style="Muted.TLabel",
+                                 wraplength=190, justify="left")
+        self.rec_lab.pack(anchor="w", pady=(5, 0))
+        self.recording = False
+
     def _controls(self, p):
         c = ttk.Frame(p, style="Card.TFrame", padding=(10, 8))
         c.grid(row=0, column=0, sticky="ew")
@@ -510,6 +560,10 @@ class App(tk.Tk):
         cb.bind("<<ComboboxSelected>>", lambda _e: self._restream())
         ttk.Label(g, text="Hz", style="Muted.TLabel").pack(side="left",
                                                            padx=(4, 0))
+        self.cal_on = tk.BooleanVar(value=False)
+        ttk.Checkbutton(g, text="calibrated", variable=self.cal_on,
+                        command=self._cal_toggle).pack(side="left",
+                                                       padx=(10, 0))
 
         g = group(1, "WINDOW")
         self.win_var = tk.DoubleVar(value=10.0)
@@ -696,6 +750,45 @@ class App(tk.Tk):
         self._apply()
         self._restream()
 
+    def _cal_toggle(self):
+        if self.link:
+            self.link.send("calib " + ("on" if self.cal_on.get() else "off"))
+
+    def _cal_start(self):
+        if not self.link or self.active is None:
+            return
+        s = self.sensors[self.active]
+        if not s["name"].startswith("accel"):
+            self._say("! pick an accelerometer first", "err")
+            return
+        self.cal_have = set()
+        for lab, name in zip(self.pos_labels, POSITIONS):
+            lab.config(text=f"○  {name}", style="Muted.TLabel")
+        self.link.send(f"cal6 start {s['name']}")
+        self.cap_btn.config(state="normal")
+        self.save_btn.config(state="disabled")
+        self.cal_hint.config(
+            text=f"calibrating {s['name']} — place the board in any of the six "
+                 "orientations, hold it still, then Capture. Order does not "
+                 "matter; the board works out which position it is in.")
+
+    def _cal_cap(self):
+        if self.link:
+            self.cal_hint.config(text="hold still…")
+            self.cap_btn.config(state="disabled")
+            self.link.send("cal6 capture")
+            # the board blocks for up to 4 s while it averages
+            self.after(5000, lambda: self.cap_btn.config(state="normal"))
+
+    def _cal_save(self):
+        if self.link:
+            self.link.send("cal6 save")
+
+    def _rec_toggle(self):
+        if not self.link:
+            return
+        self.link.send("record stop" if self.recording else "record start")
+
     def _restream(self):
         if not self.link or self.active is None:
             return
@@ -735,10 +828,65 @@ class App(tk.Tk):
                 self.link.scales[msg["id"]] = msg.get("scale", 1.0) or 1.0
             self._row(msg)
             return
+        if evt == "cal6":
+            self._cal_progress(msg)
+            return
+        if evt == "record":
+            self._rec_status(msg)
+            return
+        if evt == "ok":
+            what = msg.get("what", "")
+            if what == "cal6 save":
+                self.cal_hint.config(
+                    text=f"saved. residual {msg['residual']:.4f} m/s² "
+                         f"(lower is better; under ~0.05 is good)")
+                self._say(f"< {json.dumps(msg)}")
+                self.cal_on.set(True)
+                self._cal_toggle()
+                return
+            if what == "record":
+                self.recording = True
+                self.rec_btn.config(text="Stop")
+                self.rec_lab.config(text=f"recording → {msg.get('path','?')}")
+            elif what == "record stop":
+                self.recording = False
+                self.rec_btn.config(text="Start")
+                self.rec_lab.config(
+                    text=f"stopped. {msg.get('samples',0)} samples, "
+                         f"{msg.get('bytes',0)/1e6:.1f} MB, "
+                         f"dropped {msg.get('dropped',0)}")
+        if evt == "error":
+            m = msg.get("msg", "")
+            if "steady" in m or "square" in m:
+                self.cal_hint.config(text=f"✗ {m} — reposition and retry")
         self._say(f"< {json.dumps(msg)}")
         if evt == "hello" and msg.get("proto") != PROTO:
             self._say(f"! protocol mismatch: board {msg.get('proto')}, "
                       f"gui {PROTO}", "err")
+
+    def _cal_progress(self, msg):
+        pos = msg["pos"]
+        self.cal_have.add(pos)
+        self.pos_labels[pos].config(text=f"●  {POSITIONS[pos]}",
+                                    style="Card.TLabel")
+        left = msg["need"] - msg["have"]
+        self.cal_hint.config(
+            text=f"captured {POSITIONS[pos]} — {msg['have']}/{msg['need']} done"
+                 + ("" if left else ".  Ready to Save."))
+        if not left:
+            self.save_btn.config(state="normal")
+        self._say(f"< cal6 pos {pos} a={[round(v,3) for v in msg['a']]}")
+
+    def _rec_status(self, msg):
+        self.recording = bool(msg.get("running"))
+        self.rec_btn.config(text="Stop" if self.recording else "Start")
+        if self.recording:
+            self.rec_lab.config(
+                text=f"{msg.get('path','?')}\n{msg.get('samples',0)} samples, "
+                     f"{msg.get('bytes',0)/1e6:.1f} MB, "
+                     f"dropped {msg.get('dropped',0)}")
+        else:
+            self.rec_lab.config(text="idle")
 
     def _on_batch(self, payload):
         sid, seq, t0, dt, rows = payload
