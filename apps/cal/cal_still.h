@@ -28,13 +28,22 @@
 
 struct cal_still_s
 {
-  float gyro_thresh;    /* rad/s, per axis */
-  float accel_thresh;   /* m/s^2, deviation from the running mean */
+  float gyro_thresh;    /* rad/s, per axis, instantaneous */
+  float accel_thresh;   /* m/s^2, standard deviation over the window */
   int   min_samples;
   int   count;          /* consecutive still samples so far */
   float acc_sum[3];
+  float acc_sq[3];      /* sum of squares, for the dispersion test */
   float gyr_sum[3];
-  float acc_mean[3];    /* mean of the current still run */
+
+  /* Diagnostics, so a refusal can say what it actually measured rather than
+   * just "not steady" - see cal_still_report().
+   */
+
+  int   best_count;     /* highest count reached since reset */
+  float last_sd[3];     /* accel stddev at the last evaluation */
+  int   gyro_resets;    /* windows thrown away because the gyro moved */
+  int   accel_resets;   /* windows thrown away because accel dispersion was high */
 };
 
 /****************************************************************************
@@ -58,5 +67,15 @@ bool cal_still_update(FAR struct cal_still_s *s, FAR const float acc[3],
 
 void cal_still_mean(FAR const struct cal_still_s *s, FAR float acc_out[3],
                     FAR float gyr_out[3]);
+
+/* What the detector actually measured, for a refusal message. Without this a
+ * failed capture is indistinguishable from a broken sensor, a threshold set
+ * below the noise floor, or a hand that genuinely will not hold still - and
+ * those need completely different responses.
+ */
+
+void cal_still_report(FAR const struct cal_still_s *s, FAR int *best_count,
+                      FAR float sd_out[3], FAR int *gyro_resets,
+                      FAR int *accel_resets);
 
 #endif /* __APPS_CAL_CAL_STILL_H */

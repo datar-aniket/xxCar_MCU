@@ -146,6 +146,49 @@ int cal_proto_parse(FAR const char *line, FAR struct cal_cmd_s *out)
     {
       out->cmd = CAL_CMD_QUIT;
     }
+  else if (strcmp(tok, "list") == 0)
+    {
+      out->cmd = CAL_CMD_LIST;
+    }
+  else if (strcmp(tok, "stop") == 0)
+    {
+      out->cmd = CAL_CMD_STOP;
+    }
+  else if (strcmp(tok, "stream") == 0)
+    {
+      /* stream <sensor> [hz] - hz defaults to 50, which is well above what a
+       * plot can show and far below what the link or the parser strain at.
+       */
+
+      tok = strtok_r(NULL, " \t", &save);
+      if (tok == NULL || strlen(tok) > CAL_PROTO_NAME_MAX)
+        {
+          out->cmd = CAL_CMD_UNKNOWN;
+          return 0;
+        }
+
+      strncpy(out->name, tok, sizeof(out->name) - 1);
+
+      tok = strtok_r(NULL, " \t", &save);
+      if (tok == NULL)
+        {
+          out->fval = 50.0f;
+        }
+      else
+        {
+          FAR char *end = NULL;
+
+          out->fval = strtof(tok, &end);
+
+          if (end == tok || *end != '\0')
+            {
+              out->cmd = CAL_CMD_UNKNOWN;
+              return 0;
+            }
+        }
+
+      out->cmd = CAL_CMD_STREAM;
+    }
   else if (strcmp(tok, "get") == 0 || strcmp(tok, "set") == 0)
     {
       bool is_set = (tok[0] == 's');

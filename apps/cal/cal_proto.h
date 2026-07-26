@@ -50,6 +50,17 @@ enum cal_cmd_e
   CAL_CMD_COMMIT,
   CAL_CMD_ABORT,
   CAL_CMD_QUIT,
+
+  /* Live view. The GUI needs to SEE a sensor before it can decide anything
+   * about it - whether it is present, whether the bench is quiet enough to
+   * calibrate on, whether an axis is dead. `capture` answers none of that: it
+   * returns one averaged vector after the fact.
+   */
+
+  CAL_CMD_LIST,          /* enumerate sensors the GUI can offer */
+  CAL_CMD_STREAM,        /* stream <sensor> <hz> */
+  CAL_CMD_STOP,          /* stop streaming */
+
   CAL_CMD_UNKNOWN
 };
 

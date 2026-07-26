@@ -432,8 +432,30 @@ int cal_session(void)
 
                         if (waited >= 10000)
                           {
-                            n = cal_proto_error(evt, sizeof(evt),
-                                    "still not steady - hold it and retry");
+                            /* Say what was measured. "Not steady" alone cannot
+                             * distinguish a hand that will not hold still from
+                             * a threshold set below the sensor's noise floor
+                             * from a topic that never published - and those
+                             * need completely different responses.
+                             */
+
+                            char why[160];
+                            float sd[3];
+                            int best;
+                            int gres;
+                            int ares;
+
+                            cal_still_report(&still, &best, sd, &gres, &ares);
+
+                            snprintf(why, sizeof(why),
+                                     "not steady: best %d/%d samples, "
+                                     "accel sd %.4f %.4f %.4f (limit %.4f), "
+                                     "resets gyro %d accel %d",
+                                     best, 500,
+                                     (double)sd[0], (double)sd[1], (double)sd[2],
+                                     0.05, gres, ares);
+
+                            n = cal_proto_error(evt, sizeof(evt), why);
                           }
                         else
                           {
