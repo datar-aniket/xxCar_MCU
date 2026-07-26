@@ -178,6 +178,7 @@ int cal_session(void)
     char evt[256];
     size_t fill = 0;
     bool done = false;
+    bool overlong = false;
 
     ret = OK;
 
@@ -211,7 +212,20 @@ int cal_session(void)
             continue;
           }
 
-        if (ch != '\n' && fill < sizeof(line) - 1)
+        if (fill >= sizeof(line) - 1 && ch != '\n')
+          {
+            /* Buffer is full and the line has not ended yet. Drop bytes until
+             * the real newline instead of quietly dispatching the truncated
+             * prefix as a complete command and the remainder as a second one
+             * - that would fragment one over-long line into two commands
+             * with a byte silently missing at the seam.
+             */
+
+            overlong = true;
+            continue;
+          }
+
+        if (ch != '\n')
           {
             line[fill++] = ch;
             continue;
@@ -224,28 +238,40 @@ int cal_session(void)
           struct cal_cmd_s c;
           int n = 0;
 
-          cal_proto_parse(line, &c);
-
-          switch (c.cmd)
+          if (overlong)
             {
-              case CAL_CMD_NONE:
-                continue;
+              /* One error for the whole oversized line, then resynchronise
+               * on the next line.
+               */
 
-              case CAL_CMD_HELLO:
-                n = cal_proto_hello(evt, sizeof(evt));
-                break;
+              overlong = false;
+              n = cal_proto_error(evt, sizeof(evt), "line too long");
+            }
+          else
+            {
+              cal_proto_parse(line, &c);
 
-              case CAL_CMD_QUIT:
-              case CAL_CMD_ABORT:
-                n = cal_proto_ok(evt, sizeof(evt), "bye");
-                done = true;
-                break;
+              switch (c.cmd)
+                {
+                  case CAL_CMD_NONE:
+                    continue;
 
-              /* Task 5 adds CAPTURE; GET/SET/COMMIT follow with it. */
+                  case CAL_CMD_HELLO:
+                    n = cal_proto_hello(evt, sizeof(evt));
+                    break;
 
-              default:
-                n = cal_proto_error(evt, sizeof(evt), "not implemented yet");
-                break;
+                  case CAL_CMD_QUIT:
+                  case CAL_CMD_ABORT:
+                    n = cal_proto_ok(evt, sizeof(evt), "bye");
+                    done = true;
+                    break;
+
+                  /* Task 5 adds CAPTURE; GET/SET/COMMIT follow with it. */
+
+                  default:
+                    n = cal_proto_error(evt, sizeof(evt), "not implemented yet");
+                    break;
+                }
             }
 
           if (n > 0)

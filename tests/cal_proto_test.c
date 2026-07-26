@@ -104,6 +104,48 @@ static void test_overlong_name_rejected(void)
     }
 }
 
+/* A value that fails to parse must not silently become 0.0 - once SET writes
+ * to the parameter store (Task 5), that would persist a wrong calibration
+ * value indistinguishable from someone deliberately choosing zero.
+ */
+
+static void test_set_rejects_garbage_value(void)
+{
+  struct cal_cmd_s c;
+
+  cal_proto_parse("set CAL_ACC0_BX abc", &c);
+
+  if (c.cmd != CAL_CMD_UNKNOWN)
+    {
+      printf("FAIL set garbage value: cmd %d, fval %f\n", (int)c.cmd, c.fval);
+      g_fail++;
+    }
+}
+
+/* A deliberate zero must still parse as a legitimate SET, not be confused
+ * with the garbage-value rejection above.
+ */
+
+static void test_set_accepts_zero_value(void)
+{
+  struct cal_cmd_s c;
+
+  cal_proto_parse("set CAL_ACC0_BX 0", &c);
+
+  if (c.cmd != CAL_CMD_SET)
+    {
+      printf("FAIL set zero value: cmd %d\n", (int)c.cmd);
+      g_fail++;
+      return;
+    }
+
+  if (c.fval != 0.0f)
+    {
+      printf("FAIL set zero value: fval %f\n", c.fval);
+      g_fail++;
+    }
+}
+
 static void test_hello_is_json(void)
 {
   char buf[256];
@@ -186,6 +228,8 @@ int main(void)
   test_tolerates_human_input();
   test_set_parses_name_and_value();
   test_overlong_name_rejected();
+  test_set_rejects_garbage_value();
+  test_set_accepts_zero_value();
   test_hello_is_json();
   test_captured_carries_vectors();
   test_error_escapes_json();

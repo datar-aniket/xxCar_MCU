@@ -165,6 +165,8 @@ int cal_proto_parse(FAR const char *line, FAR struct cal_cmd_s *out)
 
       if (is_set)
         {
+          FAR char *endptr;
+
           tok = strtok_r(NULL, " \t", &save);
           if (tok == NULL)
             {
@@ -172,7 +174,18 @@ int cal_proto_parse(FAR const char *line, FAR struct cal_cmd_s *out)
               return 0;
             }
 
-          out->fval = strtof(tok, NULL);
+          out->fval = strtof(tok, &endptr);
+
+          /* No digits converted, or trailing junk after the number: refuse
+           * rather than silently store 0.0, which would be indistinguishable
+           * from someone deliberately setting zero.
+           */
+
+          if (endptr == tok || *endptr != '\0')
+            {
+              out->cmd = CAL_CMD_UNKNOWN;
+              return 0;
+            }
         }
 
       out->cmd = is_set ? CAL_CMD_SET : CAL_CMD_GET;
