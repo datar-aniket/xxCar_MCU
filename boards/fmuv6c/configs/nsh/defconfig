@@ -49,6 +49,7 @@ CONFIG_DEBUG_HARDFAULT_ALERT=y
 CONFIG_DEBUG_SYMBOLS=y
 CONFIG_DEV_CONSOLE=y
 CONFIG_EXPERIMENTAL=y
+CONFIG_GRAN=y
 CONFIG_FS_PROCFS=y
 CONFIG_FS_PROCFS_REGISTER=y
 CONFIG_HAVE_CXX=y
@@ -392,5 +393,11 @@ CONFIG_MMCSD_SDIOWAIT_WRCOMPLETE=y
 # CONFIG_MMCSD_HAVE_WRITEPROTECT is not set
 # CONFIG_MMCSD_MMCSUPPORT is not set
 CONFIG_FS_FAT=y
+# FAT sector buffers from a DMA-capable, 64-byte-aligned granule pool, and the
+# indirect-transfer fallback it selects (CONFIG_FAT_DIRECT_RETRY). Every
+# in-tree STM32H7 board with an SDMMC card sets this; we did not, so a direct
+# multi-sector write the IDMA rejected became a hard write failure with no
+# retry - which the logger then turned into a torn record.
+CONFIG_FAT_DMAMEMORY=y
 CONFIG_FAT_LFN=y
 CONFIG_FS_FATTIME=y

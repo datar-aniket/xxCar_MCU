@@ -24,6 +24,14 @@ include $(TOPDIR)/Make.defs
 
 CSRCS = stm32_boot.c stm32_bringup.c
 
+# DMA-capable pool for the FAT sector buffers. Exactly the arrangement every
+# in-tree STM32H7 board with an SDMMC card uses - see
+# boards/arm/stm32h7/weact-stm32h743/src/stm32_dma_alloc.c, which this is a
+# copy of.
+ifeq ($(CONFIG_FAT_DMAMEMORY),y)
+CSRCS += stm32_dma_alloc.c
+endif
+
 ifeq ($(CONFIG_ADC),y)
 CSRCS += stm32_adc.c
 endif

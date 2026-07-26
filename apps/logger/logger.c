@@ -15,6 +15,7 @@
  ****************************************************************************/
 
 #include <nuttx/config.h>
+#include <nuttx/compiler.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -210,7 +211,18 @@ static int      g_fd = -1;
  */
 
 static uint32_t g_part_bytes;
-static uint8_t  g_buf[LOG_BUFSIZE];
+/* Cache-line aligned, because FAT hands this buffer straight to the SDMMC
+ * IDMA for full-sector writes rather than copying it through its own sector
+ * buffer. The stock driver aligns its internal buffers the same way
+ * (arch/arm/src/stm32h7/stm32_sdmmc.c).
+ *
+ * It was aligned only by accident of where .bss happened to place it, and it
+ * stopped being aligned the moment an unrelated array was added ahead of it -
+ * which is exactly the kind of dependency that produces corruption nobody can
+ * reproduce.
+ */
+
+static uint8_t  g_buf[LOG_BUFSIZE] aligned_data(32);
 static size_t   g_buflen;
 
 /****************************************************************************

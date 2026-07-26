@@ -507,4 +507,17 @@ int board_composite_initialize(int port);
 FAR void *board_composite_connect(int port, int configid);
 #endif
 
+/****************************************************************************
+ * Name: stm32_dma_alloc_init
+ *
+ * Description:
+ *   Instantiate a small pool of DMA-capable, 64-byte-aligned memory for the
+ *   FAT filesystem's sector buffers. Called before the card is mounted.
+ *
+ ****************************************************************************/
+
+#ifdef CONFIG_FAT_DMAMEMORY
+int stm32_dma_alloc_init(void);
+#endif
+
 #endif /* __BOARDS_ARM_STM32H7_NUCLEO_H743ZI_SRC_NUCLEO_H743ZI_H */

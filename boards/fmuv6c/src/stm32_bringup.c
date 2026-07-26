@@ -508,6 +508,24 @@ int stm32_bringup(void)
     }
 #endif
 
+#ifdef CONFIG_FAT_DMAMEMORY
+  /* The FAT sector buffers must come from DMA-capable, aligned memory, and the
+   * pool has to exist before anything mounts the card.
+   *
+   * Without it FAT takes them from the general heap. A buffer the SDMMC IDMA
+   * cannot use then makes a direct multi-sector write fail outright, because
+   * the indirect fallback only exists when CONFIG_FAT_DIRECT_RETRY is set -
+   * which this option selects. Every in-tree STM32H7 board with an SDMMC card
+   * does exactly this.
+   */
+
+  if (stm32_dma_alloc_init() < 0)
+    {
+      syslog(LOG_ERR, "ERROR: FAT DMA pool init failed - card writes will be "
+                      "unreliable\n");
+    }
+#endif
+
 #ifdef CONFIG_MMCSD_SDIO
   /* microSD on SDMMC2 -> /dev/mmcsd0, mounted as FAT at /fs/microsd. This is
    * the store for logs, parameters and config. A missing/unformatted card is
