@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import math
 import re
+import struct
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -52,6 +53,8 @@ class Series:
     xyz: np.ndarray                    # shape (3, n)
     fs: float = 0.0
     gaps: list = field(default_factory=list)   # (at_seconds, gap_seconds)
+    resyncs: int = 0                   # stream breaks stepped over
+    rejected: int = 0                  # messages refused as implausible
 
     @property
     def duration(self) -> float:
@@ -88,31 +91,148 @@ def find_sessions(folder: str | Path) -> dict[int, list[Path]]:
     return {s: [p for _, p in sorted(v)] for s, v in sorted(sessions.items())}
 
 
-def load_session(paths, progress=None) -> dict[str, Series]:
+# ULog message types we expect to see; anything else means the stream is lost.
+_KNOWN_TYPES = set(b"BFAILMPQSORDT")
+
+# A record is 2 bytes of msg_id plus the 24-byte accel/gyro payload.
+_REC_LEN = 26
+
+# No real sample steps backwards, and none leaps an hour. Both are cheap to
+# check and are what stops a resync locking onto plausible-looking garbage.
+_MAX_STEP_US = 3_600_000_000
+
+
+def read_ulg(path, progress=None):
+    """Read a ULog file, stepping over damage rather than giving up.
+
+    pyulog abandons a file at the first malformed message, which for a long
+    recording throws away hours of good data because of a few bytes. A
+    calibration run is worth recovering: the parts of the stream on either
+    side of a break are intact, and the framing makes it possible to find
+    where it resumes.
+
+    Resynchronisation has to be strict or it is worse than useless - a naive
+    search locks onto byte patterns that look like a header and invents
+    records. So a candidate must yield forty consecutive well-formed messages,
+    every 'D' among them must carry a msg_id the file's own subscription list
+    declared, and its timestamp must move forwards by a sane amount.
+
+    Returns (subs, data, resyncs, rejected), where data maps msg_id ->
+    (timestamps_us, raw payload bytes).
+    """
+    b = Path(path).read_bytes()
+    n = len(b)
+    if n < 16 or bytes(b[:8]) != bytes([0x55, 0x4C, 0x6F, 0x67,
+                                        0x01, 0x12, 0x35, 0x01]):
+        raise ValueError(f"{path}: not a ULog file")
+
+    subs: dict[int, tuple[str, int]] = {}
+    off = 16
+    while off + 3 <= n:                       # prologue
+        ln, ty = struct.unpack_from("<HB", b, off)
+        if ty not in _KNOWN_TYPES or not ln or off + 3 + ln > n:
+            break
+        if ty == ord("A"):
+            mid = struct.unpack_from("<H", b, off + 4)[0]
+            subs[mid] = (b[off + 6:off + 3 + ln].decode(errors="replace"),
+                         b[off + 3])
+        if ty == ord("D"):
+            break
+        off += 3 + ln
+
+    valid = set(subs)
+    ts_out = {m: [] for m in valid}
+    pay_out = {m: [] for m in valid}
+    last: dict[int, int] = {}
+    resyncs = rejected = 0
+
+    while off + 3 <= n:
+        ln, ty = struct.unpack_from("<HB", b, off)
+        ok = ty in _KNOWN_TYPES and ln and off + 3 + ln <= n
+        if ok and ty == ord("D"):
+            if ln != _REC_LEN:
+                ok = False
+            else:
+                mid = struct.unpack_from("<H", b, off + 3)[0]
+                if mid not in valid:
+                    ok = False
+                else:
+                    t = struct.unpack_from("<Q", b, off + 5)[0]
+                    prev = last.get(mid)
+                    if prev is not None and not (0 < t - prev < _MAX_STEP_US):
+                        ok = False
+                    else:
+                        last[mid] = t
+                        ts_out[mid].append(t)
+                        pay_out[mid].append(b[off + 13:off + 3 + ln])
+        if ok:
+            off += 3 + ln
+            continue
+
+        rejected += 1
+        for d in range(1, 8192):
+            p = off + d
+            good = 0
+            while good < 40 and p + 3 <= n:
+                l2, t2 = struct.unpack_from("<HB", b, p)
+                if t2 not in _KNOWN_TYPES or not l2 or p + 3 + l2 > n:
+                    break
+                if t2 == ord("D") and (
+                        l2 != _REC_LEN or
+                        struct.unpack_from("<H", b, p + 3)[0] not in valid):
+                    break
+                good += 1
+                p += 3 + l2
+            if good >= 40:
+                off += d
+                resyncs += 1
+                break
+        else:
+            break                              # no resync: the tail is gone
+
+    data = {}
+    for m in valid:
+        if ts_out[m]:
+            xyz = np.frombuffer(b"".join(pay_out[m]),
+                                dtype="<f4").reshape(-1, 4)[:, :3]
+            data[m] = (np.asarray(ts_out[m], dtype=np.int64),
+                       np.ascontiguousarray(xyz.T, dtype=np.float32))
+    return subs, data, resyncs, rejected
+
+
+def load_session(paths, progress=None, channels=None) -> dict[str, Series]:
     """Concatenate every part of a session into one Series per channel.
 
     Timestamps are the sensor's own, in microseconds since boot, so they run
     continuously across parts - which is what makes the gap check meaningful.
-    """
-    from pyulog import ULog
 
-    raw: dict[str, list] = {name: [] for name, _, _, _ in CHANNELS}
+    `channels` restricts what is kept. A full-rate overnight run is tens of
+    millions of samples per axis, and holding all four sensors at once costs
+    over a gigabyte; the caller can work one sensor at a time instead.
+    """
+    wanted = {name: (topic, mid, unit)
+              for name, topic, mid, unit in CHANNELS
+              if channels is None or name in channels}
+    raw: dict[str, list] = {name: [] for name in wanted}
+    resyncs: dict[str, int] = {name: 0 for name in wanted}
+    rejects: dict[str, int] = {name: 0 for name in wanted}
 
     for i, path in enumerate(paths):
         if progress:
-            progress(i, len(paths), path.name)
-        ulog = ULog(str(path))
-        for name, topic, mid, _unit in CHANNELS:
-            for d in ulog.data_list:
-                if d.name != topic or getattr(d, "multi_id", 0) != mid:
-                    continue
-                t = np.asarray(d.data["timestamp"], dtype=np.float64)
-                xyz = np.vstack([np.asarray(d.data[a], dtype=np.float64)
-                                 for a in ("x", "y", "z")])
-                raw[name].append((t, xyz))
+            progress(i, len(paths), Path(path).name)
+        subs, data, nres, nrej = read_ulg(path)
+        by_key = {(nm, mid): m for m, (nm, mid) in subs.items()}
+        for name, (topic, mid, _unit) in wanted.items():
+            m = by_key.get((topic, mid))
+            if m is None or m not in data:
+                continue
+            t, xyz = data[m]
+            raw[name].append((t.astype(np.float64), xyz))
+            resyncs[name] += nres
+            rejects[name] += nrej
 
     out: dict[str, Series] = {}
-    for name, _topic, _mid, unit in CHANNELS:
+    for name, (_topic, _mid, unit) in wanted.items():
         chunks = raw[name]
         if not chunks:
             continue
@@ -138,7 +258,8 @@ def load_session(paths, progress=None) -> dict[str, Series]:
                 gaps.append((float(t_s[idx]), float(dt[idx])))
 
         out[name] = Series(name=name, unit=unit, t=t_s, xyz=xyz, fs=fs,
-                           gaps=gaps)
+                           gaps=gaps, resyncs=resyncs[name],
+                           rejected=rejects[name])
     return out
 
 
@@ -158,7 +279,8 @@ def trim(series: Series, head_s: float, tail_s: float) -> Series:
         keep = np.ones_like(series.t, dtype=bool)
     return Series(name=series.name, unit=series.unit, t=series.t[keep],
                   xyz=series.xyz[:, keep], fs=series.fs,
-                  gaps=[g for g in series.gaps if t0 <= g[0] <= t1])
+                  gaps=[g for g in series.gaps if t0 <= g[0] <= t1],
+                  resyncs=series.resyncs, rejected=series.rejected)
 
 
 def allan_deviation(x: np.ndarray, fs: float, points: int = 100):

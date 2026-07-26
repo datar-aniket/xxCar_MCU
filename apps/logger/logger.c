@@ -56,8 +56,12 @@
  * 64 KB, not the 8 KB this started with, because the buffer's real job is not
  * batching - it is absorbing SD stalls. Cards routinely pause 50-200 ms for
  * wear levelling and internal housekeeping, and 8 KB is about 36 ms of
- * full-rate IMU data: a single stall overran it and the excess was dropped.
- * 64 KB is roughly 290 ms, which covers the stalls actually observed.
+ * full-rate IMU data. 64 KB is roughly 290 ms, which covers the stalls
+ * actually observed.
+ *
+ * A bigger buffer is only safe because log_flush() now writes all of it. While
+ * a short write discarded the remainder, enlarging this made things worse
+ * rather than better - see the comment there.
  */
 
 #define LOG_BUFSIZE   65536
@@ -225,33 +229,82 @@ static uint64_t log_now_us(void)
  * or failing card - so the caller can count the loss.
  */
 
+/* Push the buffer to the card, all of it.
+ *
+ * write() is allowed to be short, and the version of this that treated a short
+ * write as "the card cannot keep up, drop the rest" corrupted an entire
+ * overnight recording. Dropping the tail of a buffer does not lose a tidy
+ * whole number of records: it cuts one in half, and every byte after that is
+ * read against the wrong frame boundary. The file stays exactly as long, still
+ * opens, still looks plausible - and the stream is desynchronised from that
+ * point until the next part.
+ *
+ * It got worse with the buffer, not better. At 8 KB a dropped flush cost about
+ * 70 ms of data; at 64 KB it costs 565 ms, and a 7.7 hour run came back as
+ * 26,783 fragments averaging 0.42 s - fine for white noise, useless for the
+ * bias instability the run existed to measure.
+ *
+ * So: retry the remainder. A card that stalls for wear levelling comes back
+ * within tens of milliseconds, and blocking the logger for that long is
+ * cheaper than a corrupt file. If it truly will not take the data, say so and
+ * let the caller end the session - a short recording beats a desynchronised
+ * one.
+ */
+
 static bool log_flush(void)
 {
-  ssize_t n;
+  size_t off = 0;
+  int spins = 0;
 
   if (g_buflen == 0)
     {
       return true;
     }
 
-  n = write(g_fd, g_buf, g_buflen);
-
-  if (n == (ssize_t)g_buflen)
+  while (off < g_buflen)
     {
-      pthread_mutex_lock(&g_lock);
-      g_status.bytes += g_buflen;
-      pthread_mutex_unlock(&g_lock);
-      g_part_bytes += g_buflen;
-      g_buflen = 0;
-      return true;
+      ssize_t n = write(g_fd, g_buf + off, g_buflen - off);
+
+      if (n > 0)
+        {
+          off += (size_t)n;
+          spins = 0;
+          continue;
+        }
+
+      if (n < 0 && errno != EINTR && errno != EAGAIN)
+        {
+          break;                       /* a real error, not back-pressure */
+        }
+
+      /* Ten seconds of patience. Beyond that the card is not coming back and
+       * waiting longer only delays the bad news.
+       */
+
+      if (++spins > 1000)
+        {
+          break;
+        }
+
+      usleep(10000);
     }
 
-  /* Short write: the card cannot keep up. Drop what is buffered rather than
-   * block the loop and fall further behind.
-   */
+  pthread_mutex_lock(&g_lock);
+  g_status.bytes += off;
+  pthread_mutex_unlock(&g_lock);
+  g_part_bytes += (uint32_t)off;
+
+  if (off < g_buflen)
+    {
+      syslog(LOG_ERR,
+             "logger: card took only %zu of %zu bytes - ending the session "
+             "rather than writing a torn record\n", off, g_buflen);
+      g_buflen = 0;
+      return false;
+    }
 
   g_buflen = 0;
-  return false;
+  return true;
 }
 
 /* Append bytes, flushing first if they will not fit. */
@@ -585,7 +638,16 @@ static int log_daemon(int argc, FAR char *argv[])
       now = log_now_us();
       if (now - last_flush >= 250000)
         {
-          log_flush();
+          if (!log_flush())
+            {
+              /* Stop rather than carry on. Anything written after a partial
+               * flush lands against the wrong frame boundary, and the result
+               * is a file that opens, looks plausible, and is wrong.
+               */
+
+              break;
+            }
+
           last_flush = now;
         }
 
@@ -598,7 +660,11 @@ static int log_daemon(int argc, FAR char *argv[])
 
       if (g_part_bytes >= LOG_PART_BYTES)
         {
-          log_flush();
+          if (!log_flush())
+            {
+              break;
+            }
+
           fsync(g_fd);
           close(g_fd);
 
