@@ -79,6 +79,7 @@ int imu_cal_load(enum imu_cal_sensor_e sensor, FAR struct imu_cal_s *out)
   static const char *const axis[3] = { "BX", "BY", "BZ" };
 
   char name[PARAM_NAME_MAX + 1];
+  bool in_range = true;
   int i;
 
   if (out == NULL || sensor < 0 || sensor >= IMU_CAL_NSENSORS)
@@ -95,19 +96,64 @@ int imu_cal_load(enum imu_cal_sensor_e sensor, FAR struct imu_cal_s *out)
       return OK;                 /* not calibrated: identity, valid = false */
     }
 
+  /* CAL_<S>_OK=1 only says a fit was committed, not that it was a GOOD fit -
+   * param_set_f32() clamps an out-of-range SET into range rather than
+   * refusing it (see param.h), so this is the one place left to catch a
+   * diverged fit before it reaches every sample downstream. Bounds are
+   * re-checked against the live parameter definition rather than hardcoded,
+   * so this tracks CAL_DIAG/CAL_OFFD/CAL_BIAS in param.c without drifting.
+   */
+
   for (i = 0; i < 9; i++)
     {
+      FAR const struct param_def_s *def;
+      int idx;
+
       snprintf(name, sizeof(name), "CAL_%s_%s", g_prefix[sensor], elem[i]);
       out->M[i] = param_f32(name);
+
+      idx = param_find(name);
+      def = param_def(idx);
+
+      if (def == NULL || out->M[i] < def->min.f || out->M[i] > def->max.f)
+        {
+          in_range = false;
+        }
     }
 
   for (i = 0; i < 3; i++)
     {
+      FAR const struct param_def_s *def;
+      int idx;
+
       snprintf(name, sizeof(name), "CAL_%s_%s", g_prefix[sensor], axis[i]);
       out->b[i] = param_f32(name);
+
+      idx = param_find(name);
+      def = param_def(idx);
+
+      if (def == NULL || out->b[i] < def->min.f || out->b[i] > def->max.f)
+        {
+          in_range = false;
+        }
     }
 
-  out->valid = true;
+  out->valid = in_range;
+
+  if (!in_range)
+    {
+      /* Do not hand back the out-of-range numbers alongside valid=false.
+       * imu_cal_apply() already passes through on !valid without looking at
+       * M/b, but a future caller that reads them directly (a status
+       * printout, say) must not see a matrix that looks plausible but is
+       * not.
+       */
+
+      memset(out->M, 0, sizeof(out->M));
+      out->M[0] = out->M[4] = out->M[8] = 1.0f;
+      memset(out->b, 0, sizeof(out->b));
+    }
+
   return OK;
 }
 
