@@ -44,6 +44,14 @@
 #define SER_FUNC_GPS      3
 #define SER_FUNC_RC_IN    4
 
+/* Reserve the port for a calibration session. Nothing is started at boot -
+ * this value exists so USB can be marked as belonging to the calibration GUI
+ * and NOT have a shell put on it. A shell on the same port would sit blocked
+ * in read() and race the GUI for every input byte.
+ */
+
+#define SER_FUNC_CAL      5
+
 /* RC protocol (RC_PROT). Auto only spans the two UART protocols; PPM is a
  * pulse train on a timer-capture pin, so it must be selected explicitly.
  */

@@ -1,0 +1,34 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config XXCAR_CAL
+	tristate "cal: sensor calibration session"
+	default n
+	depends on UORB && SENSORS
+	select XXCAR_PARAM
+	select XXCAR_IMU_CAL
+	---help---
+		Guided IMU calibration driven from a host GUI over the USB CDC
+		port. The board detects stillness and reports averaged vectors;
+		the fits run on the host.
+
+		Run 'cal session' from the shell on TELEM1/DEBUG - not from a
+		shell on USB, which would race the session for input bytes.
+
+if XXCAR_CAL
+
+config XXCAR_CAL_PROGNAME
+	string "Program name"
+	default "cal"
+
+config XXCAR_CAL_PRIORITY
+	int "cal task priority"
+	default 100
+
+config XXCAR_CAL_STACKSIZE
+	int "cal stack size"
+	default 4096
+
+endif

@@ -591,6 +591,19 @@ int serial_manager_start(void)
                    p->name, p->devpath, baud);
             break;
 
+          case SER_FUNC_CAL:
+
+            /* Deliberately does nothing. This value only exists to keep NSH
+             * off the port - 'cal session' opens it directly, later, from a
+             * shell running elsewhere. Starting anything here would be the
+             * exact bug this function value exists to prevent.
+             */
+
+            syslog(LOG_INFO,
+                   "serial: %s (%s) reserved for calibration - no shell "
+                   "started\n", p->name, p->devpath);
+            break;
+
           default:
             syslog(LOG_ERR, "serial: %s: unknown function %" PRId32 "\n",
                    p->name, func);
