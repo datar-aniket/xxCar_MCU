@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
+#include <math.h>
 
 #include "param.h"
 
@@ -160,9 +161,47 @@ static void test_other_selector_also_protected(void)
     }
 }
 
+/* A NaN passes every range comparison, so without an explicit guard it is
+ * stored, written to params.txt, and read back for ever. An Allan run too
+ * short to reach its curve minimum produces exactly one.
+ */
+
+static void test_nonfinite_float_is_refused(void)
+{
+  float before;
+  float after;
+
+  if (param_get_f32("CAL_ACC0_XOFF", &before) < 0)
+    {
+      fail("nonfinite: cannot read CAL_ACC0_XOFF");
+      return;
+    }
+
+  if (param_set_f32("CAL_ACC0_XOFF", (float)NAN) >= 0)
+    {
+      fail("nonfinite: NaN was accepted");
+    }
+
+  if (param_get_f32("CAL_ACC0_XOFF", &after) < 0 || after != before)
+    {
+      fail("nonfinite: NaN moved the stored value");
+    }
+
+  if (param_get_f32("CAL_ACC0_XOFF", &after) == 0 && after != after)
+    {
+      fail("nonfinite: stored value is itself NaN");
+    }
+
+  if (param_set_f32("CAL_ACC0_XOFF", (float)INFINITY) >= 0)
+    {
+      fail("nonfinite: infinity was accepted");
+    }
+}
+
 int main(void)
 {
   param_init();
+  test_nonfinite_float_is_refused();
 
   test_selector_rejects_and_does_not_move();
   test_selector_accepts_a_valid_choice();

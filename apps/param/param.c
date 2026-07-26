@@ -217,6 +217,47 @@ static const struct param_def_s g_params[] =
   { "CAL_ACC1_OK", PARAM_TYPE_INT32, I32(0), I32(0), I32(1),
     "Accel 1 calibrated (0 = raw passthrough)" },
 
+  /* ---- IMU noise, from an Allan variance run ---------------------------
+   * Not calibration - these do not change a reading. They are what an EKF
+   * needs to know about how much to trust one: the white-noise density it
+   * uses for the measurement, and the bias random walk it uses to let the
+   * estimated bias move.
+   *
+   *   ND  noise density,      sigma(tau) = ND / sqrt(tau)
+   *   RW  bias random walk,   sigma(tau) = RW * sqrt(tau / 3)
+   *   BI  bias instability,   min of the curve / 0.664
+   *
+   * Bounds are wide because these span orders of magnitude between a MEMS
+   * part and a good one, and a bound that rejects a real measurement is worse
+   * than one that admits a bad one - the residual and the plot are what say
+   * whether a run was any good.
+   */
+
+  { "IMU0_ACC_ND", PARAM_TYPE_FLOAT, F32(0.0f), F32(0.0f), F32(1.0f),
+    "Accel 0 noise density (m/s^2/sqrt(Hz))" },
+  { "IMU0_ACC_RW", PARAM_TYPE_FLOAT, F32(0.0f), F32(0.0f), F32(1.0f),
+    "Accel 0 bias random walk (m/s^3*sqrt(s))" },
+  { "IMU0_ACC_BI", PARAM_TYPE_FLOAT, F32(0.0f), F32(0.0f), F32(1.0f),
+    "Accel 0 bias instability (m/s^2)" },
+  { "IMU0_GYR_ND", PARAM_TYPE_FLOAT, F32(0.0f), F32(0.0f), F32(1.0f),
+    "Gyro 0 noise density (rad/s/sqrt(Hz))" },
+  { "IMU0_GYR_RW", PARAM_TYPE_FLOAT, F32(0.0f), F32(0.0f), F32(1.0f),
+    "Gyro 0 bias random walk (rad/s^2*sqrt(s))" },
+  { "IMU0_GYR_BI", PARAM_TYPE_FLOAT, F32(0.0f), F32(0.0f), F32(1.0f),
+    "Gyro 0 bias instability (rad/s)" },
+  { "IMU1_ACC_ND", PARAM_TYPE_FLOAT, F32(0.0f), F32(0.0f), F32(1.0f),
+    "Accel 1 noise density (m/s^2/sqrt(Hz))" },
+  { "IMU1_ACC_RW", PARAM_TYPE_FLOAT, F32(0.0f), F32(0.0f), F32(1.0f),
+    "Accel 1 bias random walk (m/s^3*sqrt(s))" },
+  { "IMU1_ACC_BI", PARAM_TYPE_FLOAT, F32(0.0f), F32(0.0f), F32(1.0f),
+    "Accel 1 bias instability (m/s^2)" },
+  { "IMU1_GYR_ND", PARAM_TYPE_FLOAT, F32(0.0f), F32(0.0f), F32(1.0f),
+    "Gyro 1 noise density (rad/s/sqrt(Hz))" },
+  { "IMU1_GYR_RW", PARAM_TYPE_FLOAT, F32(0.0f), F32(0.0f), F32(1.0f),
+    "Gyro 1 bias random walk (rad/s^2*sqrt(s))" },
+  { "IMU1_GYR_BI", PARAM_TYPE_FLOAT, F32(0.0f), F32(0.0f), F32(1.0f),
+    "Gyro 1 bias instability (rad/s)" },
+
   { "CAL_MAG0_XOFF",  PARAM_TYPE_FLOAT, F32(0.0f), F32(-2.0f), F32(2.0f),
     "Mag 0 X offset (Gauss)" },
   { "CAL_MAG0_YOFF",  PARAM_TYPE_FLOAT, F32(0.0f), F32(-2.0f), F32(2.0f),
@@ -273,6 +314,22 @@ enum param_fix_e
 static enum param_fix_e param_clamp(int idx, FAR union param_value_u *v)
 {
   FAR const struct param_def_s *d = &g_params[idx];
+
+  /* Reject NaN and infinity before anything else.
+   *
+   * Every comparison against NaN is false, so a NaN sails through the range
+   * test below as though it were in range and gets stored - then written to
+   * params.txt as "nan" and read straight back on the next boot, permanently.
+   * (Infinity is caught by the bounds, NaN is not.) It arrives more easily
+   * than it looks: an Allan run too short to reach its curve minimum yields a
+   * genuine NaN for rate random walk, and that number is on its way to a
+   * parameter.
+   */
+
+  if (d->type == PARAM_TYPE_FLOAT && !isfinite(v->f))
+    {
+      return PARAM_FIX_REJECTED;
+    }
 
   if (d->range == PARAM_RANGE_ENUM)
     {
@@ -597,10 +654,22 @@ int param_set_f32(FAR const char *name, float value)
     }
 
   v.f = value;
-  if (param_clamp(idx, &v) == PARAM_FIX_CLAMPED)
+  switch (param_clamp(idx, &v))
     {
-      g_values[idx] = v;
-      return -ERANGE;
+      case PARAM_FIX_REJECTED:
+
+        /* Non-finite. Leave the stored value alone: a NaN written here would
+         * outlive the mistake in params.txt.
+         */
+
+        return -ERANGE;
+
+      case PARAM_FIX_CLAMPED:
+        g_values[idx] = v;
+        return -ERANGE;
+
+      default:
+        break;
     }
 
   g_values[idx] = v;

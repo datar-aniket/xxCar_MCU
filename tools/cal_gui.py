@@ -442,6 +442,8 @@ class App(tk.Tk):
         self.stats = ttk.Label(bar, text="", style="Muted.TLabel",
                                font=("TkFixedFont", 9))
         self.stats.pack(side="right")
+        ttk.Button(bar, text="Allan variance…",
+                   command=self._open_allan).pack(side="right", padx=12)
 
         # a real paned window, so the sidebar can be dragged to fit its content
         self.pane = ttk.Panedwindow(self, orient="horizontal")
@@ -711,6 +713,37 @@ class App(tk.Tk):
     def _quit(self):
         self._close()
         self.destroy()
+
+    def _open_allan(self):
+        """Offline analysis in its own window.
+
+        Deliberately usable with no board attached - the logs are on disk and
+        the numbers are worth having whether or not the vehicle is plugged in.
+        Saving to params is the only part that needs the link.
+        """
+        try:
+            from cal_allan_win import AllanWindow
+        except ImportError as exc:
+            self._say(f"! Allan window unavailable: {exc}", "err")
+            return
+        if getattr(self, "_allan", None) and self._allan.winfo_exists():
+            self._allan.lift()
+            return
+        self._allan = AllanWindow(self, on_save=self._save_allan_params)
+
+    def _save_allan_params(self, params: dict) -> bool:
+        """Write the noise coefficients to the board, then persist once.
+
+        Returns False rather than raising when nothing is connected, so the
+        JSON report still counts as a successful save.
+        """
+        if not self.link:
+            return False
+        for name, value in params.items():
+            self.link.send(f"set {name} {value:.9g}")
+        self.link.send("commit")
+        self._say(f"> wrote {len(params)} Allan params and committed", "tx")
+        return True
 
     # ---- sensors --------------------------------------------------------
 
