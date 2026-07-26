@@ -65,16 +65,23 @@ static int cal_raw_mode(int fd, FAR struct termios *saved)
 
 int cal_print_status(void)
 {
+  int32_t mode = param_i32("CAL_MODE");
   int i;
 
   printf("stored IMU calibration (CAL_MODE=%" PRId32 ", %s)\n",
-         param_i32("CAL_MODE"),
-         param_i32("CAL_MODE") == 1 ? "jig: alignment observable"
-                                    : "desk: norm-only, alignment NOT observable");
+         mode,
+         mode == 1 ? "jig: alignment observable"
+                   : "desk: norm-only, alignment NOT observable");
 
   for (i = 0; i < IMU_CAL_NSENSORS; i++)
     {
       struct imu_cal_s cal;
+
+      /* imu_cal_load() only fails on an out-of-range sensor id, which cannot
+       * happen here - i is bounded by IMU_CAL_NSENSORS, the same enum this
+       * loop walks. Kept anyway: it is a one-line guard against this loop
+       * being copied somewhere its bound and the enum have drifted apart.
+       */
 
       if (imu_cal_load((enum imu_cal_sensor_e)i, &cal) < 0)
         {
@@ -101,6 +108,27 @@ int cal_session(void)
   struct termios saved;
   int ret;
   int fd;
+
+  /* The kernel gives us nothing to lean on here: /dev/ttyACM0's open() is
+   * refcounted, not exclusive (any number of opens succeed), TIOCEXCL is
+   * declared but not implemented for this port, and termios state lives on
+   * the shared uart_dev_t rather than per-fd - so if a shell is already on
+   * this port, opening it out from under it and calling cfmakeraw() would
+   * silently strip ICANON/ECHO from that shell's line discipline and the two
+   * would race for every input byte with no diagnostic anywhere. This check
+   * is therefore the ONLY thing standing between an operator who forgets to
+   * set SER_USB_FUNC first and that exact race - not a courtesy, load-bearing.
+   */
+
+  if (param_i32("SER_USB_FUNC") != SER_FUNC_CAL)
+    {
+      fprintf(stderr,
+              "cal: %s is not reserved for calibration (SER_USB_FUNC != CAL).\n"
+              "  Set SER_USB_FUNC=5 (CAL) and reboot, so no shell is\n"
+              "  started on it - a shell there races the GUI for input.\n",
+              CAL_DEVPATH);
+      return -EBUSY;
+    }
 
   /* O_NONBLOCK on open: the CDC port only exists while a host is attached, and
    * a blocking open would hang the shell until someone plugged in a cable.
