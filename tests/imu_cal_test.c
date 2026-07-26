@@ -108,6 +108,14 @@ static void test_row_major_not_transposed(void)
 
 /* Callers will want to correct a sample where it sits. If the implementation
  * writes out[0] before reading in[1], aliasing corrupts the result silently.
+ *
+ * A diagonal-only M cannot catch that: with no off-diagonal term, out[i]
+ * depends only on in[i], so even an implementation that overwrites in-place
+ * one element at a time (no scratch buffer) happens to get the right answer.
+ * M[3] (row 1, column 0) is nonzero here specifically so computing out[1]
+ * needs the ORIGINAL in[0], after out[0] would already have overwritten it
+ * in a naive in-place loop - the same shape as test_row_major_not_transposed,
+ * but exercised through the aliasing path.
  */
 
 static void test_in_place_aliasing(void)
@@ -116,16 +124,23 @@ static void test_in_place_aliasing(void)
   float v[3] = { 3.0f, 6.0f, 8.0f };
 
   memset(&cal, 0, sizeof(cal));
-  cal.M[0] = 0.5f;
-  cal.M[4] = 0.25f;
-  cal.M[8] = 0.2f;
+  cal.M[0] = 1.0f;
+  cal.M[3] = 0.5f;      /* M[1][0]: row 1 also reads component 0 */
+  cal.M[4] = 1.0f;
+  cal.M[8] = 1.0f;
   cal.b[0] = 1.0f;
   cal.b[1] = 2.0f;
   cal.b[2] = 3.0f;
   cal.valid = true;
 
+  /* d = v - b = (2, 4, 5).
+   * out0 = 1*2            = 2
+   * out1 = 0.5*2 + 1*4    = 5
+   * out2 =            1*5 = 5
+   */
+
   imu_cal_apply(&cal, v, v);
-  expect_vec("in place", v, 1.0f, 1.0f, 1.0f);
+  expect_vec("in place", v, 2.0f, 5.0f, 5.0f);
 }
 
 int main(void)

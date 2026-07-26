@@ -111,6 +111,31 @@ static void test_motion_resets_progress(void)
     }
 }
 
+/* A slide or a tap moves the accelerometer without turning the board, so the
+ * gyro alone would call it still. This is the pure-translation branch in
+ * cal_still_update() (checked only once count > 0, against the running mean
+ * rather than a fixed value so it works in any orientation) - without it, a
+ * hand nudging the board mid-capture would smear a moving gravity vector into
+ * the average with no outward sign anything was wrong.
+ */
+
+static void test_accel_jolt_resets_progress(void)
+{
+  struct cal_still_s s;
+  bool still = false;
+
+  cal_still_reset(&s, 0.02f, 0.05f, 50);
+  feed(&s, 40, 0.0f, 0.0f, 9.81f, 0.0f, 0.0f, 0.0f, NULL);
+  feed(&s,  1, 0.0f, 0.0f, 10.5f, 0.0f, 0.0f, 0.0f, NULL);   /* a nudge, gyro quiet */
+  feed(&s, 40, 0.0f, 0.0f, 9.81f, 0.0f, 0.0f, 0.0f, &still);
+
+  if (still)
+    {
+      printf("FAIL: an accel jolt (gyro quiet) did not reset the still window\n");
+      g_fail++;
+    }
+}
+
 static void test_mean_is_the_average(void)
 {
   struct cal_still_s s;
@@ -141,6 +166,7 @@ int main(void)
   test_rotating_is_not_still();
   test_short_window_is_not_still();
   test_motion_resets_progress();
+  test_accel_jolt_resets_progress();
   test_mean_is_the_average();
 
   if (g_fail != 0)

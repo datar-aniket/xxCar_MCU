@@ -122,6 +122,27 @@ static void test_set_rejects_garbage_value(void)
     }
 }
 
+/* strtof() happily parses the numeric prefix of "1.5xyz" and stops at the
+ * 'x', returning 1.5 - it is *endptr, not the return value, that says trailing
+ * junk was left over. Dropping that check would silently store 1.5 for a
+ * value the host never actually sent (a typo, a stray unit suffix), so it
+ * must be rejected exactly like pure garbage.
+ */
+
+static void test_set_rejects_trailing_garbage(void)
+{
+  struct cal_cmd_s c;
+
+  cal_proto_parse("set CAL_ACC0_BX 1.5xyz", &c);
+
+  if (c.cmd != CAL_CMD_UNKNOWN)
+    {
+      printf("FAIL set trailing garbage: cmd %d, fval %f\n", (int)c.cmd,
+             (double)c.fval);
+      g_fail++;
+    }
+}
+
 /* A deliberate zero must still parse as a legitimate SET, not be confused
  * with the garbage-value rejection above.
  */
@@ -229,6 +250,7 @@ int main(void)
   test_set_parses_name_and_value();
   test_overlong_name_rejected();
   test_set_rejects_garbage_value();
+  test_set_rejects_trailing_garbage();
   test_set_accepts_zero_value();
   test_hello_is_json();
   test_captured_carries_vectors();
