@@ -315,7 +315,21 @@ int cal_session(void)
             continue;
           }
 
-        if (fill >= sizeof(line) - 1 && ch != '\n')
+        /* CR and LF both end a line.
+         *
+         * Accepting only LF would make this protocol undrivable from the plain
+         * terminal it was designed to be debugged from: picocom, screen and
+         * minicom all send a bare CR on Enter unless told otherwise, so the
+         * board would accumulate the command forever and answer nothing, while
+         * looking for all the world like a dead port.
+         *
+         * CRLF costs nothing extra - the LF arrives as an empty line, and an
+         * empty line already parses to CAL_CMD_NONE and is ignored.
+         */
+
+#define CAL_IS_EOL(c) ((c) == '\n' || (c) == '\r')
+
+        if (fill >= sizeof(line) - 1 && !CAL_IS_EOL(ch))
           {
             /* Buffer is full and the line has not ended yet. Drop bytes until
              * the real newline instead of quietly dispatching the truncated
@@ -328,7 +342,7 @@ int cal_session(void)
             continue;
           }
 
-        if (ch != '\n')
+        if (!CAL_IS_EOL(ch))
           {
             line[fill++] = ch;
             continue;
