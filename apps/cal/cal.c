@@ -189,6 +189,20 @@ static int cal_cmd_list(int fd)
       sub[i] = meta != NULL ? orb_subscribe(meta) : -1;
       gen[i] = 0;
 
+      if (sub[i] >= 0)
+        {
+          /* Ask for a rate, or the on-demand sensors publish nothing.
+           *
+           * The IMUs free-run off a hardware FIFO and are always producing.
+           * The MS5611 baro and IST8310 mag use NuttX's polled uorb drivers,
+           * whose kthread samples only at the interval a SUBSCRIBER asks for -
+           * default 1 Hz. Without this, a perfectly healthy baro reports zero
+           * samples in the window below and gets shown as absent.
+           */
+
+          orb_set_interval(sub[i], 20000);        /* 50 Hz */
+        }
+
       if (sub[i] >= 0 && orb_get_state(sub[i], &st) == 0)
         {
           gen[i] = st.generation;
@@ -595,6 +609,15 @@ int cal_session(void)
                            "\"msg\":\"sensor not available\"}\n");
               continue;
             }
+
+          /* Drive the sensor at the rate we intend to send, rather than
+           * polling a topic that updates on its own schedule. For the polled
+           * drivers (baro, mag) this is what makes them sample at all; for the
+           * free-running IMUs it throttles delivery to what we actually want,
+           * instead of discarding 39 of every 40 samples at 2 kHz.
+           */
+
+          orb_set_interval(st_sub, (unsigned)(1000000 / hz));
 
           st_idx       = i;
           st_seq       = 0;
