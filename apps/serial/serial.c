@@ -664,3 +664,13 @@ bool serial_console_wants_nsh(void)
 {
   return g_console_nsh;
 }
+
+bool serial_port_has_nsh(int port)
+{
+  if (port < 0 || port >= SERIAL_NPORTS)
+    {
+      return false;
+    }
+
+  return serial_nsh_alive(port);
+}

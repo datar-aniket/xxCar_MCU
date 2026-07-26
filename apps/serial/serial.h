@@ -124,4 +124,18 @@ int serial_manager_start(void);
 
 bool serial_console_wants_nsh(void);
 
+/* Is an NSH task actually alive on this port right now?
+ *
+ * Deliberately NOT the same question as "what does SER_*_FUNC say". The
+ * parameter is mutable at any time from a running shell, but the NSH task on
+ * a port was started once, at boot, from that parameter's value THEN - and
+ * keeps running (or, on a removable port, keeps re-arming after every
+ * unplug) until the board reboots. A caller that needs to know whether
+ * something is actually reading this port right now, not what the parameter
+ * currently claims, must ask this instead. `port` is an index from
+ * serial_find()/serial_ports(); out of range returns false.
+ */
+
+bool serial_port_has_nsh(int port);
+
 #endif /* __APPS_SERIAL_SERIAL_H */
