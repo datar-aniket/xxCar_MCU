@@ -126,7 +126,9 @@
 #define ICM_TEMP_SCALE          (1.0f / 132.48f)              /* 16-bit temp */
 #define ICM_TEMP_OFFSET         25.0f
 
-#define ICM_UORB_NBUFFER        32          /* holds several watermark bursts */
+#define ICM_UORB_NBUFFER        256         /* ~128 ms at 2 kHz: enough that an
+                                             * SD stall inside the logger cannot
+                                             * silently overwrite samples */
 #define ICM_WATCHDOG_MS         20          /* fallback drain if an INT is missed */
 #define ICM_SAMPLE_PERIOD_US    500         /* 2 kHz ODR -> 500 us per sample */
 

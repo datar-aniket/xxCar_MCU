@@ -51,11 +51,31 @@
 
 /* Write buffer. At 2 kHz across the IMUs the logger produces a record every few
  * hundred microseconds; a write() per record would swamp the FAT layer. Records
- * accumulate here and go to the card in one write when the buffer fills. 8 KB is
- * several FAT sectors and about 30 ms of full-rate IMU data.
+ * accumulate here and go to the card in one write when the buffer fills.
+ *
+ * 64 KB, not the 8 KB this started with, because the buffer's real job is not
+ * batching - it is absorbing SD stalls. Cards routinely pause 50-200 ms for
+ * wear levelling and internal housekeeping, and 8 KB is about 36 ms of
+ * full-rate IMU data: a single stall overran it and the excess was dropped.
+ * 64 KB is roughly 290 ms, which covers the stalls actually observed.
  */
 
-#define LOG_BUFSIZE   8192
+#define LOG_BUFSIZE   65536
+
+/* Roll over to a new file at this size.
+ *
+ * FAT32 cannot hold a file above 4 GB, which at full rate arrives in five
+ * hours - long enough to look fine and short enough to end an overnight run
+ * before morning. Splitting also means a card pulled or a power loss costs one
+ * part rather than the whole night.
+ *
+ * Each part is a COMPLETE ULog file: header, format definitions and
+ * subscriptions are written afresh at the start of every one. Splitting the
+ * byte stream alone would leave every part after the first unreadable, since
+ * the definitions live only at the front.
+ */
+
+#define LOG_PART_BYTES  (100u * 1024u * 1024u)
 
 /* Largest record we serialise (rc_in, 56 bytes). */
 
@@ -180,6 +200,12 @@ static struct logger_status_s g_status;
 /* Writer state. */
 
 static int      g_fd = -1;
+
+/* Bytes written to the CURRENT part, which is not g_status.bytes: that one
+ * counts the whole session and must keep climbing across a rollover.
+ */
+
+static uint32_t g_part_bytes;
 static uint8_t  g_buf[LOG_BUFSIZE];
 static size_t   g_buflen;
 
@@ -215,6 +241,7 @@ static bool log_flush(void)
       pthread_mutex_lock(&g_lock);
       g_status.bytes += g_buflen;
       pthread_mutex_unlock(&g_lock);
+      g_part_bytes += g_buflen;
       g_buflen = 0;
       return true;
     }
@@ -340,9 +367,15 @@ static bool log_write_subscription(FAR const struct log_sub_s *sub)
  * Private Functions - session setup
  ****************************************************************************/
 
-/* Pick the next free /fs/microsd/log/log_NNN.ulg. */
+/* Pick the next unused session number.
+ *
+ * sscanf("log_007_02.ulg", "log_%d...") still yields 7, because %d stops at the
+ * underscore and the trailing literal failing to match does not undo the
+ * assignment. So this finds the highest session across both the old one-file
+ * names and the split ones.
+ */
 
-static int log_open_session(FAR char *path, size_t pathlen)
+static int log_next_session(void)
 {
   FAR DIR *dir;
   FAR struct dirent *ent;
@@ -357,7 +390,7 @@ static int log_open_session(FAR char *path, size_t pathlen)
         {
           int n;
 
-          if (sscanf(ent->d_name, "log_%d.ulg", &n) == 1 && n >= next)
+          if (sscanf(ent->d_name, "log_%d", &n) == 1 && n >= next)
             {
               next = n + 1;
             }
@@ -366,7 +399,13 @@ static int log_open_session(FAR char *path, size_t pathlen)
       closedir(dir);
     }
 
-  snprintf(path, pathlen, "%s/log_%03d.ulg", LOG_DIR, next);
+  return next;
+}
+
+static int log_open_part(int session, int part, FAR char *path,
+                         size_t pathlen)
+{
+  snprintf(path, pathlen, "%s/log_%03d_%02d.ulg", LOG_DIR, session, part);
 
   return open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
 }
@@ -385,6 +424,8 @@ static int log_daemon(int argc, FAR char *argv[])
   int32_t          rate;
   uint32_t         min_interval;
   int              nsubs = 0;
+  int              session = 1;
+  int              part = 0;
   int              i;
 
   UNUSED(argc);
@@ -441,7 +482,8 @@ static int log_daemon(int argc, FAR char *argv[])
       return EXIT_FAILURE;
     }
 
-  g_fd = log_open_session(path, sizeof(path));
+  session = log_next_session();
+  g_fd = log_open_part(session, part, path, sizeof(path));
   if (g_fd < 0)
     {
       syslog(LOG_ERR, "logger: cannot create log in %s: %d\n", LOG_DIR, errno);
@@ -455,9 +497,12 @@ static int log_daemon(int argc, FAR char *argv[])
       return EXIT_FAILURE;
     }
 
-  g_buflen = 0;
+  g_buflen     = 0;
+  g_part_bytes = 0;
 
-  /* Definition section, then the subscriptions. */
+  /* Definition section, then the subscriptions. Repeated at the head of every
+   * part - see LOG_PART_BYTES.
+   */
 
   log_write_header();
   log_write_formats();
@@ -543,12 +588,61 @@ static int log_daemon(int argc, FAR char *argv[])
           log_flush();
           last_flush = now;
         }
+
+      /* Roll over to the next part once this one is big enough.
+       *
+       * The buffer is flushed and the file closed before the new one opens, so
+       * a part on the card is always complete and readable on its own - which
+       * is the point of splitting at all.
+       */
+
+      if (g_part_bytes >= LOG_PART_BYTES)
+        {
+          log_flush();
+          fsync(g_fd);
+          close(g_fd);
+
+          part++;
+          g_fd = log_open_part(session, part, path, sizeof(path));
+
+          if (g_fd < 0)
+            {
+              syslog(LOG_ERR, "logger: cannot open part %d: %d\n",
+                     part, errno);
+              break;
+            }
+
+          g_buflen     = 0;
+          g_part_bytes = 0;
+
+          log_write_header();
+          log_write_formats();
+
+          for (i = 0; i < nsubs; i++)
+            {
+              log_write_subscription(&subs[i]);
+            }
+
+          pthread_mutex_lock(&g_lock);
+          strlcpy(g_status.path, path, sizeof(g_status.path));
+          pthread_mutex_unlock(&g_lock);
+
+          syslog(LOG_INFO, "logger: rolled to %s\n", path);
+        }
     }
 
-  log_flush();
-  fsync(g_fd);
-  close(g_fd);
-  g_fd = -1;
+  /* Guarded: the loop can exit with no file open, if opening the next part
+   * failed. Flushing to -1 would silently discard the buffer, and fsync/close
+   * on -1 are simply errors.
+   */
+
+  if (g_fd >= 0)
+    {
+      log_flush();
+      fsync(g_fd);
+      close(g_fd);
+      g_fd = -1;
+    }
 
   for (i = 0; i < nsubs; i++)
     {

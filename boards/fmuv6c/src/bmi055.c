@@ -134,7 +134,7 @@
 #define BMI_TEMP_SCALE          0.5f                             /* 0.5 K/LSB */
 #define BMI_TEMP_OFFSET         23.0f
 
-#define BMI_UORB_NBUFFER        32
+#define BMI_UORB_NBUFFER        256    /* ~128 ms at 2 kHz - see icm42688.c */
 #define BMI_WATCHDOG_MS         20     /* fallback drain if an INT is missed */
 
 /****************************************************************************
