@@ -17,6 +17,7 @@
 #include <inttypes.h>
 #include <poll.h>
 #include <stdbool.h>
+#include <math.h>
 
 #include <uORB/uORB.h>
 
@@ -25,6 +26,19 @@
 #include "cal_still.h"
 #include "../imu_cal/imu_cal.h"
 #include "../param/param.h"
+#include "../serial/serial.h"
+
+/* CAL_PROTO_NAME_MAX is duplicated in cal_proto.h rather than including
+ * param.h there, so the protocol builds standalone in the host test. This
+ * file includes both, so it is the one place that can catch the two
+ * silently drifting apart - a name that fits the protocol's buffer but not
+ * the parameter store's (or vice versa) would truncate or misaddress
+ * instead of failing loudly.
+ */
+
+#if CAL_PROTO_NAME_MAX != PARAM_NAME_MAX
+#  error "CAL_PROTO_NAME_MAX (cal_proto.h) must match PARAM_NAME_MAX (param.h)"
+#endif
 
 /****************************************************************************
  * Private Data
@@ -38,6 +52,51 @@ static const char *const g_sensor_name[IMU_CAL_NSENSORS] =
 /****************************************************************************
  * Private Functions
  ****************************************************************************/
+
+/* Write a complete event line to the (non-blocking) session fd, retrying
+ * through EAGAIN and a short count instead of trusting a bare write().
+ *
+ * fd is O_NONBLOCK and the CDC TX ring (CDCACM_TXBUFSIZE) is finite, so a
+ * host that is not draining it - GUI hung, USB stalled - makes write() return
+ * -EAGAIN (the whole line silently vanishes) or a short count (the host gets
+ * a truncated JSON line and desynchronises, since every reply here is
+ * supposed to be exactly one line). Retrying is bounded, not indefinite: a
+ * host that has genuinely stopped reading must not wedge the session, so
+ * persistent failure ends it instead of looping forever.
+ */
+
+static int cal_write_all(int fd, FAR const char *buf, size_t len)
+{
+  size_t off = 0;
+  int stalled = 0;
+
+  while (off < len)
+    {
+      ssize_t got = write(fd, buf + off, len - off);
+
+      if (got > 0)
+        {
+          off += (size_t)got;
+          stalled = 0;
+          continue;
+        }
+
+      if (got < 0 && errno == EAGAIN)
+        {
+          if (++stalled > 200)          /* ~200ms of a fully backed-up ring */
+            {
+              return -ETIMEDOUT;
+            }
+
+          usleep(1000);
+          continue;
+        }
+
+      return got < 0 ? -errno : -EIO;
+    }
+
+  return OK;
+}
 
 /* Put the port in raw mode and hand back the previous settings so the caller
  * can restore them. The protocol frames itself; canonical mode would buffer by
@@ -135,6 +194,31 @@ int cal_session(void)
               CAL_DEVPATH);
       return -EBUSY;
     }
+
+  /* The parameter check above is necessary but not sufficient: SER_USB_FUNC
+   * is read live, but the NSH task on this port (if any) was started once at
+   * boot from whatever that parameter said THEN, and then runs - or, being
+   * removable, keeps re-arming after every unplug - until the board reboots.
+   * An operator who runs `param set SER_USB_FUNC 5` without rebooting passes
+   * the check above while that boot-time shell is still very much alive,
+   * still looping open()/read() on this exact device every 250ms. The two
+   * would then race for every byte with no diagnostic anywhere. Rebooting is
+   * the only real fix, so that is what this tells the operator to do.
+   */
+
+  {
+    int usb_port = serial_find("USB");
+
+    if (usb_port >= 0 && serial_port_has_nsh(usb_port))
+      {
+        fprintf(stderr,
+                "cal: a shell is still attached to %s from before\n"
+                "  SER_USB_FUNC was set. Reboot the board so no NSH task is\n"
+                "  left racing the GUI for input on this port.\n",
+                CAL_DEVPATH);
+        return -EBUSY;
+      }
+  }
 
   /* O_NONBLOCK on open: the CDC port only exists while a host is attached, and
    * a blocking open would hang the shell until someone plugged in a cable.
@@ -352,19 +436,105 @@ int cal_session(void)
 
                   case CAL_CMD_GET:
                     {
-                      char msg[64];
+                      int idx = param_find(c.name);
+                      FAR const struct param_def_s *def = param_def(idx);
 
-                      snprintf(msg, sizeof(msg), "%s=%.6f", c.name,
-                               (double)param_f32(c.name));
-                      n = cal_proto_ok(evt, sizeof(evt), msg);
+                      /* param_f32()/param_i32() fall back to a default value
+                       * for an unknown name (0.0 for f32) and, on a type
+                       * mismatch, reinterpret the OTHER union member's raw
+                       * bits - neither is a real reading, and both would
+                       * come back wrapped in an "ok" event indistinguishable
+                       * from a genuine one. Look the name up and format by
+                       * its actual type instead of guessing.
+                       */
+
+                      if (def == NULL)
+                        {
+                          n = cal_proto_error(evt, sizeof(evt),
+                                              "no such parameter");
+                        }
+                      else
+                        {
+                          char msg[64];
+
+                          if (def->type == PARAM_TYPE_INT32)
+                            {
+                              snprintf(msg, sizeof(msg), "%s=%" PRId32,
+                                       c.name, param_i32(c.name));
+                            }
+                          else
+                            {
+                              snprintf(msg, sizeof(msg), "%s=%.6f", c.name,
+                                       (double)param_f32(c.name));
+                            }
+
+                          n = cal_proto_ok(evt, sizeof(evt), msg);
+                        }
                     }
                     break;
 
                   case CAL_CMD_SET:
-                    n = param_set_f32(c.name, c.fval) < 0
-                          ? cal_proto_error(evt, sizeof(evt),
-                                            "no such parameter")
-                          : cal_proto_ok(evt, sizeof(evt), "set");
+                    {
+                      int idx = param_find(c.name);
+                      FAR const struct param_def_s *def = param_def(idx);
+
+                      /* Three distinguishable failures, not one. Before this,
+                       * every one of them - an unknown name, a name that
+                       * exists but is the wrong type for param_set_f32(), and
+                       * a value outside the parameter's bounds - collapsed
+                       * onto "no such parameter", which hid F-1 (an INT32
+                       * calibration flag could never be set at all) and F-4
+                       * (an out-of-range value was clamped and applied to RAM
+                       * while being reported as if nothing had been touched).
+                       */
+
+                      if (def == NULL)
+                        {
+                          n = cal_proto_error(evt, sizeof(evt),
+                                              "no such parameter");
+                        }
+                      else if (def->type == PARAM_TYPE_INT32)
+                        {
+                          /* lroundf, not a cast: the host GUI has no reason
+                           * to send an INT32 parameter as anything but a
+                           * whole number, but round-to-nearest is the honest
+                           * way to turn whatever float arrived into the
+                           * integer that's actually stored, rather than
+                           * truncating toward zero. (lrintf is declared in
+                           * this NuttX tree's math.h but not linked into
+                           * libm; lroundf is, and round-half-away-from-zero
+                           * vs. lrintf's round-half-to-even makes no
+                           * difference for values that are meant to already
+                           * be integral.)
+                           */
+
+                          int32_t ival = (int32_t)lroundf(c.fval);
+
+                          if (ival < def->min.i || ival > def->max.i)
+                            {
+                              n = cal_proto_error(evt, sizeof(evt),
+                                                  "value out of range");
+                            }
+                          else
+                            {
+                              param_set_i32(c.name, ival);
+                              n = cal_proto_ok(evt, sizeof(evt), "set");
+                            }
+                        }
+                      else
+                        {
+                          if (c.fval < def->min.f || c.fval > def->max.f)
+                            {
+                              n = cal_proto_error(evt, sizeof(evt),
+                                                  "value out of range");
+                            }
+                          else
+                            {
+                              param_set_f32(c.name, c.fval);
+                              n = cal_proto_ok(evt, sizeof(evt), "set");
+                            }
+                        }
+                    }
                     break;
 
                   case CAL_CMD_COMMIT:
@@ -388,7 +558,18 @@ int cal_session(void)
 
           if (n > 0)
             {
-              write(fd, evt, (size_t)n);
+              if (cal_write_all(fd, evt, (size_t)n) < 0)
+                {
+                  /* The host is not draining the port. Continuing would just
+                   * mean replying to further commands that also cannot be
+                   * delivered - end the session instead of spinning blind.
+                   * Nothing has been written to the parameter store here
+                   * that needs unwinding.
+                   */
+
+                  ret = -EIO;
+                  done = true;
+                }
             }
         }
       }

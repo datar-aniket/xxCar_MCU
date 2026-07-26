@@ -9,6 +9,7 @@ config XXCAR_CAL
 	depends on UORB && SENSORS
 	select XXCAR_PARAM
 	select XXCAR_IMU_CAL
+	select XXCAR_SERIAL
 	---help---
 		Guided IMU calibration driven from a host GUI over the USB CDC
 		port. The board detects stillness and reports averaged vectors;
