@@ -39,7 +39,14 @@ struct logger_status_s
   char     path[48];       /* the .ulg being written */
   uint32_t topics;         /* how many topics are in this session */
   uint32_t samples;        /* records written */
-  uint32_t bytes;          /* bytes written to the card */
+
+  /* 64-bit, because 32 is not enough. Both IMUs at the native 2 kHz write
+   * 227 KB/s, which passes 4 GB - the uint32 ceiling - after about 5.3 hours.
+   * An overnight run would have reported a wrapped total, which is precisely
+   * the number you check in the morning to see whether it went well.
+   */
+
+  uint64_t bytes;          /* bytes written across the whole session */
   uint32_t dropped;        /* samples dropped because the card fell behind */
   int32_t  rate;           /* LOG_RATE this session was started with */
 };

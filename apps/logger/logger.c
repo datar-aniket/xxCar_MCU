@@ -649,7 +649,7 @@ static int log_daemon(int argc, FAR char *argv[])
       orb_unsubscribe(subs[i].fd);
     }
 
-  syslog(LOG_INFO, "logger: stopped (%" PRIu32 " samples, %" PRIu32 " bytes, "
+  syslog(LOG_INFO, "logger: stopped (%" PRIu32 " samples, %" PRIu64 " bytes, "
                    "%" PRIu32 " dropped)\n",
          g_status.samples, g_status.bytes, g_status.dropped);
 

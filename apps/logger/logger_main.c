@@ -68,7 +68,8 @@ static int log_do_status(void)
   printf("  topics    %" PRIu32 "\n", s.topics);
   printf("  rate      %s\n", s.rate > 0 ? "capped" : "native (every sample)");
   printf("  samples   %" PRIu32 "\n", s.samples);
-  printf("  written   %" PRIu32 " bytes\n", s.bytes);
+  printf("  written   %" PRIu64 " bytes (%.1f MB)\n",
+         s.bytes, (double)s.bytes / (1024.0 * 1024.0));
 
   if (s.dropped > 0)
     {

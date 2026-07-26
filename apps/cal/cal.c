@@ -937,7 +937,7 @@ int cal_session(void)
               cal_emit(fd,
                        "{\"evt\":\"ok\",\"what\":\"record stop\","
                        "\"path\":\"%s\",\"samples\":%" PRIu32 ","
-                       "\"bytes\":%" PRIu32 ",\"dropped\":%" PRIu32 "}\n",
+                       "\"bytes\":%" PRIu64 ",\"dropped\":%" PRIu32 "}\n",
                        ls.path, ls.samples, ls.bytes, ls.dropped);
             }
           else
@@ -947,7 +947,7 @@ int cal_session(void)
               logger_get_status(&ls);
               cal_emit(fd,
                        "{\"evt\":\"record\",\"running\":%s,\"path\":\"%s\","
-                       "\"samples\":%" PRIu32 ",\"bytes\":%" PRIu32 ","
+                       "\"samples\":%" PRIu32 ",\"bytes\":%" PRIu64 ","
                        "\"dropped\":%" PRIu32 "}\n",
                        ls.running ? "true" : "false", ls.path,
                        ls.samples, ls.bytes, ls.dropped);
