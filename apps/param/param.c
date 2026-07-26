@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <inttypes.h>
 #include <math.h>
 #include <syslog.h>
 
@@ -49,27 +50,27 @@ static const struct param_def_s g_params[] =
    */
 
   { "SER_TEL1_FUNC", PARAM_TYPE_INT32, I32(SER_FUNC_NSH),      I32(0), I32(4),
-    "TELEM1 function (0=off 1=NSH 2=MAVLink 3=GPS 4=RC)" },
+    "TELEM1 function (0=off 1=NSH 2=MAVLink 3=GPS 4=RC)", PARAM_RANGE_ENUM },
   { "SER_TEL1_BAUD", PARAM_TYPE_INT32, I32(115200), I32(1200), I32(3000000),
     "TELEM1 baud rate" },
   { "SER_TEL2_FUNC", PARAM_TYPE_INT32, I32(SER_FUNC_DISABLED), I32(0), I32(4),
-    "TELEM2 function" },
+    "TELEM2 function", PARAM_RANGE_ENUM },
   { "SER_TEL2_BAUD", PARAM_TYPE_INT32, I32(57600),  I32(1200), I32(3000000),
     "TELEM2 baud rate" },
   { "SER_TEL3_FUNC", PARAM_TYPE_INT32, I32(SER_FUNC_DISABLED), I32(0), I32(4),
-    "TELEM3 function" },
+    "TELEM3 function", PARAM_RANGE_ENUM },
   { "SER_TEL3_BAUD", PARAM_TYPE_INT32, I32(57600),  I32(1200), I32(3000000),
     "TELEM3 baud rate" },
   { "SER_GPS1_FUNC", PARAM_TYPE_INT32, I32(SER_FUNC_DISABLED), I32(0), I32(4),
-    "GPS1 function" },
+    "GPS1 function", PARAM_RANGE_ENUM },
   { "SER_GPS1_BAUD", PARAM_TYPE_INT32, I32(38400),  I32(1200), I32(3000000),
     "GPS1 baud rate" },
   { "SER_GPS2_FUNC", PARAM_TYPE_INT32, I32(SER_FUNC_DISABLED), I32(0), I32(4),
-    "GPS2 function" },
+    "GPS2 function", PARAM_RANGE_ENUM },
   { "SER_GPS2_BAUD", PARAM_TYPE_INT32, I32(38400),  I32(1200), I32(3000000),
     "GPS2 baud rate" },
   { "SER_DBG_FUNC",  PARAM_TYPE_INT32, I32(SER_FUNC_DISABLED), I32(0), I32(4),
-    "FMU DEBUG connector function" },
+    "FMU DEBUG connector function", PARAM_RANGE_ENUM },
   { "SER_DBG_BAUD",  PARAM_TYPE_INT32, I32(115200), I32(1200), I32(3000000),
     "FMU DEBUG baud rate" },
 
@@ -79,7 +80,8 @@ static const struct param_def_s g_params[] =
    */
 
   { "SER_USB_FUNC",  PARAM_TYPE_INT32, I32(SER_FUNC_NSH), I32(0), I32(4),
-    "USB (/dev/ttyACM0) function - no baud, the host sets it" },
+    "USB (/dev/ttyACM0) function - no baud, the host sets it",
+    PARAM_RANGE_ENUM },
 
   /* ---- RC input ---------------------------------------------------------
    * RC_PROT applies only to a receiver wired to an FMU UART (SER_*_FUNC=4).
@@ -91,7 +93,8 @@ static const struct param_def_s g_params[] =
    */
 
   { "RC_PROT", PARAM_TYPE_INT32, I32(RC_PROT_AUTO), I32(0), I32(3),
-    "RC protocol on an FMU UART (0=auto SBUS/CRSF 1=SBUS 2=CRSF 3=PPM)" },
+    "RC protocol on an FMU UART (0=auto SBUS/CRSF 1=SBUS 2=CRSF 3=PPM)",
+    PARAM_RANGE_ENUM },
 
   /* ---- PX4IO co-processor ------------------------------------------------
    * Owns the RC IN connector and the 8 PWM servo rails. Not all FMUv6C boards
@@ -212,24 +215,50 @@ static void param_ensure_init(void)
     }
 }
 
-/* Clamp a value into the definition's range. Returns true if it had to. */
+/* Bring a value into the definition's range, or report that it cannot be.
+ *
+ * A selector (PARAM_RANGE_ENUM) is never coerced into a neighbouring value -
+ * see the rationale on enum param_range_e. It is reported REJECTED and left
+ * untouched, so the caller can decide: param_load falls back to the default
+ * because it must boot with something, param_set_* refuses because the caller
+ * can simply be told it was wrong.
+ */
 
-static bool param_clamp(int idx, FAR union param_value_u *v)
+enum param_fix_e
+{
+  PARAM_FIX_NONE = 0,      /* value was already in range */
+  PARAM_FIX_CLAMPED,       /* scalar, coerced to the nearest bound */
+  PARAM_FIX_REJECTED       /* selector, not a valid choice; *v is unchanged */
+};
+
+static enum param_fix_e param_clamp(int idx, FAR union param_value_u *v)
 {
   FAR const struct param_def_s *d = &g_params[idx];
+
+  if (d->range == PARAM_RANGE_ENUM)
+    {
+      /* Selectors are always INT32; a float selector is meaningless. */
+
+      if (v->i < d->min.i || v->i > d->max.i)
+        {
+          return PARAM_FIX_REJECTED;
+        }
+
+      return PARAM_FIX_NONE;
+    }
 
   if (d->type == PARAM_TYPE_INT32)
     {
       if (v->i < d->min.i)
         {
           v->i = d->min.i;
-          return true;
+          return PARAM_FIX_CLAMPED;
         }
 
       if (v->i > d->max.i)
         {
           v->i = d->max.i;
-          return true;
+          return PARAM_FIX_CLAMPED;
         }
     }
   else
@@ -237,17 +266,17 @@ static bool param_clamp(int idx, FAR union param_value_u *v)
       if (v->f < d->min.f)
         {
           v->f = d->min.f;
-          return true;
+          return PARAM_FIX_CLAMPED;
         }
 
       if (v->f > d->max.f)
         {
           v->f = d->max.f;
-          return true;
+          return PARAM_FIX_CLAMPED;
         }
     }
 
-  return false;
+  return PARAM_FIX_NONE;
 }
 
 /****************************************************************************
@@ -340,9 +369,29 @@ int param_load(void)
           v.f = strtof(valstr, NULL);
         }
 
-      if (param_clamp(idx, &v))
+      switch (param_clamp(idx, &v))
         {
-          syslog(LOG_WARNING, "[param] %s out of range, clamped\n", name);
+          case PARAM_FIX_CLAMPED:
+            syslog(LOG_WARNING, "[param] %s out of range, clamped\n", name);
+            break;
+
+          case PARAM_FIX_REJECTED:
+
+            /* A selector we do not recognise - typically params.txt outliving
+             * the firmware that understood the value. Boot with the default
+             * rather than whichever unrelated function happens to sit at the
+             * nearest bound, and say so loudly: the operator's saved intent has
+             * been dropped, and they need to know which parameter to re-set.
+             */
+
+            v = g_params[idx].def;
+            syslog(LOG_ERR,
+                   "[param] %s: '%s' is not a valid choice, using default %"
+                   PRId32 "\n", name, valstr, v.i);
+            break;
+
+          default:
+            break;
         }
 
       g_values[idx] = v;
@@ -467,10 +516,23 @@ int param_set_i32(FAR const char *name, int32_t value)
     }
 
   v.i = value;
-  if (param_clamp(idx, &v))
+  switch (param_clamp(idx, &v))
     {
-      g_values[idx] = v;
-      return -ERANGE;          /* clamped: applied, but tell the caller */
+      case PARAM_FIX_REJECTED:
+
+        /* Not a valid choice for this selector. Leave the parameter alone -
+         * quietly substituting a different function is how an RC decoder ends
+         * up on the USB port.
+         */
+
+        return -ERANGE;
+
+      case PARAM_FIX_CLAMPED:
+        g_values[idx] = v;
+        return -ERANGE;          /* clamped: applied, but tell the caller */
+
+      default:
+        break;
     }
 
   g_values[idx] = v;
@@ -496,7 +558,7 @@ int param_set_f32(FAR const char *name, float value)
     }
 
   v.f = value;
-  if (param_clamp(idx, &v))
+  if (param_clamp(idx, &v) == PARAM_FIX_CLAMPED)
     {
       g_values[idx] = v;
       return -ERANGE;

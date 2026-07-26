@@ -69,6 +69,31 @@ union param_value_u
   float   f;
 };
 
+/* What an out-of-range value MEANS, which is not the same question for every
+ * parameter.
+ *
+ * For a scalar - a baud rate, a log rate, a gain - the nearest bound is a
+ * sensible reading of an out-of-range request: someone asked for "very fast"
+ * and gets the fastest allowed.
+ *
+ * For a selector it is actively dangerous, because neighbouring values are
+ * unrelated functions rather than more-or-less of the same thing. Clamping
+ * SER_USB_FUNC=5 to 4 does not give "nearly calibration" - it gives RC_IN, and
+ * silently starts an RC receiver on the USB port. That really happened: a
+ * params.txt written by firmware that had a fifth function outlived the
+ * firmware, and the next boot put an SBUS decoder on /dev/ttyACM0, which
+ * cannot invert a signal it has no UART for.
+ *
+ * So a selector with an unrecognised value is not coerced into a different
+ * function. On load it falls back to its default; on a set it is refused.
+ */
+
+enum param_range_e
+{
+  PARAM_RANGE_CLAMP = 0,   /* scalar: coerce to the nearest bound */
+  PARAM_RANGE_ENUM         /* selector: fall back to the default, or refuse */
+};
+
 struct param_def_s
 {
   FAR const char     *name;
@@ -77,6 +102,7 @@ struct param_def_s
   union param_value_u min;
   union param_value_u max;
   FAR const char     *desc;
+  enum param_range_e  range;  /* omitted in the table == PARAM_RANGE_CLAMP */
 };
 
 /****************************************************************************
