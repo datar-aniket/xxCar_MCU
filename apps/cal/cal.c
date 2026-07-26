@@ -533,8 +533,15 @@ int cal_session(void)
                    * opposite direction.
                    */
 
+                  /* lroundf, not lrintf: this tree declares lrintf in
+                   * math.h but does not provide it in libm, so lrintf links
+                   * only by accident of nothing calling it. The difference -
+                   * half-away-from-zero versus the current rounding mode - is
+                   * immaterial when quantising to the sensor's own LSB.
+                   */
+
                   p[k] = q >= 32767.0f ? 32767 :
-                         q <= -32768.0f ? -32768 : (int16_t)lrintf(q);
+                         q <= -32768.0f ? -32768 : (int16_t)lroundf(q);
                 }
 
               bytes = nv * 2;
