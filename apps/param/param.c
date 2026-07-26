@@ -32,6 +32,46 @@
 #define I32(v) { .i = (v) }
 #define F32(v) { .f = (v) }
 
+/* Calibration for one sensor: a bias vector and a PRE-INVERTED 3x3 correction
+ * matrix, applied as  true = M * (measured - b).  Storing M already inverted is
+ * deliberate - it keeps the runtime cost at nine multiplies instead of solving a
+ * system on every sample. See apps/imu_cal.
+ *
+ * BLIM bounds the bias: m/s^2 for an accelerometer, rad/s for a gyro. The
+ * diagonal is bounded 0.8-1.2 and the off-diagonal +/-0.1, because a value
+ * outside those is not a calibration, it is a failed fit, and imu_cal refuses to
+ * load it rather than quietly corrupting every sample.
+ *
+ * Names must stay within PARAM_NAME_MAX (16) - that is also MAVLink's param_id
+ * width, and a longer name would truncate on the wire.
+ */
+
+#define CAL_DIAG(P, IJ)                                                       \
+  { "CAL_" P "_M" IJ, PARAM_TYPE_FLOAT, F32(1.0f), F32(0.8f), F32(1.2f),      \
+    "CAL " P ": M[" IJ "] scale" }
+
+#define CAL_OFFD(P, IJ)                                                       \
+  { "CAL_" P "_M" IJ, PARAM_TYPE_FLOAT, F32(0.0f), F32(-0.1f), F32(0.1f),     \
+    "CAL " P ": M[" IJ "] cross-axis" }
+
+#define CAL_BIAS(P, AX, BLIM)                                                 \
+  { "CAL_" P "_B" AX, PARAM_TYPE_FLOAT, F32(0.0f), F32(-(BLIM)), F32(BLIM),   \
+    "CAL " P ": bias " AX }
+
+#define CAL_SENSOR(P, BLIM)                                                   \
+  CAL_BIAS(P, "X", BLIM),                                                     \
+  CAL_BIAS(P, "Y", BLIM),                                                     \
+  CAL_BIAS(P, "Z", BLIM),                                                     \
+  CAL_DIAG(P, "00"), CAL_OFFD(P, "01"), CAL_OFFD(P, "02"),                    \
+  CAL_OFFD(P, "10"), CAL_DIAG(P, "11"), CAL_OFFD(P, "12"),                    \
+  CAL_OFFD(P, "20"), CAL_OFFD(P, "21"), CAL_DIAG(P, "22"),                    \
+  { "CAL_" P "_OK", PARAM_TYPE_INT32, I32(0), I32(0), I32(1),                 \
+    "CAL " P ": 1 = calibrated, 0 = uncalibrated (raw passthrough)" },        \
+  { "CAL_" P "_TEMP", PARAM_TYPE_FLOAT, F32(0.0f), F32(-40.0f), F32(120.0f),  \
+    "CAL " P ": sensor temperature at calibration, degC" },                   \
+  { "CAL_" P "_RES", PARAM_TYPE_FLOAT, F32(0.0f), F32(0.0f), F32(100.0f),     \
+    "CAL " P ": fit residual RMS - lower is better" }
+
 static const struct param_def_s g_params[] =
 {
   /* ---- Serial ports -----------------------------------------------------
@@ -152,35 +192,37 @@ static const struct param_def_s g_params[] =
   { "LOG_DIST",   PARAM_TYPE_INT32, I32(0), I32(0), I32(1),
     "Log distance sensor" },
 
-  /* ---- Calibration ------------------------------------------------------
-   * Written by the calibration app. Gyro offsets are rad/s, accel offsets
-   * m/s^2, accel scales dimensionless, mag offsets Gauss.
+  /* ---- Calibration ------------------------------------------------------ */
+
+  /* Accel bias is bounded +/-10 m/s^2 and gyro bias +/-1 rad/s: generous next to
+   * a real sensor's offset, tight enough to catch a fit that diverged.
    */
 
-  { "CAL_GYRO0_XOFF", PARAM_TYPE_FLOAT, F32(0.0f), F32(-1.0f), F32(1.0f),
-    "Gyro 0 X offset (rad/s)" },
-  { "CAL_GYRO0_YOFF", PARAM_TYPE_FLOAT, F32(0.0f), F32(-1.0f), F32(1.0f),
-    "Gyro 0 Y offset (rad/s)" },
-  { "CAL_GYRO0_ZOFF", PARAM_TYPE_FLOAT, F32(0.0f), F32(-1.0f), F32(1.0f),
-    "Gyro 0 Z offset (rad/s)" },
-  { "CAL_ACC0_XOFF",  PARAM_TYPE_FLOAT, F32(0.0f), F32(-10.0f), F32(10.0f),
-    "Accel 0 X offset (m/s2)" },
-  { "CAL_ACC0_YOFF",  PARAM_TYPE_FLOAT, F32(0.0f), F32(-10.0f), F32(10.0f),
-    "Accel 0 Y offset (m/s2)" },
-  { "CAL_ACC0_ZOFF",  PARAM_TYPE_FLOAT, F32(0.0f), F32(-10.0f), F32(10.0f),
-    "Accel 0 Z offset (m/s2)" },
-  { "CAL_ACC0_XSCL",  PARAM_TYPE_FLOAT, F32(1.0f), F32(0.8f),  F32(1.2f),
-    "Accel 0 X scale" },
-  { "CAL_ACC0_YSCL",  PARAM_TYPE_FLOAT, F32(1.0f), F32(0.8f),  F32(1.2f),
-    "Accel 0 Y scale" },
-  { "CAL_ACC0_ZSCL",  PARAM_TYPE_FLOAT, F32(1.0f), F32(0.8f),  F32(1.2f),
-    "Accel 0 Z scale" },
-  { "CAL_MAG0_XOFF",  PARAM_TYPE_FLOAT, F32(0.0f), F32(-2.0f), F32(2.0f),
-    "Mag 0 X offset (Gauss)" },
-  { "CAL_MAG0_YOFF",  PARAM_TYPE_FLOAT, F32(0.0f), F32(-2.0f), F32(2.0f),
-    "Mag 0 Y offset (Gauss)" },
-  { "CAL_MAG0_ZOFF",  PARAM_TYPE_FLOAT, F32(0.0f), F32(-2.0f), F32(2.0f),
-    "Mag 0 Z offset (Gauss)" },
+  CAL_SENSOR("ACC0", 10.0f),
+  CAL_SENSOR("GYR0", 1.0f),
+  CAL_SENSOR("ACC1", 10.0f),
+  CAL_SENSOR("GYR1", 1.0f),
+
+  /* Rotation taking IMU1's frame into IMU0's, as a rotation vector (axis times
+   * angle, radians). Solder and mount tolerance is a degree or two; half a radian
+   * of bound covers a chip mounted at a deliberate right angle plus slop.
+   */
+
+  { "CAL_IMU1_RX", PARAM_TYPE_FLOAT, F32(0.0f), F32(-0.5f), F32(0.5f),
+    "IMU1->IMU0 rotation vector X, rad" },
+  { "CAL_IMU1_RY", PARAM_TYPE_FLOAT, F32(0.0f), F32(-0.5f), F32(0.5f),
+    "IMU1->IMU0 rotation vector Y, rad" },
+  { "CAL_IMU1_RZ", PARAM_TYPE_FLOAT, F32(0.0f), F32(-0.5f), F32(0.5f),
+    "IMU1->IMU0 rotation vector Z, rad" },
+
+  /* Which fixture the accel calibration was taken with. It is not cosmetic:
+   * desk mode cannot observe absolute alignment (only the norm constraint holds),
+   * so a consumer must not treat a desk-mode matrix as if it defined the body
+   * frame. See the design spec.
+   */
+
+  { "CAL_MODE", PARAM_TYPE_INT32, I32(0), I32(0), I32(1),
+    "Accel fixture: 0 = desk (norm-only), 1 = jig (known orientation)" },
 };
 
 #define PARAM_COUNT ((int)(sizeof(g_params) / sizeof(g_params[0])))
