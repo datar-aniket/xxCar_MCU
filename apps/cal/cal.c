@@ -16,6 +16,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <math.h>
 #include <poll.h>
 #include <termios.h>
 #include <sys/time.h>
@@ -44,20 +45,25 @@ enum cal_kind_e
 
 /* One offerable sensor.
  *
- * The GUI is told labels and units rather than deducing them from the name, so
- * adding a sensor here is the only change needed to make it appear, selectable
- * and correctly plotted, in the GUI.
+ * The GUI is told labels, units, encoding and scale rather than deducing them,
+ * so adding a sensor here is the only change needed to make it appear,
+ * selectable and correctly plotted.
+ *
+ * `scale` is the value of one integer step for CAL_ENC_I16 sensors, chosen to
+ * match the driver's own full-scale range so the quantisation is the sensor's,
+ * not ours. It is unused for CAL_ENC_F32.
  */
 
 struct cal_sensor_s
 {
-  FAR const char                *name;    /* what the GUI shows and selects */
-  FAR const char                *orb;     /* orb_get_meta() name, or NULL */
-  FAR const struct orb_metadata *direct;  /* for our own topics, which
-                                           * orb_get_meta cannot find by name */
+  FAR const char                *name;
+  FAR const char                *orb;
+  FAR const struct orb_metadata *direct;
   enum cal_kind_e                kind;
   uint8_t                        nvalues;
-  FAR const char                *labels;  /* JSON array, ready to embed */
+  uint8_t                        enc;
+  float                          scale;
+  FAR const char                *labels;   /* JSON array, ready to embed */
   FAR const char                *unit;
 };
 
@@ -65,24 +71,39 @@ struct cal_sensor_s
  * Private Data
  ****************************************************************************/
 
+/* Scales are full-scale-range / 32767, matching how the drivers configure the
+ * parts: accel +/-16 g, gyro +/-2000 dps, mag +/-8 gauss.
+ */
+
+#define CAL_ACC_SCALE  (16.0f * 9.80665f / 32767.0f)
+#define CAL_GYR_SCALE  (2000.0f * 0.017453292519943295f / 32767.0f)
+#define CAL_MAG_SCALE  (8.0f / 32767.0f)
+
 static const struct cal_sensor_s g_sensors[] =
 {
   { "accel0", "sensor_accel0", NULL, CAL_KIND_ACCEL, 3,
-    "[\"x\",\"y\",\"z\"]", "m/s^2" },
+    CAL_ENC_I16, CAL_ACC_SCALE, "[\"x\",\"y\",\"z\"]", "m/s^2" },
   { "gyro0",  "sensor_gyro0",  NULL, CAL_KIND_GYRO,  3,
-    "[\"x\",\"y\",\"z\"]", "rad/s" },
+    CAL_ENC_I16, CAL_GYR_SCALE, "[\"x\",\"y\",\"z\"]", "rad/s" },
   { "accel1", "sensor_accel1", NULL, CAL_KIND_ACCEL, 3,
-    "[\"x\",\"y\",\"z\"]", "m/s^2" },
+    CAL_ENC_I16, CAL_ACC_SCALE, "[\"x\",\"y\",\"z\"]", "m/s^2" },
   { "gyro1",  "sensor_gyro1",  NULL, CAL_KIND_GYRO,  3,
-    "[\"x\",\"y\",\"z\"]", "rad/s" },
+    CAL_ENC_I16, CAL_GYR_SCALE, "[\"x\",\"y\",\"z\"]", "rad/s" },
   { "mag0",   "sensor_mag0",   NULL, CAL_KIND_MAG,   3,
-    "[\"x\",\"y\",\"z\"]", "gauss" },
+    CAL_ENC_I16, CAL_MAG_SCALE, "[\"x\",\"y\",\"z\"]", "gauss" },
+
+  /* Pressure near 1013 hPa beside a temperature near 40 degC do not share a
+   * symmetric range, so a single integer scale cannot serve both. These are
+   * slow enough that the extra bytes are free.
+   */
+
   { "baro0",  "sensor_baro0",  NULL, CAL_KIND_BARO,  2,
-    "[\"pressure\",\"temperature\"]", "hPa,degC" },
+    CAL_ENC_F32, 0.0f, "[\"pressure\",\"temperature\"]", "hPa | degC" },
   { "flow",   NULL, ORB_ID(optical_flow),    CAL_KIND_FLOW, 4,
-    "[\"int_x\",\"int_y\",\"distance\",\"quality\"]", "rad,rad,m,-" },
+    CAL_ENC_F32, 0.0f,
+    "[\"int_x\",\"int_y\",\"distance\",\"quality\"]", "rad | m" },
   { "dist",   NULL, ORB_ID(distance_sensor), CAL_KIND_DIST, 2,
-    "[\"distance\",\"quality\"]", "m,%" },
+    CAL_ENC_F32, 0.0f, "[\"distance\",\"quality\"]", "m | %" },
 };
 
 #define CAL_NSENSORS ((int)(sizeof(g_sensors) / sizeof(g_sensors[0])))
@@ -108,9 +129,9 @@ static FAR const struct orb_metadata *cal_meta(int i)
 /* Write a whole buffer.
  *
  * The fd is non-blocking, so a single write() can come up short or return
- * EAGAIN when the host stalls. Left unchecked that silently truncates a JSON
- * line and desynchronises the reader, which is a miserable thing to debug from
- * the far end of a cable.
+ * EAGAIN when the host stalls. Left unchecked that silently truncates a frame
+ * and desynchronises the reader, which is a miserable thing to debug from the
+ * far end of a cable.
  */
 
 static int cal_write(int fd, FAR const void *buf, size_t len)
@@ -148,7 +169,7 @@ static int cal_write(int fd, FAR const void *buf, size_t len)
 
 static int cal_emit(int fd, FAR const char *fmt, ...)
 {
-  char buf[192];
+  char buf[224];
   va_list ap;
   int n;
 
@@ -164,118 +185,44 @@ static int cal_emit(int fd, FAR const char *fmt, ...)
   return cal_write(fd, buf, (size_t)n);
 }
 
-/* Report every sensor, whether or not it is publishing.
+/* CRC16-CCITT-FALSE, table-driven on the high nibble.
  *
- * Presence is measured, not assumed: a topic can be advertised and silent (a
- * MAVLink sensor with nothing plugged in does exactly that). The generation
- * counter advances once per published sample, so sampling it across a short
- * window says whether data is actually flowing - and gives the rate for free.
- * The GUI greys out what is absent rather than offering a plot that will never
- * move.
+ * A full-rate frame is ~300 bytes and there are tens per second, so the
+ * bit-serial version was costing real cycles on the path we are trying to make
+ * fast. Sixteen entries is 32 bytes of flash.
  */
 
-static int cal_cmd_list(int fd)
+static const uint16_t g_crc_tab[16] =
 {
-  uint64_t gen[CAL_NSENSORS];
-  int      sub[CAL_NSENSORS];
-  uint64_t t0;
-  int      i;
-
-  for (i = 0; i < CAL_NSENSORS; i++)
-    {
-      FAR const struct orb_metadata *meta = cal_meta(i);
-      struct orb_state st;
-
-      sub[i] = meta != NULL ? orb_subscribe(meta) : -1;
-      gen[i] = 0;
-
-      if (sub[i] >= 0)
-        {
-          /* Ask for a rate, or the on-demand sensors publish nothing.
-           *
-           * The IMUs free-run off a hardware FIFO and are always producing.
-           * The MS5611 baro and IST8310 mag use NuttX's polled uorb drivers,
-           * whose kthread samples only at the interval a SUBSCRIBER asks for -
-           * default 1 Hz. Without this, a perfectly healthy baro reports zero
-           * samples in the window below and gets shown as absent.
-           */
-
-          orb_set_interval(sub[i], 20000);        /* 50 Hz */
-        }
-
-      if (sub[i] >= 0 && orb_get_state(sub[i], &st) == 0)
-        {
-          gen[i] = st.generation;
-        }
-    }
-
-  t0 = cal_now_us();
-  usleep(200000);
-
-  for (i = 0; i < CAL_NSENSORS; i++)
-    {
-      uint64_t dt = cal_now_us() - t0;
-      struct orb_state st;
-      unsigned rate = 0;
-      bool present = false;
-
-      if (sub[i] >= 0 && orb_get_state(sub[i], &st) == 0 && dt > 0)
-        {
-          uint64_t d = st.generation - gen[i];
-
-          present = d > 0;
-          rate    = (unsigned)((d * 1000000ull) / dt);
-        }
-
-      cal_emit(fd,
-               "{\"evt\":\"sensor\",\"id\":%d,\"name\":\"%s\",\"n\":%u,"
-               "\"labels\":%s,\"unit\":\"%s\",\"present\":%s,\"rate\":%u}\n",
-               i, g_sensors[i].name, g_sensors[i].nvalues,
-               g_sensors[i].labels, g_sensors[i].unit,
-               present ? "true" : "false", rate);
-
-      if (sub[i] >= 0)
-        {
-          orb_unsubscribe(sub[i]);
-        }
-    }
-
-  return cal_emit(fd, "{\"evt\":\"ok\",\"what\":\"list\"}\n");
-}
-
-/* CRC16-CCITT-FALSE. Small and bit-serial: a frame is at most 24 bytes and
- * these go out at tens of hertz, so a lookup table would cost 512 bytes of
- * flash to save time nobody is waiting for.
- */
+  0x0000, 0x1021, 0x2042, 0x3063, 0x4084, 0x50a5, 0x60c6, 0x70e7,
+  0x8108, 0x9129, 0xa14a, 0xb16b, 0xc18c, 0xd1ad, 0xe1ce, 0xf1ef
+};
 
 static uint16_t cal_crc16(FAR const uint8_t *d, size_t n)
 {
   uint16_t crc = 0xffff;
   size_t i;
-  int b;
 
   for (i = 0; i < n; i++)
     {
-      crc ^= (uint16_t)d[i] << 8;
+      uint8_t hi = (uint8_t)((crc >> 12) ^ (d[i] >> 4)) & 0xf;
 
-      for (b = 0; b < 8; b++)
-        {
-          crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x1021)
-                               : (uint16_t)(crc << 1);
-        }
+      crc = (uint16_t)((crc << 4) ^ g_crc_tab[hi]);
+
+      hi  = (uint8_t)((crc >> 12) ^ (d[i] & 0xf)) & 0xf;
+      crc = (uint16_t)((crc << 4) ^ g_crc_tab[hi]);
     }
 
   return crc;
 }
 
 /* Copy the fields the GUI plots out of whichever sample struct this sensor
- * uses. The order here must match the `labels` in g_sensors - that pairing is
- * the whole contract, and it is why labels live in the table beside the sensor
- * rather than being inferred anywhere.
+ * uses. The order must match the `labels` in g_sensors - that pairing is the
+ * whole contract, and it is why labels live beside the sensor rather than being
+ * inferred anywhere.
  */
 
-static int cal_read_values(int i, int sub, FAR float *out,
-                           FAR uint32_t *t_us)
+static int cal_read_values(int i, int sub, FAR float *out, FAR uint32_t *t_us)
 {
   FAR const struct orb_metadata *meta = cal_meta(i);
   union
@@ -336,27 +283,83 @@ static int cal_read_values(int i, int sub, FAR float *out,
   return OK;
 }
 
-static int cal_send_sample(int fd, int i, uint8_t seq, uint32_t t_us,
-                           FAR const float *v)
+/* Report every sensor, whether or not it is publishing.
+ *
+ * Presence is measured, not assumed: a topic can be advertised and silent (a
+ * MAVLink sensor with nothing plugged in does exactly that). The generation
+ * counter advances once per published sample, so sampling it across a window
+ * says whether data is actually flowing - and gives the rate for free.
+ */
+
+static int cal_cmd_list(int fd)
 {
-  uint8_t frame[4 + 4 + 4 * CAL_MAX_VALUES + 2];
-  uint8_t n = g_sensors[i].nvalues;
-  uint8_t len = (uint8_t)(6 + 4 * n);   /* id, seq, t_us, values */
-  uint16_t crc;
-  size_t off;
+  uint64_t gen[CAL_NSENSORS];
+  int      sub[CAL_NSENSORS];
+  uint64_t t0;
+  int      i;
 
-  frame[0] = CAL_SYNC;
-  frame[1] = len;
-  frame[2] = (uint8_t)i;
-  frame[3] = seq;
-  memcpy(frame + 4, &t_us, 4);
-  memcpy(frame + 8, v, (size_t)4 * n);
+  for (i = 0; i < CAL_NSENSORS; i++)
+    {
+      FAR const struct orb_metadata *meta = cal_meta(i);
+      struct orb_state st;
 
-  off = 8 + (size_t)4 * n;
-  crc = cal_crc16(frame + 1, off - 1);   /* over len .. last value */
-  memcpy(frame + off, &crc, 2);
+      sub[i] = meta != NULL ? orb_subscribe(meta) : -1;
+      gen[i] = 0;
 
-  return cal_write(fd, frame, off + 2);
+      if (sub[i] >= 0)
+        {
+          /* Ask for a rate, or the on-demand sensors publish nothing.
+           *
+           * The IMUs free-run off a hardware FIFO and are always producing.
+           * The MS5611 baro and IST8310 mag use NuttX's polled uorb drivers,
+           * whose kthread samples only at the interval a SUBSCRIBER asks for -
+           * default 1 Hz. Without this a perfectly healthy baro reports zero
+           * samples in the window below and is shown as absent.
+           */
+
+          orb_set_interval(sub[i], 20000);        /* 50 Hz */
+
+          if (orb_get_state(sub[i], &st) == 0)
+            {
+              gen[i] = st.generation;
+            }
+        }
+    }
+
+  t0 = cal_now_us();
+  usleep(200000);
+
+  for (i = 0; i < CAL_NSENSORS; i++)
+    {
+      uint64_t dt = cal_now_us() - t0;
+      struct orb_state st;
+      unsigned rate = 0;
+      bool present = false;
+
+      if (sub[i] >= 0 && orb_get_state(sub[i], &st) == 0 && dt > 0)
+        {
+          uint64_t d = st.generation - gen[i];
+
+          present = d > 0;
+          rate    = (unsigned)((d * 1000000ull) / dt);
+        }
+
+      cal_emit(fd,
+               "{\"evt\":\"sensor\",\"id\":%d,\"name\":\"%s\",\"n\":%u,"
+               "\"enc\":%u,\"scale\":%.9g,\"labels\":%s,\"unit\":\"%s\","
+               "\"present\":%s,\"rate\":%u}\n",
+               i, g_sensors[i].name, g_sensors[i].nvalues,
+               g_sensors[i].enc, (double)g_sensors[i].scale,
+               g_sensors[i].labels, g_sensors[i].unit,
+               present ? "true" : "false", rate);
+
+      if (sub[i] >= 0)
+        {
+          orb_unsubscribe(sub[i]);
+        }
+    }
+
+  return cal_emit(fd, "{\"evt\":\"ok\",\"what\":\"list\"}\n");
 }
 
 /* Raw mode, saving what was there so it can be put back.
@@ -396,21 +399,22 @@ int cal_session(void)
   int fd;
 
   /* Streaming state. One sensor at a time: the GUI plots one at a time, and a
-   * single subscription keeps the frame format free of any "which sensor is
-   * this" ambiguity beyond the id byte.
+   * single subscription keeps the frame free of any "which sensor is this"
+   * ambiguity beyond the id byte.
    */
 
-  int      st_idx = -1;          /* index into g_sensors, -1 = idle */
+  int      st_idx = -1;              /* index into g_sensors, -1 = idle */
   int      st_sub = -1;
-  uint32_t st_period_us = 0;
-  uint64_t st_next = 0;
+  uint32_t st_dt_us = 0;             /* nominal spacing, for the frame header */
   uint8_t  st_seq = 0;
 
-  /* The port must be reserved for us. Checking the parameter is not paranoia:
-   * a shell on this port would sit blocked in read() and steal our input, and
-   * NuttX offers no way to detect that - uart_open() is refcounted with no
-   * exclusivity check and TIOCEXCL is declared but unimplemented.
-   */
+  /* Batch accumulator. */
+
+  static uint8_t  frame[16 + CAL_BATCH_MAX * CAL_MAX_VALUES * 4 + 2];
+  float    acc_f[CAL_BATCH_MAX * CAL_MAX_VALUES];
+  uint8_t  nbatch = 0;
+  uint32_t batch_t0 = 0;
+  uint64_t batch_since = 0;
 
   if (param_i32("SER_USB_FUNC") != SER_FUNC_CAL)
     {
@@ -440,65 +444,139 @@ int cal_session(void)
     }
 
   printf("cal: session open on %s - drive it from the GUI\n", CAL_DEVPATH);
+  ret = OK;
 
   while (!done)
     {
-      struct pollfd pfd;
+      struct pollfd pfd[2];
+      nfds_t nfds = 1;
       char ch;
 
-      pfd.fd     = fd;
-      pfd.events = POLLIN;
+      pfd[0].fd     = fd;
+      pfd[0].events = POLLIN;
 
-      /* Poll briefly rather than blocking, so streaming stays on schedule
-       * while the session is still responsive to commands. 5 ms is well under
-       * the shortest period we offer.
+      /* Poll the subscription too, rather than waking on a timer.
+       *
+       * The timer version could not exceed 1/timeout samples a second no
+       * matter what rate was asked for - a 5 ms tick capped the stream at
+       * ~166 Hz. Waiting on the uORB fd instead means we wake exactly when
+       * there is data, so the rate is the sensor's, not the loop's.
        */
 
-      ret = poll(&pfd, 1, st_idx >= 0 ? 5 : 200);
-
-      if (st_idx >= 0 && cal_now_us() >= st_next)
+      if (st_sub >= 0)
         {
-          float v[CAL_MAX_VALUES];
-          uint32_t t_us = 0;
-
-          if (cal_read_values(st_idx, st_sub, v, &t_us) == OK)
-            {
-              if (cal_send_sample(fd, st_idx, st_seq++, t_us, v) < 0)
-                {
-                  /* The host stopped draining. Stop streaming rather than
-                   * spin on a blocked pipe.
-                   */
-
-                  orb_unsubscribe(st_sub);
-                  st_sub = -1;
-                  st_idx = -1;
-                }
-            }
-
-          st_next += st_period_us;
-
-          /* If we fell behind - a long write, a busy card - resync rather than
-           * chase the backlog with a burst.
-           */
-
-          if (st_idx >= 0 && cal_now_us() > st_next + st_period_us)
-            {
-              st_next = cal_now_us() + st_period_us;
-            }
+          pfd[1].fd     = st_sub;
+          pfd[1].events = POLLIN;
+          nfds = 2;
         }
 
-      if (ret <= 0)
+      if (poll(pfd, nfds, 200) < 0 && errno != EINTR)
         {
-          continue;
-        }
-
-      if ((pfd.revents & (POLLHUP | POLLERR)) != 0)
-        {
-          ret = -ENOTCONN;         /* cable pulled */
           break;
         }
 
-      if (read(fd, &ch, 1) != 1)
+      if ((pfd[0].revents & (POLLHUP | POLLERR)) != 0)
+        {
+          ret = -ENOTCONN;           /* cable pulled */
+          break;
+        }
+
+      /* ---- drain samples into the batch ---------------------------- */
+
+      if (st_sub >= 0 && nfds == 2 && (pfd[1].revents & POLLIN) != 0)
+        {
+          while (nbatch < CAL_BATCH_MAX)
+            {
+              uint32_t t_us = 0;
+              FAR float *slot = &acc_f[(size_t)nbatch *
+                                       g_sensors[st_idx].nvalues];
+
+              if (cal_read_values(st_idx, st_sub, slot, &t_us) != OK)
+                {
+                  break;             /* nothing more queued */
+                }
+
+              if (nbatch == 0)
+                {
+                  batch_t0    = t_us;
+                  batch_since = cal_now_us();
+                }
+
+              nbatch++;
+            }
+        }
+
+      /* ---- flush when full, or when it has been waiting too long ---- */
+
+      if (nbatch > 0 &&
+          (nbatch >= CAL_BATCH_MAX || cal_now_us() - batch_since >= 20000))
+        {
+          FAR const struct cal_sensor_s *s = &g_sensors[st_idx];
+          size_t nv = (size_t)nbatch * s->nvalues;
+          size_t bytes;
+          size_t off;
+          uint16_t len;
+          uint16_t crc;
+          size_t k;
+
+          if (s->enc == CAL_ENC_I16)
+            {
+              FAR int16_t *p = (FAR int16_t *)(frame + 14);
+              float inv = 1.0f / s->scale;
+
+              for (k = 0; k < nv; k++)
+                {
+                  float q = acc_f[k] * inv;
+
+                  /* Saturate rather than wrap: a clipped reading is obvious on
+                   * a plot, a wrapped one looks like a real excursion in the
+                   * opposite direction.
+                   */
+
+                  p[k] = q >= 32767.0f ? 32767 :
+                         q <= -32768.0f ? -32768 : (int16_t)lrintf(q);
+                }
+
+              bytes = nv * 2;
+            }
+          else
+            {
+              memcpy(frame + 14, acc_f, nv * sizeof(float));
+              bytes = nv * 4;
+            }
+
+          len = (uint16_t)(11 + bytes);
+
+          frame[0] = CAL_SYNC;
+          frame[1] = (uint8_t)(len & 0xff);
+          frame[2] = (uint8_t)(len >> 8);
+          frame[3] = (uint8_t)st_idx;
+          frame[4] = st_seq++;
+          memcpy(frame + 5, &batch_t0, 4);
+          frame[9]  = (uint8_t)(st_dt_us & 0xff);
+          frame[10] = (uint8_t)(st_dt_us >> 8);
+          frame[11] = nbatch;
+          frame[12] = s->nvalues;
+          frame[13] = s->enc;
+
+          off = 14 + bytes;
+          crc = cal_crc16(frame + 1, off - 1);
+          frame[off]     = (uint8_t)(crc & 0xff);
+          frame[off + 1] = (uint8_t)(crc >> 8);
+
+          if (cal_write(fd, frame, off + 2) < 0)
+            {
+              orb_unsubscribe(st_sub);
+              st_sub = -1;
+              st_idx = -1;
+            }
+
+          nbatch = 0;
+        }
+
+      /* ---- commands ------------------------------------------------ */
+
+      if ((pfd[0].revents & POLLIN) == 0 || read(fd, &ch, 1) != 1)
         {
           continue;
         }
@@ -515,11 +593,7 @@ int cal_session(void)
             }
           else
             {
-              /* Drop the rest of an over-long line rather than dispatch its
-               * truncated prefix as if it were a whole command.
-               */
-
-              overlong = true;
+              overlong = true;       /* drop to EOL, do not dispatch a stub */
             }
 
           continue;
@@ -537,14 +611,14 @@ int cal_session(void)
 
       if (line[0] == '\0')
         {
-          continue;                /* bare newline */
+          continue;
         }
 
       if (strcmp(line, "hello") == 0)
         {
           cal_emit(fd,
-                   "{\"evt\":\"hello\",\"proto\":%d,\"board\":\"fmuv6c\"}\n",
-                   CAL_PROTO_VERSION);
+                   "{\"evt\":\"hello\",\"proto\":%d,\"board\":\"fmuv6c\","
+                   "\"batch\":%d}\n", CAL_PROTO_VERSION, CAL_BATCH_MAX);
         }
       else if (strcmp(line, "list") == 0)
         {
@@ -563,15 +637,10 @@ int cal_session(void)
               hz = strtol(sp + 1, NULL, 10);
             }
 
-          /* 1..200 Hz. The ceiling is not the link's limit - it is what a plot
-           * can show. High-rate capture belongs in the SD logger, which does
-           * not have to survive a USB stall.
-           */
-
-          if (hz < 1 || hz > 200)
+          if (hz < 1 || hz > 2000)
             {
               cal_emit(fd,
-                       "{\"evt\":\"error\",\"msg\":\"rate must be 1-200\"}\n");
+                       "{\"evt\":\"error\",\"msg\":\"rate must be 1-2000\"}\n");
               continue;
             }
 
@@ -585,8 +654,8 @@ int cal_session(void)
 
           if (i == CAL_NSENSORS)
             {
-              cal_emit(fd,
-                       "{\"evt\":\"error\",\"msg\":\"no such sensor\"}\n");
+              cal_emit(fd, "{\"evt\":\"error\","
+                           "\"msg\":\"no such sensor\"}\n");
               continue;
             }
 
@@ -610,19 +679,18 @@ int cal_session(void)
               continue;
             }
 
-          /* Drive the sensor at the rate we intend to send, rather than
-           * polling a topic that updates on its own schedule. For the polled
-           * drivers (baro, mag) this is what makes them sample at all; for the
-           * free-running IMUs it throttles delivery to what we actually want,
-           * instead of discarding 39 of every 40 samples at 2 kHz.
+          /* Drive the sensor at the rate we intend to send. For the polled
+           * drivers this is what makes them sample at all; for the free-running
+           * IMUs it throttles delivery to what was asked for, instead of
+           * copying 2000 samples a second to send 50.
            */
 
-          orb_set_interval(st_sub, (unsigned)(1000000 / hz));
+          st_dt_us = (uint32_t)(1000000 / hz);
+          orb_set_interval(st_sub, st_dt_us);
 
-          st_idx       = i;
-          st_seq       = 0;
-          st_period_us = (uint32_t)(1000000 / hz);
-          st_next      = cal_now_us();
+          st_idx = i;
+          st_seq = 0;
+          nbatch = 0;
 
           cal_emit(fd,
                    "{\"evt\":\"ok\",\"what\":\"stream\",\"name\":\"%s\","
@@ -637,6 +705,7 @@ int cal_session(void)
 
           st_sub = -1;
           st_idx = -1;
+          nbatch = 0;
           cal_emit(fd, "{\"evt\":\"ok\",\"what\":\"stop\"}\n");
         }
       else if (strcmp(line, "quit") == 0)
