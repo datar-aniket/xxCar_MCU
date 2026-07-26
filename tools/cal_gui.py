@@ -525,9 +525,23 @@ class App(tk.Tk):
         # ---- Allan-variance recording
         rb = ttk.Labelframe(p, text=" record to SD ", padding=6)
         rb.pack(fill="x", pady=(10, 0))
-        ttk.Label(rb, text="both IMUs, native rate, for Allan variance",
+        ttk.Label(rb, text="both IMUs, raw, for Allan variance",
                   style="Muted.TLabel", wraplength=190,
                   justify="left").pack(anchor="w")
+        rr = ttk.Frame(rb, style="Card.TFrame")
+        rr.pack(fill="x", pady=(4, 0))
+        ttk.Label(rr, text="rate", style="Muted.TLabel").pack(side="left")
+        self.rec_hz = tk.IntVar(value=200)
+        rcb = ttk.Combobox(rr, width=6, state="readonly",
+                           values=(50, 100, 200, 500, 1000, 0),
+                           textvariable=self.rec_hz)
+        rcb.pack(side="left", padx=(5, 0))
+        rcb.bind("<<ComboboxSelected>>", lambda _e: self._rec_estimate())
+        ttk.Label(rr, text="Hz (0 = native)",
+                  style="Muted.TLabel").pack(side="left", padx=(4, 0))
+        self.rec_est = ttk.Label(rb, text="", style="Muted.TLabel",
+                                 wraplength=190, justify="left")
+        self.rec_est.pack(anchor="w", pady=(3, 0))
         row = ttk.Frame(rb, style="Card.TFrame")
         row.pack(fill="x", pady=(6, 0))
         self.rec_btn = ttk.Button(row, text="Start", command=self._rec_toggle)
@@ -539,6 +553,7 @@ class App(tk.Tk):
                                  wraplength=190, justify="left")
         self.rec_lab.pack(anchor="w", pady=(5, 0))
         self.recording = False
+        self._rec_estimate()
 
     def _controls(self, p):
         c = ttk.Frame(p, style="Card.TFrame", padding=(10, 8))
@@ -784,10 +799,26 @@ class App(tk.Tk):
         if self.link:
             self.link.send("cal6 save")
 
+    def _rec_estimate(self):
+        """Say up front what the run will cost, and when FAT32 stops it.
+
+        A 4 GB per-file ceiling at 227 KB/s is 5.1 hours - an overnight run at
+        the native rate ends before morning with nothing to say so.
+        """
+        hz = int(self.rec_hz.get()) or 2000
+        bps = 4 * hz * 29                      # 4 topics x (3 hdr + 2 id + 24)
+        cap_h = 4 * 1024 ** 3 / bps / 3600
+        self.rec_est.config(
+            text=f"{bps/1024:.0f} KB/s · {bps*8*3600/1e9:.2f} GB per 8 h · "
+                 f"4 GB file cap at {cap_h:.1f} h")
+
     def _rec_toggle(self):
         if not self.link:
             return
-        self.link.send("record stop" if self.recording else "record start")
+        if self.recording:
+            self.link.send("record stop")
+        else:
+            self.link.send(f"record start {int(self.rec_hz.get())}")
 
     def _restream(self):
         if not self.link or self.active is None:

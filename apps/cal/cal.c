@@ -867,18 +867,45 @@ int cal_session(void)
 #ifdef CONFIG_XXCAR_LOGGER
           FAR char *what = line + 7;
 
-          if (strcmp(what, "start") == 0)
+          if (strncmp(what, "start", 5) == 0)
             {
               struct logger_status_s ls;
+              long hz = 200;
 
-              /* Allan variance wants both IMUs, raw, at the native rate and
-               * for hours. LOG_RATE 0 means every sample - decimation would
-               * throw away exactly the short-tau end the analysis needs.
+              if (what[5] == ' ')
+                {
+                  hz = strtol(what + 6, NULL, 10);
+                }
+
+              if (hz < 0 || hz > 2000)
+                {
+                  cal_emit(fd, "{\"evt\":\"error\","
+                               "\"msg\":\"rate must be 0-2000\"}\n");
+                  continue;
+                }
+
+              /* Allan variance wants both IMUs, raw, for hours - but NOT
+               * necessarily at the native rate, and defaulting to it was a
+               * trap.
+               *
+               * Both IMUs at 2 kHz is 227 KB/s, which reaches FAT32's 4 GB
+               * per-file ceiling in 5.1 hours: an overnight run would stop
+               * before morning with no warning. It is also only 16 ms ahead of
+               * the uORB queue, so an SD housekeeping stall punches a hole -
+               * and a gap corrupts the long-tau end, which is the part being
+               * measured.
+               *
+               * 200 Hz is the useful long run: 52 hours of headroom on the
+               * file size, ten times the stall tolerance, and it still reaches
+               * the bias-instability knee. Full rate is for a ~20 minute run
+               * to characterise the white-noise region, where a stall costs
+               * little. Hence the default, with 0 available for native when
+               * that is what is wanted.
                */
 
               param_set_i32("LOG_IMU0", 1);
               param_set_i32("LOG_IMU1", 1);
-              param_set_i32("LOG_RATE", 0);
+              param_set_i32("LOG_RATE", (int32_t)hz);
 
               if (logger_is_running())
                 {
@@ -897,8 +924,9 @@ int cal_session(void)
               logger_get_status(&ls);
               cal_emit(fd,
                        "{\"evt\":\"ok\",\"what\":\"record\","
-                       "\"path\":\"%s\",\"topics\":%" PRIu32 "}\n",
-                       ls.path, ls.topics);
+                       "\"path\":\"%s\",\"topics\":%" PRIu32 ","
+                       "\"hz\":%ld}\n",
+                       ls.path, ls.topics, hz);
             }
           else if (strcmp(what, "stop") == 0)
             {
