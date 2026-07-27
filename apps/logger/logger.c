@@ -35,6 +35,7 @@
 #include <uORB/uORB.h>
 
 #include "logger.h"
+#include "log_write.h"
 #include "../param/param.h"
 #include "../rc_in/rc_in.h"
 #include "../uorb_msgs/uorb_msgs.h"
@@ -68,12 +69,17 @@
  * full-rate IMU data. 64 KB is roughly 290 ms, which covers the stalls
  * actually observed.
  *
- * A bigger buffer is only safe because log_flush() now writes all of it. While
- * a short write discarded the remainder, enlarging this made things worse
- * rather than better - see the comment there.
+ * A bigger buffer is only safe because log_flush() never discards a short
+ * write. While a short write discarded the remainder, enlarging this made
+ * things worse rather than better - see the comment there.
  */
 
 #define LOG_BUFSIZE   65536
+#define LOG_SECTOR_SIZE 512
+
+#if LOG_BUFSIZE % LOG_SECTOR_SIZE != 0
+#  error LOG_BUFSIZE must be a whole number of SD sectors
+#endif
 
 /* Roll over to a new file at this size.
  *
@@ -93,6 +99,7 @@
 /* Largest record we serialise (rc_in, 56 bytes). */
 
 #define LOG_RECMAX    64
+#define LOG_DRAIN_MAX 1024
 
 /* ULog message types. */
 
@@ -119,6 +126,7 @@ struct log_topic_s
                                                * (rc_in, optical_flow, ...),
                                                * which orb_get_meta cannot find
                                                * by name */
+  uint8_t                        orb_instance; /* uORB device instance */
   FAR const char                *ulog_name;   /* ULog message name */
   uint8_t                        multi_id;    /* ULog instance */
   uint16_t                       rec_size;    /* meaningful bytes to write */
@@ -133,7 +141,7 @@ struct log_sub_s
   FAR const struct orb_metadata *meta;
   int      fd;
   uint16_t msg_id;
-  uint64_t last_us;   /* for LOG_RATE decimation */
+  uint64_t next_us;   /* next LOG_RATE sample-time boundary */
 };
 
 /****************************************************************************
@@ -191,16 +199,16 @@ g_formats[] =
 
 static const struct log_topic_s g_topics[] =
 {
-  /* orb_name        direct_meta                 ulog_name         mid sz  param */
-  { "sensor_accel0", NULL,                       "sensor_accel",    0, 24, "LOG_IMU0" },
-  { "sensor_gyro0",  NULL,                       "sensor_gyro",     0, 24, "LOG_IMU0" },
-  { "sensor_accel1", NULL,                       "sensor_accel",    1, 24, "LOG_IMU1" },
-  { "sensor_gyro1",  NULL,                       "sensor_gyro",     1, 24, "LOG_IMU1" },
-  { "sensor_mag0",   NULL,                       "sensor_mag",      0, 28, "LOG_MAG"  },
-  { "sensor_baro0",  NULL,                       "sensor_baro",     0, 16, "LOG_BARO" },
-  { NULL,            ORB_ID(rc_in),              "rc_input",        0, 53, "LOG_RC"   },
-  { NULL,            ORB_ID(optical_flow),       "optical_flow",    0, 44, "LOG_FLOW" },
-  { NULL,            ORB_ID(distance_sensor),    "distance_sensor", 0, 24, "LOG_DIST" },
+  /* orb_name        direct_meta              inst ulog_name       mid sz param */
+  { "sensor_accel0", NULL,                       0, "sensor_accel",    0, 24, "LOG_IMU0" },
+  { "sensor_gyro0",  NULL,                       0, "sensor_gyro",     0, 24, "LOG_IMU0" },
+  { "sensor_accel1", NULL,                       1, "sensor_accel",    1, 24, "LOG_IMU1" },
+  { "sensor_gyro1",  NULL,                       1, "sensor_gyro",     1, 24, "LOG_IMU1" },
+  { "sensor_mag0",   NULL,                       0, "sensor_mag",      0, 28, "LOG_MAG"  },
+  { "sensor_baro0",  NULL,                       0, "sensor_baro",     0, 16, "LOG_BARO" },
+  { NULL,            ORB_ID(rc_in),              0, "rc_input",        0, 53, "LOG_RC"   },
+  { NULL,            ORB_ID(optical_flow),       0, "optical_flow",    0, 44, "LOG_FLOW" },
+  { NULL,            ORB_ID(distance_sensor),    0, "distance_sensor", 0, 24, "LOG_DIST" },
 };
 
 #define NTOPICS ((int)(sizeof(g_topics) / sizeof(g_topics[0])))
@@ -271,59 +279,118 @@ static uint64_t log_now_us(void)
  * one.
  */
 
-static bool log_flush(void)
+static bool log_flush(bool all)
 {
-  size_t off = 0;
-  int spins = 0;
+  off_t flush_start;
+  size_t written = 0;
+  size_t pending;
+  size_t remaining;
+  int ret;
 
   if (g_buflen == 0)
     {
       return true;
     }
 
-  while (off < g_buflen)
+  /* Keep periodic writes sector-aligned at both ends. The file starts at
+   * offset zero and g_buf is cache-line aligned, so writing only complete
+   * 512-byte prefixes preserves that alignment for every later flush. This
+   * lets FAT use one fast direct multi-sector IDMA transfer.
+   *
+   * Writing the arbitrary-length buffer on every 250 ms tick left the file at
+   * an arbitrary offset. FAT then had to finish that partial sector before
+   * starting its next direct transfer at g_buf + 1/2/3. The SDMMC preflight
+   * now correctly rejects that unaligned pointer, but its safe one-sector
+   * fallback can stall long enough to overrun the 128 ms uORB history at
+   * 2 kHz. Retain the sub-sector tail in RAM instead. Stop and rollover force
+   * the final tail so every completed file is whole.
+   */
+
+  pending = all ? g_buflen :
+                  g_buflen & ~((size_t)LOG_SECTOR_SIZE - 1);
+  if (pending == 0)
     {
-      ssize_t n = write(g_fd, g_buf + off, g_buflen - off);
-
-      if (n > 0)
-        {
-          off += (size_t)n;
-          spins = 0;
-          continue;
-        }
-
-      if (n < 0 && errno != EINTR && errno != EAGAIN)
-        {
-          break;                       /* a real error, not back-pressure */
-        }
-
-      /* Ten seconds of patience. Beyond that the card is not coming back and
-       * waiting longer only delays the bad news.
-       */
-
-      if (++spins > 1000)
-        {
-          break;
-        }
-
-      usleep(10000);
+      return true;
     }
 
-  pthread_mutex_lock(&g_lock);
-  g_status.bytes += off;
-  pthread_mutex_unlock(&g_lock);
-  g_part_bytes += (uint32_t)off;
+  flush_start = lseek(g_fd, 0, SEEK_CUR);
+  ret = log_write_all(g_fd, g_buf, pending, log_io_default(), 1000,
+                      &written);
 
-  if (off < g_buflen)
+  if (ret < 0)
     {
-      syslog(LOG_ERR,
-             "logger: card took only %zu of %zu bytes - ending the session "
-             "rather than writing a torn record\n", off, g_buflen);
+      bool rolled_back = written == 0;
+      int rollback_errno = 0;
+
+      /* A failed FAT write may already have advanced the file through part of
+       * this buffer. End the file at the previous complete flush boundary so
+       * it stays structurally valid rather than leaving a torn ULog record.
+       */
+
+      if (!rolled_back && flush_start >= 0)
+        {
+          if (ftruncate(g_fd, flush_start) == 0)
+            {
+              rolled_back = true;
+
+              /* ftruncate() does not move the open file position. Nothing
+               * else will be written after this failure, but restore it so a
+               * future caller cannot accidentally create a hole.
+               */
+
+              if (lseek(g_fd, flush_start, SEEK_SET) < 0)
+                {
+                  syslog(LOG_ERR,
+                         "logger: truncated failed flush but could not restore "
+                         "the file position: %d\n", errno);
+                }
+            }
+          else
+            {
+              rollback_errno = errno;
+            }
+        }
+
+      if (!rolled_back)
+        {
+          pthread_mutex_lock(&g_lock);
+          g_status.bytes += written;
+          pthread_mutex_unlock(&g_lock);
+          g_part_bytes += (uint32_t)written;
+        }
+
+      if (rollback_errno != 0)
+        {
+          syslog(LOG_ERR,
+                 "logger: flush failed: %d after %zu/%zu bytes; partial write "
+                 "remains (truncate errno %d)\n",
+                 ret, written, pending, rollback_errno);
+        }
+      else
+        {
+          syslog(LOG_ERR,
+                 "logger: flush failed: %d after %zu/%zu bytes; partial write "
+                 "%s\n",
+                 ret, written, pending,
+                 rolled_back ? "removed" : "remains");
+        }
+
       g_buflen = 0;
       return false;
     }
 
-  g_buflen = 0;
+  pthread_mutex_lock(&g_lock);
+  g_status.bytes += written;
+  pthread_mutex_unlock(&g_lock);
+  g_part_bytes += (uint32_t)written;
+
+  remaining = g_buflen - written;
+  if (remaining > 0)
+    {
+      memmove(g_buf, g_buf + written, remaining);
+    }
+
+  g_buflen = remaining;
   return true;
 }
 
@@ -336,7 +403,7 @@ static bool log_put(FAR const void *data, size_t len)
       return false;
     }
 
-  if (g_buflen + len > LOG_BUFSIZE && !log_flush())
+  if (g_buflen + len > LOG_BUFSIZE && !log_flush(false))
     {
       return false;
     }
@@ -408,11 +475,38 @@ static bool log_write_formats(void)
 
   for (i = 0; i < NFORMATS; i++)
     {
-      char fmt[256];
-      int n = snprintf(fmt, sizeof(fmt), "%s:%s",
-                       g_formats[i].name, g_formats[i].fields);
+      size_t namelen = strlen(g_formats[i].name);
+      size_t fieldlen = strlen(g_formats[i].fields);
+      size_t payload_len;
+      uint8_t hdr[3];
 
-      if (!log_msg(ULOG_MSG_FORMAT, fmt, (uint16_t)n))
+      /* FORMAT payloads are not bounded to 255 bytes. optical_flow is already
+       * 269 bytes, so formatting it through a 256-byte stack array truncated
+       * the string while snprintf() returned 269. log_msg() then read 13 bytes
+       * beyond that array and wrote an invalid definition section.
+       *
+       * Emit the payload directly into the logger buffer instead. The ULog
+       * length field is uint16_t, so reject a future definition that cannot be
+       * represented rather than silently narrowing it.
+       */
+
+      if (namelen >= UINT16_MAX ||
+          fieldlen > UINT16_MAX - namelen - 1)
+        {
+          syslog(LOG_ERR, "logger: ULog format definition is too long: %s\n",
+                 g_formats[i].name);
+          return false;
+        }
+
+      payload_len = namelen + 1 + fieldlen;
+      hdr[0] = (uint8_t)(payload_len & 0xff);
+      hdr[1] = (uint8_t)(payload_len >> 8);
+      hdr[2] = ULOG_MSG_FORMAT;
+
+      if (!log_put(hdr, sizeof(hdr)) ||
+          !log_put(g_formats[i].name, namelen) ||
+          !log_put(":", 1) ||
+          !log_put(g_formats[i].fields, fieldlen))
         {
           return false;
         }
@@ -533,7 +627,7 @@ static int log_daemon(int argc, FAR char *argv[])
           continue;
         }
 
-      fd = orb_subscribe(meta);
+      fd = orb_subscribe_multi(meta, t->orb_instance);
       if (fd < 0)
         {
           continue;
@@ -543,7 +637,7 @@ static int log_daemon(int argc, FAR char *argv[])
       subs[nsubs].meta    = meta;
       subs[nsubs].fd      = fd;
       subs[nsubs].msg_id  = (uint16_t)nsubs;
-      subs[nsubs].last_us = 0;
+      subs[nsubs].next_us = 0;
       nsubs++;
     }
 
@@ -607,46 +701,73 @@ static int log_daemon(int argc, FAR char *argv[])
         {
           for (i = 0; i < nsubs; i++)
             {
+              int drained = 0;
+
               if ((pfd[i].revents & POLLIN) == 0)
                 {
                   continue;
                 }
 
-              if (orb_copy(subs[i].meta, subs[i].fd, rec) < 0)
-                {
-                  continue;
-                }
-
-              /* The sample's own timestamp is its first 8 bytes. Use it for
-               * decimation so the spacing is measured in sample time, not
-               * loop-wakeup time.
+              /* One poll wakeup can represent many queued samples after an SD
+               * write. Reading only one and polling again made the logger
+               * fractionally slower than four native 2 kHz subscriptions. At
+               * 2 kHz it lost one paired ICM sample about every 0.35 seconds
+               * even though the card was no longer stalling.
+               *
+               * Drain the available history in a bounded batch. The bound is
+               * the sensor queue depth, so no topic can monopolize this loop
+               * indefinitely if its producer happens to run concurrently.
                */
 
-              if (min_interval > 0)
+              while (drained++ < LOG_DRAIN_MAX &&
+                     orb_copy(subs[i].meta, subs[i].fd, rec) == 0)
                 {
-                  uint64_t ts;
+                  /* The sample's own timestamp is its first 8 bytes. Use it
+                   * for decimation so spacing is measured in sample time, not
+                   * loop-wakeup time.
+                   */
 
-                  memcpy(&ts, rec, sizeof(ts));
-
-                  if (ts - subs[i].last_us < min_interval)
+                  if (min_interval > 0)
                     {
-                      continue;
+                      uint64_t ts;
+
+                      memcpy(&ts, rec, sizeof(ts));
+
+                      if (subs[i].next_us == 0)
+                        {
+                          subs[i].next_us = ts;
+                        }
+
+                      if (ts < subs[i].next_us)
+                        {
+                          continue;
+                        }
+
+                      /* Advance the ideal output schedule, not "accepted
+                       * sample + interval". Keeping the schedule independent
+                       * of the accepted sample prevents sensor-clock phase and
+                       * small ODR tolerances from accumulating into a lower
+                       * than requested average logging rate.
+                       */
+
+                      subs[i].next_us +=
+                        ((ts - subs[i].next_us) / min_interval + 1) *
+                        min_interval;
                     }
 
-                  subs[i].last_us = ts;
-                }
-
-              if (log_data(subs[i].msg_id, rec, subs[i].topic->rec_size))
-                {
-                  pthread_mutex_lock(&g_lock);
-                  g_status.samples++;
-                  pthread_mutex_unlock(&g_lock);
-                }
-              else
-                {
-                  pthread_mutex_lock(&g_lock);
-                  g_status.dropped++;
-                  pthread_mutex_unlock(&g_lock);
+                  if (log_data(subs[i].msg_id, rec,
+                               subs[i].topic->rec_size))
+                    {
+                      pthread_mutex_lock(&g_lock);
+                      g_status.samples++;
+                      pthread_mutex_unlock(&g_lock);
+                    }
+                  else
+                    {
+                      pthread_mutex_lock(&g_lock);
+                      g_status.dropped++;
+                      pthread_mutex_unlock(&g_lock);
+                    }
                 }
             }
         }
@@ -658,7 +779,7 @@ static int log_daemon(int argc, FAR char *argv[])
       now = log_now_us();
       if (now - last_flush >= 250000)
         {
-          if (!log_flush())
+          if (!log_flush(false))
             {
               /* Stop rather than carry on. Anything written after a partial
                * flush lands against the wrong frame boundary, and the result
@@ -680,7 +801,7 @@ static int log_daemon(int argc, FAR char *argv[])
 
       if (g_part_bytes >= LOG_PART_BYTES)
         {
-          if (!log_flush())
+          if (!log_flush(true))
             {
               break;
             }
@@ -724,7 +845,7 @@ static int log_daemon(int argc, FAR char *argv[])
 
   if (g_fd >= 0)
     {
-      log_flush();
+      log_flush(true);
       fsync(g_fd);
       close(g_fd);
       g_fd = -1;

@@ -57,6 +57,7 @@ struct sens_row_s
   FAR const struct orb_metadata *meta;  /* non-NULL for our own topics, which
                                          * are not in uORB's built-in name list;
                                          * NULL means look up by name */
+  uint8_t                        instance;
 };
 
 /****************************************************************************
@@ -75,14 +76,16 @@ struct sens_row_s
 
 static const struct sens_row_s g_rows[] =
 {
-  { "sensor_accel0", "accel0  ICM-42688", KIND_ACCEL, NULL },
-  { "sensor_gyro0",  "gyro0   ICM-42688", KIND_GYRO,  NULL },
-  { "sensor_accel1", "accel1  BMI055",    KIND_ACCEL, NULL },
-  { "sensor_gyro1",  "gyro1   BMI055",    KIND_GYRO,  NULL },
-  { "sensor_mag0",   "mag0    IST8310",   KIND_MAG,   NULL },
-  { "sensor_baro0",  "baro0   MS5611",    KIND_BARO,  NULL },
-  { "optical_flow",  "flow    MTF-02",    KIND_FLOW,  ORB_ID(optical_flow) },
-  { "distance_sensor", "range MTF-02",    KIND_DIST,  ORB_ID(distance_sensor) },
+  { "sensor_accel0", "accel0  ICM-42688", KIND_ACCEL, NULL, 0 },
+  { "sensor_gyro0",  "gyro0   ICM-42688", KIND_GYRO,  NULL, 0 },
+  { "sensor_accel1", "accel1  BMI055",    KIND_ACCEL, NULL, 1 },
+  { "sensor_gyro1",  "gyro1   BMI055",    KIND_GYRO,  NULL, 1 },
+  { "sensor_mag0",   "mag0    IST8310",   KIND_MAG,   NULL, 0 },
+  { "sensor_baro0",  "baro0   MS5611",    KIND_BARO,  NULL, 0 },
+  { "optical_flow",  "flow    MTF-02",    KIND_FLOW,
+    ORB_ID(optical_flow), 0 },
+  { "distance_sensor", "range MTF-02",    KIND_DIST,
+    ORB_ID(distance_sensor), 0 },
 };
 
 #define NROWS ((int)(sizeof(g_rows) / sizeof(g_rows[0])))
@@ -181,7 +184,7 @@ static void sensor_status_run(int window_ms)
           continue;
         }
 
-      fd[i] = orb_subscribe(meta);
+      fd[i] = orb_subscribe_multi(meta, g_rows[i].instance);
       if (fd[i] < 0)
         {
           continue;

@@ -110,9 +110,8 @@
 #define GYR_RANGE_2000DPS       0x00
 #define GYR_HBW_UNFILTERED      0x80
 #define GYR_INT_FIFO_EN         0x40   /* INT_EN_0: fifo_en */
-#define GYR_INT1_OD_LVL         0x03   /* clear -> push-pull, active low */
 #define GYR_INT1_FIFO           0x04   /* INT_MAP_1: int1_fifo */
-#define GYR_FIFO_WM_ENABLE      0x80
+#define GYR_FIFO_WM_ENABLE      0x88   /* fifo_wm_en | required bit3 */
 #define GYR_FIFO_CFG0_TAG       0x80   /* keep clear */
 #define GYR_FIFO_DEPTH          100    /* frames */
 
@@ -121,7 +120,19 @@
 #define BMI_FIFO_FRAME          6
 #define BMI_FIFO_WM_SAMPLES     8      /* watermark -> ~250 Hz interrupt */
 #define BMI_FIFO_MAX_READ       64     /* per DMA read (*6=384 <= 512) */
-#define BMI_SAMPLE_PERIOD_US    500    /* 2 kHz */
+
+/* Both unfiltered data streams are sampled at the BMI055's documented 2 kHz
+ * rate. Keep the timestamp state in 1/32 us units so the TIM5 phase correction
+ * can move smoothly by fractions of a microsecond without quantizing every
+ * watermark adjustment.
+ */
+
+#define BMI_TIMESTAMP_FRAC_BITS 5
+#define BMI_NOMINAL_PERIOD_Q5   (500ull << BMI_TIMESTAMP_FRAC_BITS)
+#define BMI_RATE_WINDOW_US      1000000ull /* update once per TIM5 second */
+#define BMI_PERIOD_AVG_SAMPLES  4      /* four-second moving average */
+#define BMI_PERIOD_MIN_Q5       (450ull << BMI_TIMESTAMP_FRAC_BITS)
+#define BMI_PERIOD_MAX_Q5       (550ull << BMI_TIMESTAMP_FRAC_BITS)
 
 #define BMI_READ_BIT            0x80
 #define BMI_SPI_MODE            SPIDEV_MODE0
@@ -134,7 +145,7 @@
 #define BMI_TEMP_SCALE          0.5f                             /* 0.5 K/LSB */
 #define BMI_TEMP_OFFSET         23.0f
 
-#define BMI_UORB_NBUFFER        256    /* ~128 ms at 2 kHz - see icm42688.c */
+#define BMI_UORB_NBUFFER        1280   /* ~625-640 ms at native rates */
 #define BMI_WATCHDOG_MS         20     /* fallback drain if an INT is missed */
 
 /****************************************************************************
@@ -151,6 +162,17 @@ struct bmi055_dev_s
   uint8_t                   depth;    /* FIFO depth (frames) */
   bool                      enabled;
   bool                      streaming;
+  uint64_t                  last_timestamp_q5;
+  uint64_t                  sample_period_q5;
+  uint64_t                  sample_count;
+  uint64_t                  rate_anchor_sample;
+  uint64_t                  rate_anchor_timestamp;
+  uint64_t                  period_history_q5[BMI_PERIOD_AVG_SAMPLES];
+  uint64_t                  period_history_sum_q5;
+  uint8_t                   period_history_index;
+  volatile uint64_t         drdy_timestamp;
+  volatile uint32_t         drdy_sequence;
+  volatile uint32_t         consumed_drdy_sequence;
   mutex_t                   lock;
   sem_t                     run;
   uint8_t                   fifobuf[BMI_FIFO_MAX_READ * BMI_FIFO_FRAME];
@@ -233,6 +255,7 @@ static void bmi055_spi_mode_switch(FAR struct bmi055_dev_s *dev)
 static void bmi055_fifo_flush(FAR struct bmi055_dev_s *dev)
 {
   uint8_t cfg0 = dev->is_gyro ? GYR_REG_FIFO_CONFIG_0 : ACC_REG_FIFO_CONFIG_0;
+  irqstate_t flags;
 
   /* A FIFO overrun can only be cleared by writing FIFO_CONFIG_1; disable the
    * FIFO, then re-arm the watermark and FIFO mode.
@@ -241,6 +264,18 @@ static void bmi055_fifo_flush(FAR struct bmi055_dev_s *dev)
   bmi055_write_reg(dev, BMI_REG_FIFO_CONFIG_1, 0x00);
   bmi055_write_reg(dev, cfg0, BMI_FIFO_WM_SAMPLES);
   bmi055_write_reg(dev, BMI_REG_FIFO_CONFIG_1, BMI_FIFO_MODE);
+
+  /* An edge captured before or during the flush no longer identifies a frame
+   * in the new FIFO epoch. Consume that sequence atomically so the next fresh
+   * watermark is seen as exactly one usable edge instead of starting a
+   * coalesced-edge/reset cascade.
+   */
+
+  flags = enter_critical_section();
+  dev->consumed_drdy_sequence = dev->drdy_sequence;
+  leave_critical_section(flags);
+
+  dev->rate_anchor_timestamp = 0;
 }
 
 static int bmi055_configure(FAR struct bmi055_dev_s *dev)
@@ -269,10 +304,18 @@ static int bmi055_configure(FAR struct bmi055_dev_s *dev)
 
       bmi055_write_reg(dev, GYR_REG_RANGE, GYR_RANGE_2000DPS);
       bmi055_modify(dev, GYR_REG_RATE_HBW, GYR_HBW_UNFILTERED, 0x00);
-      bmi055_modify(dev, GYR_REG_INT_EN_0, GYR_INT_FIFO_EN, 0x00);
-      bmi055_modify(dev, GYR_REG_INT_EN_1, 0x00, GYR_INT1_OD_LVL);
-      bmi055_modify(dev, GYR_REG_INT_MAP_1, GYR_INT1_FIFO, 0x00);
-      bmi055_modify(dev, GYR_REG_FIFO_WM_ENABLE, GYR_FIFO_WM_ENABLE, 0x00);
+
+      /* Program the complete interrupt path deterministically. In particular,
+       * FIFO_WM_ENABLE is the Bosch-defined value 0x88, not only bit7. Bit3
+       * is part of the required enable encoding; relying on its reset value
+       * left some BMI055/BMI088 revisions with watermark generation disabled.
+       */
+
+      bmi055_write_reg(dev, GYR_REG_INT_EN_0, GYR_INT_FIFO_EN);
+      bmi055_write_reg(dev, GYR_REG_INT_EN_1, 0x00);
+      bmi055_write_reg(dev, GYR_REG_INT_MAP_1, GYR_INT1_FIFO);
+      bmi055_write_reg(dev, GYR_REG_FIFO_WM_ENABLE,
+                       GYR_FIFO_WM_ENABLE);
       bmi055_write_reg(dev, GYR_REG_FIFO_CONFIG_0,
                        BMI_FIFO_WM_SAMPLES & ~GYR_FIFO_CFG0_TAG);
     }
@@ -335,13 +378,87 @@ static void bmi055_publish(FAR struct bmi055_dev_s *dev,
     }
 }
 
+/* Estimate the die's real FIFO period from watermark edges measured one TIM5
+ * second apart. Bosch specifies both unfiltered streams as nominal 2 kHz, but
+ * each die has an independent oscillator. Dividing elapsed TIM5 time by the
+ * absolute FIFO-sample count makes the estimate independent of the scheduler
+ * and of how many frames happened to be drained in each batch.
+ *
+ * Four nominal observations seed the moving-average history. Consequently a
+ * single bad-but-in-range observation cannot directly replace the active
+ * period, while four seconds is short enough to acquire the actual rate before
+ * calibration or logging normally begins.
+ */
+
+static void bmi055_update_period(FAR struct bmi055_dev_s *dev,
+                                 uint64_t edge_timestamp,
+                                 uint64_t edge_sample)
+{
+  uint64_t delta_samples;
+  uint64_t delta_us;
+  uint64_t observed_q5;
+  uint64_t replaced_q5;
+
+  if (dev->rate_anchor_timestamp == 0)
+    {
+      dev->rate_anchor_timestamp = edge_timestamp;
+      dev->rate_anchor_sample = edge_sample;
+      return;
+    }
+
+  if (edge_timestamp <= dev->rate_anchor_timestamp ||
+      edge_sample <= dev->rate_anchor_sample)
+    {
+      dev->rate_anchor_timestamp = edge_timestamp;
+      dev->rate_anchor_sample = edge_sample;
+      return;
+    }
+
+  delta_us = edge_timestamp - dev->rate_anchor_timestamp;
+  if (delta_us < BMI_RATE_WINDOW_US)
+    {
+      return;
+    }
+
+  delta_samples = edge_sample - dev->rate_anchor_sample;
+  observed_q5 = ((delta_us << BMI_TIMESTAMP_FRAC_BITS) +
+                 delta_samples / 2) / delta_samples;
+
+  if (observed_q5 >= BMI_PERIOD_MIN_Q5 &&
+      observed_q5 <= BMI_PERIOD_MAX_Q5)
+    {
+      replaced_q5 =
+        dev->period_history_q5[dev->period_history_index];
+      dev->period_history_sum_q5 -= replaced_q5;
+      dev->period_history_q5[dev->period_history_index] = observed_q5;
+      dev->period_history_sum_q5 += observed_q5;
+      dev->period_history_index =
+        (dev->period_history_index + 1) % BMI_PERIOD_AVG_SAMPLES;
+      dev->sample_period_q5 =
+        (dev->period_history_sum_q5 + BMI_PERIOD_AVG_SAMPLES / 2) /
+        BMI_PERIOD_AVG_SAMPLES;
+    }
+
+  dev->rate_anchor_timestamp = edge_timestamp;
+  dev->rate_anchor_sample = edge_sample;
+}
+
 static void bmi055_drain_fifo(FAR struct bmi055_dev_s *dev)
 {
   uint8_t  status = bmi055_read_reg(dev, BMI_REG_FIFO_STATUS);
   uint8_t  total;
   uint8_t  remaining;
   uint16_t idx = 0;
-  uint64_t base;
+  uint64_t base_q5;
+  uint64_t period_q5;
+  uint64_t batch_now_q5;
+  uint64_t batch_span_q5;
+  uint64_t causal_base_q5;
+  uint64_t drdy_timestamp;
+  uint64_t watermark_edge_sample;
+  uint32_t drdy_sequence;
+  uint32_t drdy_events;
+  irqstate_t flags;
   float    temp;
 
   if (status & BMI_FIFO_OVERRUN)
@@ -364,17 +481,103 @@ static void bmi055_drain_fifo(FAR struct bmi055_dev_s *dev)
       return;
     }
 
+  /* Snapshot the ISR-written 64-bit timestamp with interrupts excluded so a
+   * 32-bit core cannot observe a torn value.
+   */
+
+  flags = enter_critical_section();
+  drdy_timestamp = dev->drdy_timestamp;
+  drdy_sequence  = dev->drdy_sequence;
+  drdy_events = drdy_sequence - dev->consumed_drdy_sequence;
+  if (drdy_events != 0)
+    {
+      dev->consumed_drdy_sequence = drdy_sequence;
+    }
+
+  leave_critical_section(flags);
+
   /* Temperature is not carried in the FIFO; sample it once per batch */
 
   temp = (float)(int8_t)bmi055_read_reg(dev, BMI_REG_TEMP) * BMI_TEMP_SCALE +
          BMI_TEMP_OFFSET;
 
-  /* Back-date each sample from the read time so every one carries its own
-   * monotonic timestamp at the 2 kHz period (correct dt for fusion).
+  /* Both dies assert their FIFO watermark when the fill level reaches the
+   * programmed frame count. PX4 programs the requested sample count directly
+   * on both dies and treats an optional ninth frame only as worker latency,
+   * not as the interrupt source. Associating the gyro edge with frame nine
+   * discarded nearly every real eight-frame edge and repeatedly reset the
+   * timestamp estimator.
    */
 
-  base = sensor_get_timestamp() -
-         (uint64_t)(total - 1) * BMI_SAMPLE_PERIOD_US;
+  /* The captured edge identifies a known sample within the current FIFO.
+   * Its absolute sample index plus TIM5 time provides an oscillator-period
+   * observation that is independent of reconstructed event timestamps.
+   */
+
+  if (drdy_events != 0 && total >= BMI_FIFO_WM_SAMPLES)
+    {
+      watermark_edge_sample = dev->sample_count +
+                              BMI_FIFO_WM_SAMPLES - 1;
+      bmi055_update_period(dev, drdy_timestamp, watermark_edge_sample);
+    }
+
+  period_q5 = dev->sample_period_q5;
+
+  /* Build this batch from a physical TIM5 reference, never from the preceding
+   * batch. A unique watermark edge identifies the sample at the configured
+   * FIFO depth and avoids converting worker scheduling latency into timestamp
+   * jitter. The current TIM5 snapshot still imposes the hard causal limit that
+   * the newest frame is at least one measured period old.
+   */
+
+  batch_now_q5 =
+    fmuv6c_imu_time_now() << BMI_TIMESTAMP_FRAC_BITS;
+  batch_span_q5 = (uint64_t)total * period_q5;
+
+  if (batch_now_q5 <= batch_span_q5)
+    {
+      bmi055_fifo_flush(dev);
+      return;
+    }
+
+  causal_base_q5 = batch_now_q5 - batch_span_q5;
+  base_q5 = causal_base_q5;
+
+  if (drdy_events != 0 && total >= BMI_FIFO_WM_SAMPLES)
+    {
+      uint64_t edge_q5 =
+        drdy_timestamp << BMI_TIMESTAMP_FRAC_BITS;
+      uint64_t edge_span_q5 =
+        (uint64_t)BMI_FIFO_WM_SAMPLES * period_q5;
+
+      if (edge_q5 > edge_span_q5)
+        {
+          uint64_t edge_base_q5 = edge_q5 - edge_span_q5;
+
+          /* Ignore a stale or mis-associated edge. It must fit between the
+           * preceding published frame and the current-time causal bound.
+           */
+
+          if (edge_base_q5 <= causal_base_q5 &&
+              (dev->last_timestamp_q5 == 0 ||
+               edge_base_q5 > dev->last_timestamp_q5))
+            {
+              base_q5 = edge_base_q5;
+            }
+        }
+    }
+
+  /* The causal fallback normally advances beyond the preceding batch even if
+   * an edge was unusable. If it does not, no fixed-period assignment can be
+   * both causal and monotonic, so discard rather than publish impossible time.
+   */
+
+  if (dev->last_timestamp_q5 != 0 &&
+      base_q5 <= dev->last_timestamp_q5)
+    {
+      bmi055_fifo_flush(dev);
+      return;
+    }
 
   remaining = total;
   while (remaining > 0)
@@ -388,12 +591,18 @@ static void bmi055_drain_fifo(FAR struct bmi055_dev_s *dev)
 
       for (i = 0; i < n; i++, idx++)
         {
+          uint64_t ts_q5 = base_q5 + (uint64_t)idx * period_q5;
+
           bmi055_publish(dev, dev->fifobuf + i * BMI_FIFO_FRAME, temp,
-                         base + (uint64_t)idx * BMI_SAMPLE_PERIOD_US);
+                         (ts_q5 + (1ull << (BMI_TIMESTAMP_FRAC_BITS - 1))) >>
+                         BMI_TIMESTAMP_FRAC_BITS);
+          dev->last_timestamp_q5 = ts_q5;
         }
 
       remaining -= n;
     }
+
+  dev->sample_count += total;
 }
 
 /****************************************************************************
@@ -404,7 +613,22 @@ static int bmi055_isr(int irq, FAR void *context, FAR void *arg)
 {
   FAR struct bmi055_dev_s *dev = (FAR struct bmi055_dev_s *)arg;
 
-  nxsem_post(&dev->run);
+  /* Keep the first unconsumed threshold crossing. If service is delayed and
+   * another notification is coalesced, the first edge still identifies frame
+   * BMI_FIFO_WM_SAMPLES; a later edge does not.
+   */
+
+  if (dev->drdy_sequence == dev->consumed_drdy_sequence)
+    {
+      dev->drdy_timestamp = fmuv6c_imu_time_now();
+      dev->drdy_sequence++;
+      nxsem_post(&dev->run);
+    }
+  else
+    {
+      dev->drdy_sequence++;
+    }
+
   return OK;
 }
 
@@ -432,6 +656,24 @@ static int bmi055_thread(int argc, FAR char **argv)
 
 static void bmi055_stream_start(FAR struct bmi055_dev_s *dev)
 {
+  int i;
+
+  dev->last_timestamp_q5 = 0;
+  dev->sample_period_q5 = BMI_NOMINAL_PERIOD_Q5;
+  dev->sample_count = 0;
+  dev->rate_anchor_sample = 0;
+  dev->rate_anchor_timestamp = 0;
+  dev->period_history_sum_q5 = 0;
+  dev->period_history_index = 0;
+  for (i = 0; i < BMI_PERIOD_AVG_SAMPLES; i++)
+    {
+      dev->period_history_q5[i] = BMI_NOMINAL_PERIOD_Q5;
+      dev->period_history_sum_q5 += BMI_NOMINAL_PERIOD_Q5;
+    }
+
+  dev->drdy_timestamp = 0;
+  dev->drdy_sequence = 0;
+  dev->consumed_drdy_sequence = 0;
   bmi055_fifo_flush(dev);
   dev->streaming = true;
   stm32_gpiosetevent(dev->drdy, false, true, true, bmi055_isr, dev);
@@ -473,11 +715,9 @@ static int bmi055_set_interval(FAR struct sensor_lowerhalf_s *lower,
                                FAR struct file *filep,
                                FAR uint32_t *period_us)
 {
-  /* Hardware-timed 2 kHz FIFO stream: the rate is fixed. Report the true
-   * sample period.
-   */
+  /* Both unfiltered FIFO streams have the documented 2 kHz output rate. */
 
-  *period_us = BMI_SAMPLE_PERIOD_US;
+  *period_us = 500;
   return OK;
 }
 

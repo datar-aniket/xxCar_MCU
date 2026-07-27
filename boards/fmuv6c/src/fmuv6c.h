@@ -255,6 +255,15 @@
 #define GPIO_DRDY_BMI088_ACCEL    (GPIO_INPUT | GPIO_FLOAT | GPIO_PORTE | GPIO_PIN4)
 #define GPIO_DRDY_BMI088_GYRO     (GPIO_INPUT | GPIO_FLOAT | GPIO_PORTE | GPIO_PIN5)
 
+/* TIM5 is reserved as the IMU timestamp timebase. It runs as a pinless,
+ * interrupt-free 1 MHz 32-bit counter; do not enable a NuttX TIM5 lower-half,
+ * PWM, capture, ADC/DAC trigger, or quadrature-encoder user.
+ */
+
+#ifdef CONFIG_STM32H7_TIM5
+#  error "TIM5 is reserved by the FMUv6C IMU timestamp timebase"
+#endif
+
 /* SPIDEV_ACCELEROMETER(n) indices used by stm32_spi1select() */
 
 #define FMUV6C_SPIDEV_BMI088_ACCEL 0
@@ -314,6 +323,20 @@ int fmuv6c_sensor_probe(void);
 
 #ifdef CONFIG_SENSORS
 int fmuv6c_sensors_initialize(void);
+#endif
+
+/****************************************************************************
+ * Name: fmuv6c_imu_time_initialize / fmuv6c_imu_time_now
+ *
+ * Description:
+ *   Start/read the shared 1 MHz TIM5 timebase used to timestamp all three
+ *   onboard IMU data-ready edges. The returned epoch matches NuttX monotonic
+ *   sensor timestamps while retaining one-microsecond resolution.
+ ****************************************************************************/
+
+#if defined(CONFIG_SENSORS) && defined(CONFIG_SPI)
+int fmuv6c_imu_time_initialize(void);
+uint64_t fmuv6c_imu_time_now(void);
 #endif
 
 /****************************************************************************

@@ -65,6 +65,7 @@ struct cal_sensor_s
   FAR const char                *name;
   FAR const char                *orb;
   FAR const struct orb_metadata *direct;
+  uint8_t                        orb_instance;
   enum cal_kind_e                kind;
   uint8_t                        nvalues;
   uint8_t                        enc;
@@ -87,15 +88,15 @@ struct cal_sensor_s
 
 static const struct cal_sensor_s g_sensors[] =
 {
-  { "accel0", "sensor_accel0", NULL, CAL_KIND_ACCEL, 3,
+  { "accel0", "sensor_accel0", NULL, 0, CAL_KIND_ACCEL, 3,
     CAL_ENC_I16, CAL_ACC_SCALE, "[\"x\",\"y\",\"z\"]", "m/s^2" },
-  { "gyro0",  "sensor_gyro0",  NULL, CAL_KIND_GYRO,  3,
+  { "gyro0",  "sensor_gyro0",  NULL, 0, CAL_KIND_GYRO,  3,
     CAL_ENC_I16, CAL_GYR_SCALE, "[\"x\",\"y\",\"z\"]", "rad/s" },
-  { "accel1", "sensor_accel1", NULL, CAL_KIND_ACCEL, 3,
+  { "accel1", "sensor_accel1", NULL, 1, CAL_KIND_ACCEL, 3,
     CAL_ENC_I16, CAL_ACC_SCALE, "[\"x\",\"y\",\"z\"]", "m/s^2" },
-  { "gyro1",  "sensor_gyro1",  NULL, CAL_KIND_GYRO,  3,
+  { "gyro1",  "sensor_gyro1",  NULL, 1, CAL_KIND_GYRO,  3,
     CAL_ENC_I16, CAL_GYR_SCALE, "[\"x\",\"y\",\"z\"]", "rad/s" },
-  { "mag0",   "sensor_mag0",   NULL, CAL_KIND_MAG,   3,
+  { "mag0",   "sensor_mag0",   NULL, 0, CAL_KIND_MAG,   3,
     CAL_ENC_I16, CAL_MAG_SCALE, "[\"x\",\"y\",\"z\"]", "gauss" },
 
   /* Pressure near 1013 hPa beside a temperature near 40 degC do not share a
@@ -103,12 +104,12 @@ static const struct cal_sensor_s g_sensors[] =
    * slow enough that the extra bytes are free.
    */
 
-  { "baro0",  "sensor_baro0",  NULL, CAL_KIND_BARO,  2,
+  { "baro0",  "sensor_baro0",  NULL, 0, CAL_KIND_BARO,  2,
     CAL_ENC_F32, 0.0f, "[\"pressure\",\"temperature\"]", "hPa | degC" },
-  { "flow",   NULL, ORB_ID(optical_flow),    CAL_KIND_FLOW, 4,
+  { "flow",   NULL, ORB_ID(optical_flow),    0, CAL_KIND_FLOW, 4,
     CAL_ENC_F32, 0.0f,
     "[\"int_x\",\"int_y\",\"distance\",\"quality\"]", "rad | m" },
-  { "dist",   NULL, ORB_ID(distance_sensor), CAL_KIND_DIST, 2,
+  { "dist",   NULL, ORB_ID(distance_sensor), 0, CAL_KIND_DIST, 2,
     CAL_ENC_F32, 0.0f, "[\"distance\",\"quality\"]", "m | %" },
 };
 
@@ -130,6 +131,14 @@ static FAR const struct orb_metadata *cal_meta(int i)
 {
   return g_sensors[i].direct != NULL ? g_sensors[i].direct
                                      : orb_get_meta(g_sensors[i].orb);
+}
+
+static int cal_subscribe(int i)
+{
+  FAR const struct orb_metadata *meta = cal_meta(i);
+
+  return meta != NULL
+         ? orb_subscribe_multi(meta, g_sensors[i].orb_instance) : -1;
 }
 
 /* Write a whole buffer.
@@ -306,10 +315,9 @@ static int cal_cmd_list(int fd)
 
   for (i = 0; i < CAL_NSENSORS; i++)
     {
-      FAR const struct orb_metadata *meta = cal_meta(i);
       struct orb_state st;
 
-      sub[i] = meta != NULL ? orb_subscribe(meta) : -1;
+      sub[i] = cal_subscribe(i);
       gen[i] = 0;
 
       if (sub[i] >= 0)
@@ -818,11 +826,7 @@ int cal_session(void)
               st_idx = -1;
             }
 
-          {
-            FAR const struct orb_metadata *meta = cal_meta(i);
-
-            st_sub = meta != NULL ? orb_subscribe(meta) : -1;
-          }
+          st_sub = cal_subscribe(i);
 
           if (st_sub < 0)
             {
@@ -1003,11 +1007,7 @@ int cal_session(void)
                   continue;
                 }
 
-              {
-                FAR const struct orb_metadata *m = cal_meta(cal6_idx);
-
-                sub = m != NULL ? orb_subscribe(m) : -1;
-              }
+              sub = cal_subscribe(cal6_idx);
 
               if (sub < 0)
                 {

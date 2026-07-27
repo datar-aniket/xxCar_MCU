@@ -89,6 +89,9 @@
 #define ICM_RESET_DONE_INT      0x10   /* INT_STATUS bit4 */
 #define ICM_PWR_ALL_LOWNOISE    0x0f   /* gyro LN | accel LN */
 #define ICM_FIFO_FLUSH          0x02   /* SIGNAL_PATH_RESET bit1 */
+#define ICM_FIFO_CONFIG_BITS    0x17   /* hires | temp | gyro | accel */
+#define ICM_FIFO_WM_GT_TH       0x20   /* repeat threshold event per ODR */
+#define ICM_FIFO_THS_INT1_EN    0x04   /* route FIFO threshold to INT1 */
 
 #define ICM_READ_BIT            0x80
 #define ICM_SPI_MODE            SPIDEV_MODE3
@@ -114,8 +117,6 @@
 #define ICM_HDR_20BIT           0x10
 #define ICM_HDR_TS_MASK         0x0c        /* timestamp/fsync field */
 #define ICM_HDR_TS_ODR          0x08        /* ODR timestamp present */
-#define ICM_ACCEL_INVALID       (-524288)   /* reassemble sentinel */
-
 /* Scale factors for the 20-bit hi-res raw counts:
  *   accel +/-16 g  -> 32768 LSB/g   (524288 = 16 g)
  *   gyro  +/-2000dps -> 262 LSB/dps (524288 = 2000 dps)
@@ -126,11 +127,17 @@
 #define ICM_TEMP_SCALE          (1.0f / 132.48f)              /* 16-bit temp */
 #define ICM_TEMP_OFFSET         25.0f
 
-#define ICM_UORB_NBUFFER        256         /* ~128 ms at 2 kHz: enough that an
-                                             * SD stall inside the logger cannot
-                                             * silently overwrite samples */
+#define ICM_UORB_NBUFFER        1280        /* 640 ms at 2 kHz. Routine full-rate
+                                             * SD flushes reach the old 128 ms
+                                             * limit, and observed card stalls
+                                             * reach about 500 ms. */
 #define ICM_WATCHDOG_MS         20          /* fallback drain if an INT is missed */
-#define ICM_SAMPLE_PERIOD_US    500         /* 2 kHz ODR -> 500 us per sample */
+#define ICM_TIMESTAMP_FRAC_BITS 5
+#define ICM_NOMINAL_PERIOD_Q5   (500ull << ICM_TIMESTAMP_FRAC_BITS)
+#define ICM_RATE_WINDOW_US      1000000ull   /* update once per TIM5 second */
+#define ICM_PERIOD_AVG_SAMPLES  4           /* four-second moving average */
+#define ICM_PERIOD_MIN_Q5       (450ull << ICM_TIMESTAMP_FRAC_BITS)
+#define ICM_PERIOD_MAX_Q5       (550ull << ICM_TIMESTAMP_FRAC_BITS)
 
 /****************************************************************************
  * Private Types
@@ -153,6 +160,17 @@ struct icm42688_dev_s
   bool                      accel_en;
   bool                      gyro_en;
   bool                      streaming;  /* DRDY interrupt armed */
+  uint64_t                  last_timestamp_q5;
+  uint64_t                  sample_period_q5;
+  uint64_t                  sample_count;
+  uint64_t                  rate_anchor_sample;
+  uint64_t                  rate_anchor_timestamp;
+  uint64_t                  period_history_q5[ICM_PERIOD_AVG_SAMPLES];
+  uint64_t                  period_history_sum_q5;
+  uint8_t                   period_history_index;
+  volatile uint64_t         drdy_timestamp;
+  volatile uint32_t         drdy_sequence;
+  volatile uint32_t         consumed_drdy_sequence;
   mutex_t                   lock;
   sem_t                     run;
   uint8_t                   fifobuf[ICM_FIFO_MAX_READ * ICM_FIFO_PACKET];
@@ -219,6 +237,22 @@ static void icm42688_modify(FAR struct icm42688_dev_s *dev, uint8_t reg,
     }
 }
 
+static bool icm42688_check_bits(FAR struct icm42688_dev_s *dev,
+                                uint8_t reg, uint8_t set, uint8_t clear)
+{
+  uint8_t value = icm42688_read_reg(dev, reg);
+
+  if ((value & set) != set || (value & clear) != 0)
+    {
+      snerr("ERROR: ICM-42688 reg 0x%02x=0x%02x"
+            " (set 0x%02x clear 0x%02x)\n",
+            reg, value, set, clear);
+      return false;
+    }
+
+  return true;
+}
+
 /****************************************************************************
  * Private Functions - configuration (register values from PX4 icm42688p)
  ****************************************************************************/
@@ -253,9 +287,15 @@ static int icm42688_configure(FAR struct icm42688_dev_s *dev)
 
   icm42688_modify(dev, ICM_REG_FIFO_CONFIG, 0xc0, 0x00);
 
-  /* Big-endian FIFO count + sensor data, disable I2C interface */
+  /* Big-endian FIFO count + sensor data, disable I2C interface.
+   *
+   * Hold the last valid value when one accel/gyro ODR slot is invalid. In
+   * 20-bit FIFO mode the alternative is the -524288 sentinel. With this bit
+   * set -524288 is also a legitimate full-scale value, so the packet parser
+   * must not treat that value as an invalid marker.
+   */
 
-  icm42688_modify(dev, ICM_REG_INTF_CONFIG0, 0x33, 0x00);
+  icm42688_modify(dev, ICM_REG_INTF_CONFIG0, 0xb3, 0x00);
 
   /* Disable adaptive full-scale range (AFSR off) */
 
@@ -278,11 +318,18 @@ static int icm42688_configure(FAR struct icm42688_dev_s *dev)
 
   icm42688_modify(dev, ICM_REG_TMST_CONFIG, 0x1d, 0x02);
 
-  /* FIFO contents: watermark-gt-threshold, high-res, temp+gyro+accel;
-   * no FSYNC tag -> 20-byte hi-res packets.
+  /* Leave FIFO packet generation disabled until a subscriber starts the
+   * stream. Board probe runs well before the logger opens the uORB nodes. If
+   * packet generation and the latched INT1 route are enabled here, the FIFO
+   * reaches its threshold while PE6 EXTI is still detached and holds INT1
+   * low. Attaching a falling-edge interrupt later cannot observe that already
+   * asserted level, so every drain comes from the 20 ms watchdog.
+   *
+   * FIFO_WM_GT_TH can be configured while idle. The packet-content bits and
+   * INT1 route are enabled only after PE6 has been armed in stream_start().
    */
 
-  icm42688_modify(dev, ICM_REG_FIFO_CONFIG1, 0x37, 0x08);
+  icm42688_modify(dev, ICM_REG_FIFO_CONFIG1, ICM_FIFO_WM_GT_TH, 0x1f);
 
   /* FIFO watermark (bytes) = samples * packet size */
 
@@ -291,11 +338,40 @@ static int icm42688_configure(FAR struct icm42688_dev_s *dev)
   icm42688_write_reg(dev, ICM_REG_FIFO_CONFIG3,
                      ((ICM_FIFO_WM_SAMPLES * ICM_FIFO_PACKET) >> 8) & 0x0f);
 
-  /* Watermark interrupt clears on FIFO read; async-reset off; route to INT1 */
+  /* Watermark interrupt clears on FIFO read and async-reset is off. Keep the
+   * INT1 route disabled until PE6 EXTI is armed by stream_start().
+   */
 
   icm42688_modify(dev, ICM_REG_INT_CONFIG0, 0x08, 0x00);
   icm42688_modify(dev, ICM_REG_INT_CONFIG1, 0x00, 0x10);
-  icm42688_modify(dev, ICM_REG_INT_SOURCE0, 0x04, 0x00);
+  /* INT_SOURCE0 resets to 0x10, which routes RESET_DONE to INT1. Do not use
+   * read-modify-write here: preserving that reset default can leave the
+   * latched active-low INT1 asserted before EXTI is armed. No INT1 source is
+   * wanted while idle.
+   */
+
+  icm42688_write_reg(dev, ICM_REG_INT_SOURCE0, 0x00);
+
+  /* PX4 verifies its register configuration instead of assuming an SPI write
+   * stuck. Do the same for the timing-critical bank-0 registers before the
+   * driver is exposed to applications.
+   */
+
+  if (!icm42688_check_bits(dev, ICM_REG_INT_CONFIG, 0x06, 0x01) ||
+      !icm42688_check_bits(dev, ICM_REG_FIFO_CONFIG, 0xc0, 0x00) ||
+      !icm42688_check_bits(dev, ICM_REG_FIFO_CONFIG1,
+                           ICM_FIFO_WM_GT_TH, 0x1f) ||
+      icm42688_read_reg(dev, ICM_REG_FIFO_CONFIG2) !=
+        ICM_FIFO_WM_SAMPLES * ICM_FIFO_PACKET ||
+      (icm42688_read_reg(dev, ICM_REG_FIFO_CONFIG3) & 0x0f) != 0 ||
+      !icm42688_check_bits(dev, ICM_REG_INT_CONFIG0, 0x08, 0x04) ||
+      !icm42688_check_bits(dev, ICM_REG_INT_CONFIG1, 0x00, 0x10) ||
+      icm42688_read_reg(dev, ICM_REG_INT_SOURCE0) != 0x00)
+    {
+      snerr("ERROR: ICM-42688 FIFO/interrupt configuration verification"
+            " failed\n");
+      return -EIO;
+    }
 
   sninfo("ICM-42688-P configured for 2 kHz FIFO streaming\n");
   return OK;
@@ -303,8 +379,21 @@ static int icm42688_configure(FAR struct icm42688_dev_s *dev)
 
 static void icm42688_fifo_flush(FAR struct icm42688_dev_s *dev)
 {
+  irqstate_t flags;
+
   icm42688_modify(dev, ICM_REG_SIGNAL_PATH_RESET, ICM_FIFO_FLUSH, 0x00);
   nxsig_usleep(1000);
+
+  /* A pre-flush edge cannot be associated with the new FIFO epoch. Consume
+   * the sequence atomically so the next watermark is treated as one fresh
+   * hardware anchor rather than a coalesced stale edge.
+   */
+
+  flags = enter_critical_section();
+  dev->consumed_drdy_sequence = dev->drdy_sequence;
+  leave_critical_section(flags);
+
+  dev->rate_anchor_timestamp = 0;
 }
 
 static uint16_t icm42688_fifo_count(FAR struct icm42688_dev_s *dev)
@@ -334,8 +423,7 @@ static int32_t icm42688_reassemble20(uint8_t hi, uint8_t mid, uint8_t lo)
 }
 
 /* Parse and publish one 20-byte hi-res FIFO packet. Returns false only on a
- * bad header (framing lost -> caller should flush and resync). A single
- * data-invalid sample is skipped (returns true).
+ * bad header (framing lost -> caller should flush and resync).
  */
 
 static bool icm42688_publish(FAR struct icm42688_dev_s *dev,
@@ -360,12 +448,6 @@ static bool icm42688_publish(FAR struct icm42688_dev_s *dev,
   ax = icm42688_reassemble20(p[1], p[2], (p[17] >> 4) & 0x0f);
   ay = icm42688_reassemble20(p[3], p[4], (p[18] >> 4) & 0x0f);
   az = icm42688_reassemble20(p[5], p[6], (p[19] >> 4) & 0x0f);
-
-  if (ax == ICM_ACCEL_INVALID || ay == ICM_ACCEL_INVALID ||
-      az == ICM_ACCEL_INVALID)
-    {
-      return true;               /* invalid sample, skip but keep framing */
-    }
 
   temp = (float)(int16_t)((uint16_t)p[13] << 8 | p[14]) * ICM_TEMP_SCALE +
          ICM_TEMP_OFFSET;
@@ -398,13 +480,86 @@ static bool icm42688_publish(FAR struct icm42688_dev_s *dev,
   return true;
 }
 
+/* Measure the primary IMU's actual FIFO period from watermark edges captured
+ * by the same TIM5 clock used by the BMI055. The ICM accel and gyro share one
+ * FIFO packet and one sample clock, so one absolute packet counter represents
+ * both sensor streams.
+ *
+ * Update only after one elapsed TIM5 second. Accepted observations replace
+ * one entry in a four-value moving average seeded at the nominal 500 us
+ * period. Out-of-order anchors and observations outside the bounded 2 kHz
+ * neighborhood are ignored without disturbing the active timestamp period.
+ */
+
+static void icm42688_update_period(FAR struct icm42688_dev_s *dev,
+                                   uint64_t edge_timestamp,
+                                   uint64_t edge_sample)
+{
+  uint64_t delta_samples;
+  uint64_t delta_us;
+  uint64_t observed_q5;
+  uint64_t replaced_q5;
+
+  if (dev->rate_anchor_timestamp == 0)
+    {
+      dev->rate_anchor_timestamp = edge_timestamp;
+      dev->rate_anchor_sample = edge_sample;
+      return;
+    }
+
+  if (edge_timestamp <= dev->rate_anchor_timestamp ||
+      edge_sample <= dev->rate_anchor_sample)
+    {
+      dev->rate_anchor_timestamp = edge_timestamp;
+      dev->rate_anchor_sample = edge_sample;
+      return;
+    }
+
+  delta_us = edge_timestamp - dev->rate_anchor_timestamp;
+  if (delta_us < ICM_RATE_WINDOW_US)
+    {
+      return;
+    }
+
+  delta_samples = edge_sample - dev->rate_anchor_sample;
+  observed_q5 = ((delta_us << ICM_TIMESTAMP_FRAC_BITS) +
+                 delta_samples / 2) / delta_samples;
+
+  if (observed_q5 >= ICM_PERIOD_MIN_Q5 &&
+      observed_q5 <= ICM_PERIOD_MAX_Q5)
+    {
+      replaced_q5 =
+        dev->period_history_q5[dev->period_history_index];
+      dev->period_history_sum_q5 -= replaced_q5;
+      dev->period_history_q5[dev->period_history_index] = observed_q5;
+      dev->period_history_sum_q5 += observed_q5;
+      dev->period_history_index =
+        (dev->period_history_index + 1) % ICM_PERIOD_AVG_SAMPLES;
+      dev->sample_period_q5 =
+        (dev->period_history_sum_q5 + ICM_PERIOD_AVG_SAMPLES / 2) /
+        ICM_PERIOD_AVG_SAMPLES;
+    }
+
+  dev->rate_anchor_timestamp = edge_timestamp;
+  dev->rate_anchor_sample = edge_sample;
+}
+
 static void icm42688_drain_fifo(FAR struct icm42688_dev_s *dev)
 {
   uint16_t count = icm42688_fifo_count(dev);
   uint16_t total;
   uint16_t remaining;
   uint16_t idx = 0;
-  uint64_t base;
+  uint64_t base_q5;
+  uint64_t period_q5;
+  uint64_t batch_now_q5;
+  uint64_t batch_span_q5;
+  uint64_t causal_base_q5;
+  uint64_t drdy_timestamp;
+  uint64_t watermark_edge_sample;
+  uint32_t drdy_sequence;
+  uint32_t drdy_events;
+  irqstate_t flags;
 
   if (count >= ICM_FIFO_HW_SIZE)
     {
@@ -420,13 +575,91 @@ static void icm42688_drain_fifo(FAR struct icm42688_dev_s *dev)
       return;
     }
 
-  /* The batch was just read, so the newest sample is ~now and the oldest is
-   * (total-1) sample periods earlier. Back-date each sample from that base so
-   * every sample carries its own monotonic timestamp at the 2 kHz period.
+  /* Snapshot the ISR-written 64-bit timestamp with interrupts excluded so a
+   * 32-bit core cannot observe a torn value.
    */
 
-  base = sensor_get_timestamp() -
-         (uint64_t)(total - 1) * ICM_SAMPLE_PERIOD_US;
+  flags = enter_critical_section();
+  drdy_timestamp = dev->drdy_timestamp;
+  drdy_sequence  = dev->drdy_sequence;
+  drdy_events = drdy_sequence - dev->consumed_drdy_sequence;
+  if (drdy_events != 0)
+    {
+      dev->consumed_drdy_sequence = drdy_sequence;
+    }
+
+  leave_critical_section(flags);
+
+  /* A fresh watermark edge identifies the absolute packet at the programmed
+   * FIFO threshold. Use that physical edge/sample pair for the one-second
+   * period estimator before reconstructing this batch.
+   */
+
+  if (drdy_events != 0 && total >= ICM_FIFO_WM_SAMPLES)
+    {
+      watermark_edge_sample = dev->sample_count +
+                              ICM_FIFO_WM_SAMPLES - 1;
+      icm42688_update_period(dev, drdy_timestamp,
+                             watermark_edge_sample);
+    }
+
+  period_q5 = dev->sample_period_q5;
+
+  /* Build this batch from a physical TIM5 reference, never from the preceding
+   * batch. A unique watermark edge identifies the packet at the FIFO threshold
+   * and removes worker scheduling latency from its timestamps. The current
+   * TIM5 snapshot remains the causal upper bound: the newest packet must be at
+   * least one measured period old.
+   */
+
+  batch_now_q5 =
+    fmuv6c_imu_time_now() << ICM_TIMESTAMP_FRAC_BITS;
+  batch_span_q5 = (uint64_t)total * period_q5;
+
+  if (batch_now_q5 <= batch_span_q5)
+    {
+      icm42688_fifo_flush(dev);
+      return;
+    }
+
+  causal_base_q5 = batch_now_q5 - batch_span_q5;
+  base_q5 = causal_base_q5;
+
+  if (drdy_events != 0 && total >= ICM_FIFO_WM_SAMPLES)
+    {
+      uint64_t edge_q5 =
+        drdy_timestamp << ICM_TIMESTAMP_FRAC_BITS;
+      uint64_t edge_span_q5 =
+        (uint64_t)ICM_FIFO_WM_SAMPLES * period_q5;
+
+      if (edge_q5 > edge_span_q5)
+        {
+          uint64_t edge_base_q5 = edge_q5 - edge_span_q5;
+
+          /* Accept only an edge that lies between the prior published packet
+           * and the current-time causal bound.
+           */
+
+          if (edge_base_q5 <= causal_base_q5 &&
+              (dev->last_timestamp_q5 == 0 ||
+               edge_base_q5 > dev->last_timestamp_q5))
+            {
+              base_q5 = edge_base_q5;
+            }
+        }
+    }
+
+  /* The causal fallback normally advances beyond the preceding batch. If it
+   * does not, no fixed-period assignment can be both causal and monotonic, so
+   * discard rather than emit impossible timestamps.
+   */
+
+  if (dev->last_timestamp_q5 != 0 &&
+      base_q5 <= dev->last_timestamp_q5)
+    {
+      icm42688_fifo_flush(dev);
+      return;
+    }
 
   remaining = total;
   while (remaining > 0)
@@ -440,7 +673,10 @@ static void icm42688_drain_fifo(FAR struct icm42688_dev_s *dev)
 
       for (i = 0; i < n; i++, idx++)
         {
-          uint64_t ts = base + (uint64_t)idx * ICM_SAMPLE_PERIOD_US;
+          uint64_t ts_q5 = base_q5 + (uint64_t)idx * period_q5;
+          uint64_t ts =
+            (ts_q5 + (1ull << (ICM_TIMESTAMP_FRAC_BITS - 1))) >>
+            ICM_TIMESTAMP_FRAC_BITS;
 
           if (!icm42688_publish(dev, dev->fifobuf + i * ICM_FIFO_PACKET, ts))
             {
@@ -449,10 +685,14 @@ static void icm42688_drain_fifo(FAR struct icm42688_dev_s *dev)
               icm42688_fifo_flush(dev);
               return;
             }
+
+          dev->last_timestamp_q5 = ts_q5;
         }
 
       remaining -= n;
     }
+
+  dev->sample_count += total;
 }
 
 /****************************************************************************
@@ -463,7 +703,24 @@ static int icm42688_isr(int irq, FAR void *context, FAR void *arg)
 {
   FAR struct icm42688_dev_s *dev = (FAR struct icm42688_dev_s *)arg;
 
-  nxsem_post(&dev->run);
+  /* Preserve the first edge that has not yet been consumed. In latched mode
+   * the first falling edge is the physical FIFO-threshold crossing. Replacing
+   * it with a later retrigger would associate the timestamp with the wrong
+   * packet, while rejecting a coalesced sequence would throw the only useful
+   * anchor away.
+   */
+
+  if (dev->drdy_sequence == dev->consumed_drdy_sequence)
+    {
+      dev->drdy_timestamp = fmuv6c_imu_time_now();
+      dev->drdy_sequence++;
+      nxsem_post(&dev->run);
+    }
+  else
+    {
+      dev->drdy_sequence++;
+    }
+
   return OK;
 }
 
@@ -490,18 +747,86 @@ static int icm42688_thread(int argc, FAR char **argv)
   return 0;
 }
 
-static void icm42688_stream_start(FAR struct icm42688_dev_s *dev)
+static int icm42688_stream_start(FAR struct icm42688_dev_s *dev)
 {
+  int ret;
+  int i;
+
+  /* First force INT1 inactive and stop all FIFO writes. This clears the idle
+   * state left by board probe or a previous subscriber without depending on
+   * a falling edge that may already have happened.
+   */
+
+  icm42688_write_reg(dev, ICM_REG_INT_SOURCE0, 0x00);
+  icm42688_modify(dev, ICM_REG_FIFO_CONFIG1, ICM_FIFO_WM_GT_TH, 0x1f);
+
+  dev->last_timestamp_q5 = 0;
+  dev->sample_period_q5 = ICM_NOMINAL_PERIOD_Q5;
+  dev->sample_count = 0;
+  dev->rate_anchor_sample = 0;
+  dev->rate_anchor_timestamp = 0;
+  dev->period_history_sum_q5 = 0;
+  dev->period_history_index = 0;
+  for (i = 0; i < ICM_PERIOD_AVG_SAMPLES; i++)
+    {
+      dev->period_history_q5[i] = ICM_NOMINAL_PERIOD_Q5;
+      dev->period_history_sum_q5 += ICM_NOMINAL_PERIOD_Q5;
+    }
+
+  dev->drdy_timestamp = 0;
+  dev->drdy_sequence = 0;
+  dev->consumed_drdy_sequence = 0;
   icm42688_fifo_flush(dev);
+
+  /* Arm PE6 before packet generation or INT1 routing. The first physical
+   * threshold crossing therefore always creates a new falling edge.
+   */
+
+  ret = stm32_gpiosetevent(GPIO_DRDY_ICM42688, false, true, true,
+                          icm42688_isr, dev);
+  if (ret < 0)
+    {
+      snerr("ERROR: ICM-42688 PE6 EXTI setup failed: %d\n", ret);
+      return ret;
+    }
+
   dev->streaming = true;
-  stm32_gpiosetevent(GPIO_DRDY_ICM42688, false, true, true,
-                     icm42688_isr, dev);
+  icm42688_modify(dev, ICM_REG_FIFO_CONFIG1,
+                  ICM_FIFO_WM_GT_TH | ICM_FIFO_CONFIG_BITS, 0x08);
+  /* Route exactly FIFO_THS to INT1. In particular, do not preserve the
+   * register's 0x10 reset default (RESET_DONE_INT1_EN).
+   */
+
+  icm42688_write_reg(dev, ICM_REG_INT_SOURCE0,
+                     ICM_FIFO_THS_INT1_EN);
+
+  if (!icm42688_check_bits(dev, ICM_REG_FIFO_CONFIG1,
+                           ICM_FIFO_WM_GT_TH | ICM_FIFO_CONFIG_BITS, 0x08) ||
+      icm42688_read_reg(dev, ICM_REG_INT_SOURCE0) !=
+        ICM_FIFO_THS_INT1_EN)
+    {
+      icm42688_write_reg(dev, ICM_REG_INT_SOURCE0, 0x00);
+      icm42688_modify(dev, ICM_REG_FIFO_CONFIG1,
+                      ICM_FIFO_WM_GT_TH, 0x1f);
+      stm32_gpiosetevent(GPIO_DRDY_ICM42688, false, false, false,
+                         NULL, NULL);
+      dev->streaming = false;
+      snerr("ERROR: ICM-42688 stream enable verification failed\n");
+      return -EIO;
+    }
+
+  return OK;
 }
 
 static void icm42688_stream_stop(FAR struct icm42688_dev_s *dev)
 {
-  stm32_gpiosetevent(GPIO_DRDY_ICM42688, false, false, false, NULL, NULL);
+  /* Make a concurrent watchdog wake a no-op before changing FIFO state. */
+
   dev->streaming = false;
+  icm42688_write_reg(dev, ICM_REG_INT_SOURCE0, 0x00);
+  icm42688_modify(dev, ICM_REG_FIFO_CONFIG1, ICM_FIFO_WM_GT_TH, 0x1f);
+  stm32_gpiosetevent(GPIO_DRDY_ICM42688, false, false, false, NULL, NULL);
+  icm42688_fifo_flush(dev);
 }
 
 /****************************************************************************
@@ -513,6 +838,7 @@ static int icm42688_activate(FAR struct sensor_lowerhalf_s *lower,
 {
   FAR struct icm42688_sensor_s *s = (FAR struct icm42688_sensor_s *)lower;
   FAR struct icm42688_dev_s *dev = s->dev;
+  int ret = OK;
 
   nxmutex_lock(&dev->lock);
 
@@ -529,7 +855,18 @@ static int icm42688_activate(FAR struct sensor_lowerhalf_s *lower,
 
   if (was_idle && (dev->accel_en || dev->gyro_en) && !dev->streaming)
     {
-      icm42688_stream_start(dev);
+      ret = icm42688_stream_start(dev);
+      if (ret < 0)
+        {
+          if (s == &dev->accel)
+            {
+              dev->accel_en = false;
+            }
+          else
+            {
+              dev->gyro_en = false;
+            }
+        }
     }
   else if (!dev->accel_en && !dev->gyro_en && dev->streaming)
     {
@@ -537,7 +874,7 @@ static int icm42688_activate(FAR struct sensor_lowerhalf_s *lower,
     }
 
   nxmutex_unlock(&dev->lock);
-  return OK;
+  return ret;
 }
 
 static int icm42688_set_interval(FAR struct sensor_lowerhalf_s *lower,

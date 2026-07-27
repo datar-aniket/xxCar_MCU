@@ -33,11 +33,20 @@ G = 9.80665
 RAD2DEG = 180.0 / math.pi
 
 # Channels we analyse, and the ULog topic + multi-instance each comes from.
+# name, ULog topic, multi-instance, unit, and the sensor's full-scale range.
+#
+# The range is a filter, not decoration. Framing damage can leave a record that
+# passes every structural check - right length, a declared msg_id, a timestamp
+# that advances - while its payload bytes are misaligned, and a float read off
+# the wrong boundary comes out around 1e38. One such sample destroys a variance
+# computation entirely: the Allan deviation of a channel with 0.02% garbage
+# came out at 1e31 rad/s. No reading beyond the part's own full-scale range is
+# physically possible, so anything past it is damage by definition.
 CHANNELS = (
-    ("accel0", "sensor_accel", 0, "m/s^2"),
-    ("gyro0", "sensor_gyro", 0, "rad/s"),
-    ("accel1", "sensor_accel", 1, "m/s^2"),
-    ("gyro1", "sensor_gyro", 1, "rad/s"),
+    ("accel0", "sensor_accel", 0, "m/s^2", 16.0 * G),
+    ("gyro0", "sensor_gyro", 0, "rad/s", 2000.0 * math.pi / 180.0),
+    ("accel1", "sensor_accel", 1, "m/s^2", 16.0 * G),
+    ("gyro1", "sensor_gyro", 1, "rad/s", 2000.0 * math.pi / 180.0),
 )
 
 PART_RE = re.compile(r"^log_(\d+)(?:_(\d+))?\.ulg$")
@@ -55,6 +64,7 @@ class Series:
     gaps: list = field(default_factory=list)   # (at_seconds, gap_seconds)
     resyncs: int = 0                   # stream breaks stepped over
     rejected: int = 0                  # messages refused as implausible
+    dropped: int = 0                   # samples outside the sensor's range
 
     @property
     def duration(self) -> float:
@@ -210,8 +220,8 @@ def load_session(paths, progress=None, channels=None) -> dict[str, Series]:
     millions of samples per axis, and holding all four sensors at once costs
     over a gigabyte; the caller can work one sensor at a time instead.
     """
-    wanted = {name: (topic, mid, unit)
-              for name, topic, mid, unit in CHANNELS
+    wanted = {name: (topic, mid, unit, fsr)
+              for name, topic, mid, unit, fsr in CHANNELS
               if channels is None or name in channels}
     raw: dict[str, list] = {name: [] for name in wanted}
     resyncs: dict[str, int] = {name: 0 for name in wanted}
@@ -222,7 +232,7 @@ def load_session(paths, progress=None, channels=None) -> dict[str, Series]:
             progress(i, len(paths), Path(path).name)
         subs, data, nres, nrej = read_ulg(path)
         by_key = {(nm, mid): m for m, (nm, mid) in subs.items()}
-        for name, (topic, mid, _unit) in wanted.items():
+        for name, (topic, mid, _unit, _fsr) in wanted.items():
             m = by_key.get((topic, mid))
             if m is None or m not in data:
                 continue
@@ -232,7 +242,8 @@ def load_session(paths, progress=None, channels=None) -> dict[str, Series]:
             rejects[name] += nrej
 
     out: dict[str, Series] = {}
-    for name, (_topic, _mid, unit) in wanted.items():
+    dropped: dict[str, int] = {}
+    for name, (_topic, _mid, unit, fsr) in wanted.items():
         chunks = raw[name]
         if not chunks:
             continue
@@ -241,6 +252,14 @@ def load_session(paths, progress=None, channels=None) -> dict[str, Series]:
 
         order = np.argsort(t, kind="stable")
         t, xyz = t[order], xyz[:, order]
+
+        # Drop samples that cannot be real. Removing them rather than clamping
+        # matters: a clamped 1e38 becomes a full-scale reading, which is still
+        # a large excursion the variance would happily believe in.
+        good = np.all(np.isfinite(xyz) & (np.abs(xyz) <= fsr), axis=0)
+        dropped[name] = int((~good).sum())
+        if dropped[name]:
+            t, xyz = t[good], xyz[:, good]
 
         t_s = (t - t[0]) / 1e6
         dt = np.diff(t_s)
@@ -259,7 +278,7 @@ def load_session(paths, progress=None, channels=None) -> dict[str, Series]:
 
         out[name] = Series(name=name, unit=unit, t=t_s, xyz=xyz, fs=fs,
                            gaps=gaps, resyncs=resyncs[name],
-                           rejected=rejects[name])
+                           rejected=rejects[name], dropped=dropped[name])
     return out
 
 
@@ -280,7 +299,8 @@ def trim(series: Series, head_s: float, tail_s: float) -> Series:
     return Series(name=series.name, unit=series.unit, t=series.t[keep],
                   xyz=series.xyz[:, keep], fs=series.fs,
                   gaps=[g for g in series.gaps if t0 <= g[0] <= t1],
-                  resyncs=series.resyncs, rejected=series.rejected)
+                  resyncs=series.resyncs, rejected=series.rejected,
+                  dropped=series.dropped)
 
 
 def allan_deviation(x: np.ndarray, fs: float, points: int = 100):

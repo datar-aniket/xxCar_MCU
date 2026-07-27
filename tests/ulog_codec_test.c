@@ -23,6 +23,7 @@ int main(void){
     "rc_input:uint64_t timestamp;uint16_t[18] channel;uint16_t frames;uint16_t lost_frames;uint8_t count;uint8_t rssi;uint8_t ok;uint8_t failsafe;uint8_t source;",
     "optical_flow:uint64_t timestamp;uint32_t integration_time_us;uint32_t time_delta_distance_us;float integrated_x;float integrated_y;float integrated_xgyro;float integrated_ygyro;float integrated_zgyro;float distance;int16_t temperature;uint8_t quality;uint8_t sensor_id;",
     "distance_sensor:uint64_t timestamp;float current_distance;float min_distance;float max_distance;uint8_t type;uint8_t orientation;uint8_t covariance;uint8_t signal_quality;"};
+  if(strlen(F[4])<=256){fprintf(stderr,"optical_flow regression fixture must exceed 256 bytes\n");return 2;}
   for(int i=0;i<6;i++) msg('F',F[i],strlen(F[i]));
   const char*N[]={"sensor_accel","sensor_baro","sensor_mag","rc_input","optical_flow","distance_sensor"};
   for(uint16_t id=0;id<6;id++){uint8_t a[40];size_t l=0;a[l++]=0;a[l++]=id&0xff;a[l++]=id>>8;memcpy(a+l,N[id],strlen(N[id]));l+=strlen(N[id]);msg('A',a,l);}

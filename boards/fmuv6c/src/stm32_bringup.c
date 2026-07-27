@@ -596,6 +596,19 @@ int stm32_bringup(void)
   stm32_spidev_initialize();
 #endif
 
+#if defined(CONFIG_SENSORS) && defined(CONFIG_SPI)
+  /* TIM5 is a pinless, interrupt-free 1 MHz clock shared by all IMU DRDY
+   * handlers. Start it before registering a sensor that can arm an IRQ.
+   */
+
+  ret = fmuv6c_imu_time_initialize();
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: IMU timebase initialization failed: %d\n", ret);
+      return ret;
+    }
+#endif
+
 #if defined(CONFIG_SPI) && defined(CONFIG_I2C)
   /* Stage 2 - Task 1: synchronous sensor discovery (logs a PASS/FAIL table) */
 
