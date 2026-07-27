@@ -69,9 +69,9 @@
  * full-rate IMU data. 64 KB is roughly 290 ms, which covers the stalls
  * actually observed.
  *
- * A bigger buffer is only safe because log_flush() never discards a short
- * write. While a short write discarded the remainder, enlarging this made
- * things worse rather than better - see the comment there.
+ * A bigger buffer is only safe because log_flush() rolls an ambiguous partial
+ * write back to the preceding complete flush boundary and stops. Continuing
+ * after a partial write made the corruption larger - see the comment there.
  */
 
 #define LOG_BUFSIZE   65536
@@ -253,10 +253,6 @@ static uint64_t log_now_us(void)
   return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)(ts.tv_nsec / 1000);
 }
 
-/* Push the buffer to the card. Returns false if the write fell short - a full
- * or failing card - so the caller can count the loss.
- */
-
 /* Push the buffer to the card, all of it.
  *
  * write() is allowed to be short, and the version of this that treated a short
@@ -272,10 +268,11 @@ static uint64_t log_now_us(void)
  * 26,783 fragments averaging 0.42 s - fine for white noise, useless for the
  * bias instability the run existed to measure.
  *
- * So: retry the remainder. A card that stalls for wear levelling comes back
- * within tens of milliseconds, and blocking the logger for that long is
- * cheaper than a corrupt file. If it truly will not take the data, say so and
- * let the caller end the session - a short recording beats a desynchronised
+ * Resuming at FAT's reported position also proved unsafe: a real recording
+ * showed that position disagreeing with the data boundary by one byte, first
+ * inserting a byte and later deleting one. Retry only when absolutely no file
+ * progress occurred. For any partial progress, truncate to the preceding flush
+ * boundary and stop - a shorter readable log is better than a longer corrupt
  * one.
  */
 
@@ -319,15 +316,16 @@ static bool log_flush(bool all)
 
   if (ret < 0)
     {
-      bool rolled_back = written == 0;
+      bool rolled_back = false;
       int rollback_errno = 0;
 
       /* A failed FAT write may already have advanced the file through part of
-       * this buffer. End the file at the previous complete flush boundary so
-       * it stays structurally valid rather than leaving a torn ULog record.
+       * this buffer even when write() and lseek() claim zero progress. Always
+       * end the file at the previous complete flush boundary so it stays
+       * structurally valid rather than leaving a torn ULog record.
        */
 
-      if (!rolled_back && flush_start >= 0)
+      if (flush_start >= 0)
         {
           if (ftruncate(g_fd, flush_start) == 0)
             {

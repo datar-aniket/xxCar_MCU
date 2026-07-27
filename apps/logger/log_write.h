@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  *
- * Write a whole buffer to a file without trusting the returned byte count.
+ * Write one whole buffer to a file and reject ambiguous partial progress.
  *
  * NuttX's FAT driver can write part of a buffer and then report an error
  * instead of the partial count. fat_write() accumulates `byteswritten` and
@@ -17,17 +17,20 @@
  * a negative errno while the file position has already moved, and has no way
  * to learn by how much.
  *
- * Both obvious strategies are wrong, and both were tried on real hardware:
+ * All attempts to continue an ambiguous partial write are unsafe:
  *
  *   drop the rest of the buffer   -> a torn record, and every byte after it in
  *                                    the file is framed against the wrong
  *                                    boundary
  *   retry from the same offset    -> the bytes that DID land get written twice,
  *                                    shifting the stream out of phase
+ *   resume from reported f_pos    -> real hardware has reported a position one
+ *                                    byte before or after the data boundary,
+ *                                    inserting or deleting one byte
  *
- * The fix is to stop guessing and ask: lseek(fd, 0, SEEK_CUR) reports where the
- * file actually is, so the amount truly written is the difference from where it
- * started. That is the one number nobody has to infer.
+ * The only safe recovery is for the caller to truncate to the position before
+ * the flush and stop recording. A zero-progress EINTR/EAGAIN/stall is safe to
+ * retry because no boundary needs to be inferred.
  ****************************************************************************/
 
 #ifndef __APPS_LOGGER_LOG_WRITE_H
@@ -57,14 +60,15 @@ struct log_io_s
 
 FAR const struct log_io_s *log_io_default(void);
 
-/* Write len bytes of buf to fd.
+/* Write len bytes of buf to fd as one indivisible application-level request.
  *
- * Returns 0 when everything landed. On failure returns a negative errno and
- * sets *written to how many bytes actually reached the file - derived from the
- * file position, not from any returned count - so the caller knows whether the
- * file now ends on a record boundary or part way through one.
+ * Returns 0 only when write() reports the full count and the file position
+ * advances by exactly len. A zero-progress transient failure is retried. Any
+ * partial or contradictory progress returns a negative errno immediately and
+ * sets *written from the reported file position; the caller must roll the file
+ * back to its position before this call rather than attempting to resume.
  *
- * max_spins bounds how long it will wait on a stalling card before giving up.
+ * max_spins bounds zero-progress retries.
  */
 
 int log_write_all(int fd, FAR const uint8_t *buf, size_t len,

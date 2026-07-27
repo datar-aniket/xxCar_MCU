@@ -4,13 +4,13 @@
  * FAT driver writes part of a buffer, advances the file position, and then
  * returns a negative errno with the partial count discarded
  * (fs/fat/fs_fat32.c, errout_with_lock). A caller that believes the return
- * value either loses the remainder or writes it twice.
+ * value either loses the remainder or writes it twice. Real hardware also
+ * showed f_pos disagreeing with the data boundary by one byte, so using f_pos
+ * to resume is not safe either.
  *
- * Both mistakes shipped. Dropping the remainder tore records and desynchronised
- * every byte after them; retrying from the same offset duplicated the bytes
- * that had landed and shifted the stream out of phase. Real recordings were
- * ruined by each in turn, so the stub below reproduces exactly that behaviour
- * and the tests assert on the bytes that reach the "file".
+ * The safe contract is therefore fail immediately after any partial progress;
+ * logger.c truncates the whole flush and stops. Only zero-progress transient
+ * failures may retry.
  */
 
 #include <stdio.h>
@@ -32,6 +32,7 @@ static int    g_stall;                /* refuse everything, no progress */
 static size_t g_accept_total;         /* accept at most this many bytes ever */
 static size_t g_accepted;
 static int    g_lseek_errno;          /* simulate lseek() clobbering errno */
+static int    g_position_adjust;      /* position report differs after write */
 static int    g_fails;
 
 /* Behaves like fat_write(): may land some bytes and STILL return an error,
@@ -100,7 +101,7 @@ static off_t stub_lseek(int fd, off_t offset, int whence)
       errno = g_lseek_errno;
     }
 
-  return (off_t)g_pos;
+  return (off_t)g_pos + (g_calls > 0 ? g_position_adjust : 0);
 }
 
 static int stub_sleep(unsigned us)
@@ -122,7 +123,7 @@ static void reset(void)
   g_pos = 0; g_calls = 0; g_fail_after = -1;
   g_fail_errno = EIO; g_short_only = 0; g_stall = 0;
   g_accept_total = 0; g_accepted = 0;
-  g_lseek_errno = 0;
+  g_lseek_errno = 0; g_position_adjust = 0;
 }
 
 static void fail(const char *what)
@@ -140,11 +141,10 @@ static void fill(unsigned char *b, size_t n)
     }
 }
 
-/* The whole point: after a partial-write-then-error, the bytes in the file
- * must be the input exactly once - not truncated, not repeated.
+/* After a partial-write-then-error, do not try to infer the resume boundary.
  */
 
-static void test_partial_then_error_is_not_duplicated(void)
+static void test_partial_then_error_stops(void)
 {
   unsigned char src[4096];
   size_t written = 0;
@@ -156,55 +156,37 @@ static void test_partial_then_error_is_not_duplicated(void)
 
   ret = log_write_all(3, src, sizeof(src), &g_stub_io, 100, &written);
 
-  if (ret != 0)
+  if (ret != -EIO)
     {
-      printf("FAIL partial: returned %d, expected success after resuming\n",
-             ret);
+      printf("FAIL partial: returned %d, expected %d\n", ret, -EIO);
       g_fails++;
     }
 
-  if (written != sizeof(src) || g_pos != sizeof(src))
+  if (written != 1500 || g_pos != 1500 || g_calls != 1)
     {
-      printf("FAIL partial: wrote %zu, file has %zu, want %zu\n",
-             written, g_pos, sizeof(src));
-      g_fails++;
-      return;
-    }
-
-  if (memcmp(g_file, src, sizeof(src)) != 0)
-    {
-      size_t i;
-      for (i = 0; i < sizeof(src); i++)
-        {
-          if (g_file[i] != src[i])
-            {
-              printf("FAIL partial: file differs at byte %zu "
-                     "(got 0x%02x want 0x%02x) - duplicated or lost\n",
-                     i, g_file[i], src[i]);
-              break;
-            }
-        }
-
+      printf("FAIL partial: wrote %zu, file has %zu, calls %d; "
+             "want 1500, 1500, 1\n", written, g_pos, g_calls);
       g_fails++;
     }
 }
 
-/* An honest short write must also work, and must not re-send what landed. */
+/* Even an honest short count is not resumed; logger.c owns rollback. */
 
-static void test_honest_short_write(void)
+static void test_honest_short_write_stops(void)
 {
   unsigned char src[8192];
   size_t written = 0;
+  int ret;
 
   reset();
   fill(src, sizeof(src));
   g_fail_after = 700;
   g_short_only = 1;
 
-  if (log_write_all(3, src, sizeof(src), &g_stub_io, 100, &written) != 0 ||
-      written != sizeof(src) || memcmp(g_file, src, sizeof(src)) != 0)
+  ret = log_write_all(3, src, sizeof(src), &g_stub_io, 100, &written);
+  if (ret != -EIO || written != 700 || g_pos != 700 || g_calls != 1)
     {
-      fail("short write: file does not match the input exactly once");
+      fail("short write: did not stop at the first partial count");
     }
 }
 
@@ -223,6 +205,28 @@ static void test_stall_then_recover(void)
       written != sizeof(src) || memcmp(g_file, src, sizeof(src)) != 0)
     {
       fail("stall: did not recover cleanly");
+    }
+}
+
+/* A full returned count is not success when FAT's reported position disagrees.
+ * The caller will roll the entire flush back.
+ */
+
+static void test_full_count_position_mismatch_stops(void)
+{
+  unsigned char src[2048];
+  size_t written = 0;
+  int ret;
+
+  reset();
+  fill(src, sizeof(src));
+  g_position_adjust = -1;
+
+  ret = log_write_all(3, src, sizeof(src), &g_stub_io, 100, &written);
+  if (ret != -EIO || written != sizeof(src) - 1 ||
+      g_pos != sizeof(src) || g_calls != 1)
+    {
+      fail("position mismatch: an apparent full write was accepted");
     }
 }
 
@@ -304,9 +308,10 @@ static void test_zero_length(void)
 
 int main(void)
 {
-  test_partial_then_error_is_not_duplicated();
-  test_honest_short_write();
+  test_partial_then_error_stops();
+  test_honest_short_write_stops();
   test_stall_then_recover();
+  test_full_count_position_mismatch_stops();
   test_permanent_stall_reports_progress();
   test_write_errno_survives_lseek();
   test_zero_length();
@@ -317,6 +322,6 @@ int main(void)
       return 1;
     }
 
-  printf("log_write: partial writes neither lost nor duplicated - OK\n");
+  printf("log_write: ambiguous partial writes stop for rollback - OK\n");
   return 0;
 }

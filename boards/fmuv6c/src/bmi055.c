@@ -133,6 +133,8 @@
 #define BMI_PERIOD_AVG_SAMPLES  4      /* four-second moving average */
 #define BMI_PERIOD_MIN_Q5       (450ull << BMI_TIMESTAMP_FRAC_BITS)
 #define BMI_PERIOD_MAX_Q5       (550ull << BMI_TIMESTAMP_FRAC_BITS)
+#define BMI_PHASE_SLEW_DIV      32     /* at most 1/32 period per FIFO batch */
+#define BMI_EDGE_ERROR_PERIODS  2      /* reject a mis-associated DRDY edge */
 
 #define BMI_READ_BIT            0x80
 #define BMI_SPI_MODE            SPIDEV_MODE0
@@ -454,6 +456,7 @@ static void bmi055_drain_fifo(FAR struct bmi055_dev_s *dev)
   uint64_t batch_now_q5;
   uint64_t batch_span_q5;
   uint64_t causal_base_q5;
+  uint64_t predicted_base_q5;
   uint64_t drdy_timestamp;
   uint64_t watermark_edge_sample;
   uint32_t drdy_sequence;
@@ -523,11 +526,19 @@ static void bmi055_drain_fifo(FAR struct bmi055_dev_s *dev)
 
   period_q5 = dev->sample_period_q5;
 
-  /* Build this batch from a physical TIM5 reference, never from the preceding
-   * batch. A unique watermark edge identifies the sample at the configured
-   * FIFO depth and avoids converting worker scheduling latency into timestamp
-   * jitter. The current TIM5 snapshot still imposes the hard causal limit that
-   * the newest frame is at least one measured period old.
+  /* Predict the next batch from the preceding sample and the measured die
+   * period, then phase-lock that prediction to TIM5 DRDY edges. PE4/PE5 are
+   * software ISR captures, so an SDMMC critical section can occasionally make
+   * an otherwise valid edge about one sample late. Snapping directly to that
+   * edge produced a two-period gap at an eight-frame FIFO boundary, followed
+   * by shorter boundaries as subsequent edges recovered.
+   *
+   * Slewing by at most 1/32 period per batch retains the physical TIM5 phase
+   * lock without converting interrupt latency into sample-time discontinuity.
+   * At the ~250 Hz watermark rate this can correct several milliseconds per
+   * second, far more than the independent sensor oscillator can drift. The
+   * current TIM5 snapshot remains a hard causal limit: the newest published
+   * frame is at least one measured period old.
    */
 
   batch_now_q5 =
@@ -541,7 +552,18 @@ static void bmi055_drain_fifo(FAR struct bmi055_dev_s *dev)
     }
 
   causal_base_q5 = batch_now_q5 - batch_span_q5;
-  base_q5 = causal_base_q5;
+
+  if (dev->last_timestamp_q5 == 0)
+    {
+      predicted_base_q5 = causal_base_q5;
+      base_q5 = causal_base_q5;
+    }
+  else
+    {
+      predicted_base_q5 = dev->last_timestamp_q5 + period_q5;
+      base_q5 = predicted_base_q5 <= causal_base_q5 ?
+                predicted_base_q5 : causal_base_q5;
+    }
 
   if (drdy_events != 0 && total >= BMI_FIFO_WM_SAMPLES)
     {
@@ -554,22 +576,58 @@ static void bmi055_drain_fifo(FAR struct bmi055_dev_s *dev)
         {
           uint64_t edge_base_q5 = edge_q5 - edge_span_q5;
 
-          /* Ignore a stale or mis-associated edge. It must fit between the
-           * preceding published frame and the current-time causal bound.
-           */
-
-          if (edge_base_q5 <= causal_base_q5 &&
-              (dev->last_timestamp_q5 == 0 ||
-               edge_base_q5 > dev->last_timestamp_q5))
+          if (edge_base_q5 <= causal_base_q5)
             {
-              base_q5 = edge_base_q5;
+              if (dev->last_timestamp_q5 == 0)
+                {
+                  base_q5 = edge_base_q5;
+                }
+              else
+                {
+                  uint64_t error_q5;
+                  uint64_t error_limit_q5 =
+                    BMI_EDGE_ERROR_PERIODS * period_q5;
+                  uint64_t slew_q5 = period_q5 / BMI_PHASE_SLEW_DIV;
+
+                  if (slew_q5 == 0)
+                    {
+                      slew_q5 = 1;
+                    }
+
+                  if (edge_base_q5 >= predicted_base_q5)
+                    {
+                      error_q5 = edge_base_q5 - predicted_base_q5;
+                      if (error_q5 <= error_limit_q5)
+                        {
+                          base_q5 = predicted_base_q5 +
+                                    (error_q5 < slew_q5 ?
+                                     error_q5 : slew_q5);
+                        }
+                    }
+                  else
+                    {
+                      error_q5 = predicted_base_q5 - edge_base_q5;
+                      if (error_q5 <= error_limit_q5)
+                        {
+                          base_q5 = predicted_base_q5 -
+                                    (error_q5 < slew_q5 ?
+                                     error_q5 : slew_q5);
+                        }
+                    }
+
+                  if (base_q5 > causal_base_q5)
+                    {
+                      base_q5 = causal_base_q5;
+                    }
+                }
             }
         }
     }
 
-  /* The causal fallback normally advances beyond the preceding batch even if
-   * an edge was unusable. If it does not, no fixed-period assignment can be
-   * both causal and monotonic, so discard rather than publish impossible time.
+  /* The prediction normally advances beyond the preceding batch even if an
+   * edge was unusable. If the causal ceiling does not permit that, no
+   * fixed-period assignment can be both causal and monotonic, so discard
+   * rather than publish impossible time.
    */
 
   if (dev->last_timestamp_q5 != 0 &&

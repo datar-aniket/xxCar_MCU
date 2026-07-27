@@ -45,9 +45,7 @@ int log_write_all(int fd, FAR const uint8_t *buf, size_t len,
                   FAR size_t *written)
 {
   off_t start;
-  size_t off = 0;
   int spins = 0;
-  int err = -EIO;
 
   if (written != NULL)
     {
@@ -69,75 +67,71 @@ int log_write_all(int fd, FAR const uint8_t *buf, size_t len,
       return -errno;
     }
 
-  while (off < len)
+  for (;;)
     {
       off_t now;
       size_t done;
-      ssize_t n = io->write(fd, buf + off, len - off);
+      ssize_t n = io->write(fd, buf, len);
       int write_errno = n < 0 ? errno : 0;
 
-      if (n == (ssize_t)(len - off))
-        {
-          off = len;                     /* the whole remainder landed */
-          break;
-        }
-
-      /* Anything else - a short count OR an error - means the returned value
-       * cannot be trusted to describe what reached the file. Ask the file.
+      /* Always verify the position, including after an apparently complete
+       * write. The hardware failure this protects against is precisely a
+       * disagreement between the returned count and the FAT file position.
        */
 
       now = io->lseek(fd, 0, SEEK_CUR);
+      if (now < 0)
+        {
+          return -EIO;
+        }
+
       if (now < start)
         {
-          err = -EIO;                    /* position went backwards; give up */
-          break;
+          return -EIO;
         }
 
       done = (size_t)(now - start);
       if (done > len)
         {
-          err = -EIO;                    /* more than we asked for; nonsense */
-          break;
+          return -EIO;
         }
 
-      if (done > off)
+      if (written != NULL)
         {
-          /* Real progress, however it was reported. Carry on from where the
-           * file actually is - never from where we assumed it would be.
-           */
-
-          off = done;
-          spins = 0;
-          continue;
+          *written = done;
         }
 
-      /* No progress at all. A card stalling for wear levelling comes back
-       * within tens of milliseconds; a card that never does is not going to.
+      if (n == (ssize_t)len && done == len)
+        {
+          return 0;
+        }
+
+      /* Once any part of the request may have landed, its exact boundary is
+       * ambiguous. Real recordings have shown the FAT position disagree with
+       * the data by one byte: resuming at that reported position inserted or
+       * deleted a byte and made the rest of the ULog unreadable. Do not resume.
+       * The caller truncates the file back to the pre-flush boundary.
        */
 
-      /* lseek() above is allowed to change errno. Classify the write using
-       * the errno captured immediately after it, never the current errno.
+      if (done != 0 || n > 0)
+        {
+          return -EIO;
+        }
+
+      /* With zero progress it is safe to retry the original buffer. lseek()
+       * may change errno, so classify the write using the saved value.
        */
 
       if (n < 0 && write_errno != EINTR && write_errno != EAGAIN)
         {
-          err = write_errno != 0 ? -write_errno : -EIO;
-          break;
+          return write_errno != 0 ? -write_errno : -EIO;
         }
 
       if (++spins > max_spins)
         {
-          err = -ETIMEDOUT;
-          break;
+          return -ETIMEDOUT;
         }
 
       io->sleep_us(10000);
     }
-
-  if (written != NULL)
-    {
-      *written = off;
-    }
-
-  return off == len ? 0 : err;
 }
