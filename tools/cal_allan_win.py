@@ -16,6 +16,7 @@ import math
 import queue
 import sys
 import threading
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, ttk
@@ -55,46 +56,120 @@ class LogLog(tk.Canvas):
         super().__init__(master, bg=PLOT_BG, highlightthickness=0, **kw)
         self.title = ""
         self.unit = ""
-        self.curves: list = []          # (tau, adev) per axis
-        self.marks: list = []           # (tau_B, adev_min) per axis
+        self.curves: list = []          # (axis, tau, adev)
+        self.marks: dict = {}           # axis -> (tau_B, adev_min)
+        self._plot_box = None
+        self._hover_points: list = []   # (px, py, axis, tau, adev)
         self.bind("<Configure>", lambda _e: self.redraw())
+        self.bind("<Motion>", self._motion)
+        self.bind("<Leave>", lambda _e: self.delete("hover"))
 
     def set_data(self, title, unit, results):
         self.title = title
         self.unit = unit
-        self.curves = [(r.tau, r.adev) for r in results
+        self.curves = [(i, r.tau, r.adev) for i, r in enumerate(results)
                        if r.tau is not None and len(r.tau)]
-        self.marks = [(r.tau_B, min(r.adev)) for r in results
-                      if r.tau is not None and len(r.tau)]
+        self.marks = {
+            i: (r.tau_B, min(r.adev))
+            for i, r in enumerate(results)
+            if r.tau is not None and len(r.tau) and
+            math.isfinite(r.tau_B)
+        }
         self.redraw()
 
+    @staticmethod
+    def _time_label(value):
+        if value < 1e-3:
+            return f"{value * 1e6:g} µs"
+        if value < 1.0:
+            return f"{value * 1e3:g} ms"
+        if value < 60.0:
+            return f"{value:g} s"
+        if value < 3600.0:
+            return f"{value / 60.0:g} min"
+        return f"{value / 3600.0:g} h"
+
+    def _motion(self, event):
+        """Show exact curve values without putting text inside the plot."""
+        self.delete("hover")
+        if not self._plot_box or not self._hover_points:
+            return
+        left, top, right, bottom = self._plot_box
+        if not (left <= event.x <= right and top <= event.y <= bottom):
+            return
+
+        point = min(self._hover_points,
+                    key=lambda p: (p[0] - event.x) ** 2 +
+                                  (p[1] - event.y) ** 2)
+        if (point[0] - event.x) ** 2 + (point[1] - event.y) ** 2 > 18 ** 2:
+            return
+
+        x, y, axis, tau, adev = point
+        self.create_line(x, top, x, bottom, fill=GRID_HI, dash=(2, 4),
+                         tags="hover")
+        self.create_oval(x - 4, y - 4, x + 4, y + 4,
+                         outline=AXIS_COLOURS[axis], width=2,
+                         fill=PLOT_BG, tags="hover")
+        label = (f"{AXIS_NAMES[axis].upper()}   "
+                 f"τ {self._time_label(tau)}   "
+                 f"σ {adev:.3e} {self.unit}")
+        tx = min(event.x + 14, self.winfo_width() - 12)
+        anchor = "ne" if tx > self.winfo_width() - 230 else "nw"
+        text_id = self.create_text(
+            tx, max(top + 8, event.y - 12), anchor=anchor, text=label,
+            fill=FG, font=("TkFixedFont", 8), tags="hover")
+        box = self.bbox(text_id)
+        if box:
+            rect = self.create_rectangle(
+                box[0] - 6, box[1] - 4, box[2] + 6, box[3] + 4,
+                fill=PANEL, outline=GRID_HI, tags="hover")
+            self.tag_lower(rect, text_id)
+
     def redraw(self):
-        import math
         self.delete("all")
+        self._hover_points = []
+        self._plot_box = None
         w, h = self.winfo_width(), self.winfo_height()
-        if w < 80 or h < 70:
+        if w < 260 or h < 180:
             return
-        pl, pr, pt, pb = 62, 12, 24, 30
+
+        # Header and legend have their own band above the plotting rectangle.
+        # No text is placed against the border, which avoids the old legend
+        # and title bleeding into the top grid line.
+
+        pl, pr, pt, pb = 76, 18, 42, 42
         pw, ph = w - pl - pr, h - pt - pb
-        if pw < 30 or ph < 30:
+        if pw < 120 or ph < 80:
             return
 
-        self.create_text(pl, 12, anchor="w", fill=FG, text=self.title,
-                         font=("TkDefaultFont", 9, "bold"))
+        self.create_text(pl, 16, anchor="w", fill=FG, text=self.title,
+                         font=("TkDefaultFont", 10, "bold"))
+
+        legend_x = w - 150
+        for i, name in enumerate(AXIS_NAMES):
+            x = legend_x + i * 47
+            self.create_line(x, 16, x + 13, 16, fill=AXIS_COLOURS[i],
+                             width=3, capstyle="round")
+            self.create_text(x + 18, 16, anchor="w", fill=FG, text=name.upper(),
+                             font=("TkFixedFont", 8, "bold"))
+
         if not self.curves:
-            self.create_text(w // 2, h // 2, fill=MUTED, font=("TkFixedFont", 8),
-                             text="no data")
+            self.create_rectangle(pl, pt, pl + pw, pt + ph, outline=GRID_HI)
+            self.create_text(pl + pw // 2, pt + ph // 2, fill=MUTED,
+                             font=("TkDefaultFont", 9),
+                             text="Load a session and compute Allan deviation")
             return
 
-        xs = [t for tau, _ in self.curves for t in tau if t > 0]
-        ys = [a for _, adev in self.curves for a in adev if a > 0]
+        xs = [t for _, tau, _ in self.curves for t in tau if t > 0]
+        ys = [a for _, _, adev in self.curves for a in adev if a > 0]
         if not xs or not ys:
             return
+
         lx0, lx1 = math.log10(min(xs)), math.log10(max(xs))
         ly0, ly1 = math.log10(min(ys)), math.log10(max(ys))
         if lx1 - lx0 < 1e-9:
             lx1 = lx0 + 1
-        pad = (ly1 - ly0) * 0.08 or 0.5
+        pad = (ly1 - ly0) * 0.10 or 0.5
         ly0, ly1 = ly0 - pad, ly1 + pad
 
         def px(t):
@@ -103,59 +178,75 @@ class LogLog(tk.Canvas):
         def py(a):
             return pt + ph - (math.log10(a) - ly0) / (ly1 - ly0) * ph
 
-        # decade gridlines - recessive, and labelled only on the decade
+        self._plot_box = (pl, pt, pl + pw, pt + ph)
+
+        # Minor 2x/5x lines make a log plot readable without making it busy.
+        for d in range(int(math.floor(lx0)) - 1,
+                       int(math.ceil(lx1)) + 1):
+            for multiple in (2.0, 5.0):
+                value = multiple * 10.0 ** d
+                lv = math.log10(value)
+                if lx0 < lv < lx1:
+                    x = px(value)
+                    self.create_line(x, pt, x, pt + ph, fill=GRID)
+
         for d in range(int(math.floor(lx0)), int(math.ceil(lx1)) + 1):
             if not (lx0 <= d <= lx1):
                 continue
-            x = px(10.0 ** d)
-            self.create_line(x, pt, x, pt + ph, fill=GRID)
-            self.create_text(x, pt + ph + 12, fill=MUTED,
+            value = 10.0 ** d
+            x = px(value)
+            self.create_line(x, pt, x, pt + ph, fill=GRID_HI)
+            self.create_text(x, pt + ph + 14, fill=MUTED,
                              font=("TkFixedFont", 8),
-                             text=f"1e{d}" if d else "1")
+                             text=self._time_label(value))
+
         for d in range(int(math.floor(ly0)), int(math.ceil(ly1)) + 1):
             if not (ly0 <= d <= ly1):
                 continue
-            y = py(10.0 ** d)
-            self.create_line(pl, y, pl + pw, y, fill=GRID)
-            self.create_text(pl - 6, y, anchor="e", fill=MUTED,
+            value = 10.0 ** d
+            y = py(value)
+            self.create_line(pl, y, pl + pw, y, fill=GRID_HI)
+            self.create_text(pl - 10, y, anchor="e", fill=MUTED,
                              font=("TkFixedFont", 8), text=f"1e{d}")
 
         self.create_rectangle(pl, pt, pl + pw, pt + ph, outline=GRID_HI)
-        self.create_text(pl + pw // 2, h - 6, fill=MUTED,
+        self.create_text(pl + pw // 2, h - 8, fill=MUTED,
                          font=("TkFixedFont", 8), text="averaging time τ (s)")
-        self.create_text(pl - 6, pt - 6, anchor="se", fill=MUTED,
-                         font=("TkFixedFont", 8), text=f"σ ({self.unit})")
+        self.create_text(15, pt + ph // 2, fill=MUTED, angle=90,
+                         font=("TkFixedFont", 8),
+                         text=f"Allan deviation σ  ({self.unit})")
 
-        for i, (tau, adev) in enumerate(self.curves):
+        for axis, tau, adev in self.curves:
             pts = []
             for t, a in zip(tau, adev):
                 if t > 0 and a > 0:
-                    pts += [px(t), py(a)]
+                    x, y = px(t), py(a)
+                    pts += [x, y]
+                    self._hover_points.append((x, y, axis, float(t),
+                                               float(a)))
             if len(pts) >= 4:
-                self.create_line(*pts, fill=AXIS_COLOURS[i], width=2,
+                self.create_line(*pts, fill=AXIS_COLOURS[axis], width=2,
                                  capstyle="round", joinstyle="round")
 
-        # mark the curve minimum: it is where bias instability is read, and
-        # seeing it lets you judge whether the run was long enough to reach it
-        for i, (tb, amin) in enumerate(self.marks):
+        # Only a measured knee is marked. An endpoint minimum deliberately has
+        # no marker, matching the "not measured" result in the table.
+
+        for axis, (tb, amin) in self.marks.items():
             if tb > 0 and amin > 0:
                 x, y = px(tb), py(amin)
-                self.create_oval(x - 3, y - 3, x + 3, y + 3,
-                                 outline=AXIS_COLOURS[i], width=2,
+                self.create_line(x, y + 7, x, pt + ph, fill=AXIS_COLOURS[axis],
+                                 dash=(2, 4))
+                self.create_oval(x - 4, y - 4, x + 4, y + 4,
+                                 outline=AXIS_COLOURS[axis], width=2,
                                  fill=PLOT_BG)
-
-        # direct labels - three series, so no legend box is needed
-        for i, name in enumerate(AXIS_NAMES):
-            self.create_text(pl + pw - 8, pt + 11 + i * 14, anchor="e",
-                             fill=AXIS_COLOURS[i], text=name,
-                             font=("TkFixedFont", 9, "bold"))
 
 
 class AllanWindow(tk.Toplevel):
     def __init__(self, master, on_save=None):
         super().__init__(master)
         self.title("xxCar — Allan variance")
-        self.geometry("1180x820")
+        self.geometry("1280x900")
+        self.minsize(1000, 720)
         self.configure(bg=BG)
         self.on_save = on_save
 
@@ -223,9 +314,18 @@ class AllanWindow(tk.Toplevel):
         self.save_btn.grid(row=1, column=8, padx=4)
         ttk.Button(ctl, text="Close", command=self.destroy).grid(row=1, column=9)
 
+        work = ttk.Frame(self, style="Card.TFrame", padding=(10, 6))
+        work.pack(fill="x", padx=8, pady=(8, 0))
+        self.work_text = tk.StringVar(value="Ready")
+        ttk.Label(work, textvariable=self.work_text,
+                  style="Muted.TLabel", width=42).pack(side="left")
+        self.work_progress = ttk.Progressbar(
+            work, mode="determinate", maximum=100)
+        self.work_progress.pack(side="left", fill="x", expand=True, padx=(8, 0))
+
         # dataset health, above the plots: whether the numbers can be believed
         self.health = ttk.Label(self, text="", style="Muted.TLabel",
-                                justify="left", wraplength=1100)
+                                justify="left", wraplength=1220)
         self.health.pack(fill="x", padx=14, pady=(8, 0))
 
         grid = ttk.Frame(self, style="Card.TFrame", padding=6)
@@ -253,6 +353,11 @@ class AllanWindow(tk.Toplevel):
         self.tbl.column("#0", width=110)
         self.tbl.pack(fill="x")
 
+    def _work_status(self, text, current=0, total=0):
+        self.work_text.set(text)
+        self.work_progress["value"] = (
+            100.0 * current / total if total > 0 else 0.0)
+
     # ---- loading --------------------------------------------------------
 
     def _pick(self):
@@ -273,22 +378,40 @@ class AllanWindow(tk.Toplevel):
         self._load()
 
     def _load(self):
-        if not self.sess_cb.get():
+        if self.busy or not self.sess_cb.get():
             return
         sess = int(self.sess_cb.get().split()[0])
         paths = self.sessions[sess]
-        self.health.config(text=f"loading {len(paths)} part(s)…")
+        load_workers = min(2, len(paths))
+        self._work_status(
+            f"Loading {len(paths)} parts with {load_workers} worker"
+            f"{'s' if load_workers != 1 else ''}…",
+                          0, len(paths))
+        self.series = {}
+        self.results = {}
+        self.summary = {}
+        for plot in self.plots.values():
+            plot.set_data("", "", [])
+        for item in self.tbl.get_children():
+            self.tbl.delete(item)
+        self.health.config(text="Validating framing and timestamps…",
+                           foreground=MUTED)
         self.run_btn.config(state="disabled")
+        self.save_btn.config(state="disabled")
+        self.sess_cb.config(state="disabled")
         self.busy = True
 
         def work():
+            started = time.perf_counter()
             try:
                 s = allan.load_session(
                     paths, progress=lambda i, n, nm:
-                    self.q.put(("progress", f"loading {i+1}/{n}: {nm}")))
-                self.q.put(("loaded", s))
+                    self.q.put(("progress",
+                                (f"Loaded {i+1}/{n}: {nm}", i + 1, n))),
+                    workers=load_workers)
+                self.q.put(("loaded", (s, time.perf_counter() - started)))
             except Exception as exc:                      # noqa: BLE001
-                self.q.put(("error", f"load failed: {exc}"))
+                self.q.put(("error", ("load", f"load failed: {exc}")))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -296,6 +419,8 @@ class AllanWindow(tk.Toplevel):
         """Say whether the dataset is trustworthy before its numbers are."""
         bits = []
         bad = False
+        has_gaps = False
+        has_damage = False
         for name in ("accel0", "gyro0", "accel1", "gyro1"):
             s = self.series.get(name)
             if s is None:
@@ -307,12 +432,24 @@ class AllanWindow(tk.Toplevel):
             if g:
                 frag += f", {g} gap(s) totalling {lost:.1f} s"
                 bad = True
+                has_gaps = True
+            damage = s.resyncs + s.rejected + s.dropped
+            if damage:
+                frag += (f", {damage} damaged record(s) rejected"
+                         f" [{s.resyncs} resync, {s.rejected} framing, "
+                         f"{s.dropped} payload]")
+                bad = True
+                has_damage = True
             bits.append(frag)
         txt = "   |   ".join(bits)
-        if bad:
+        if has_gaps:
             txt += ("\n⚠  gaps break the uniform sampling Allan variance "
                     "assumes, and bias the long-τ end where bias "
                     "instability is read — treat B and K with suspicion.")
+        if has_damage:
+            txt += ("\n⚠  damaged records were excluded before calculation; "
+                    "inspect the sensor/data path even if their fraction is "
+                    "too small to move the Allan curve.")
         # a run too short to reach the curve minimum cannot give a real B
         short = [n for n, s in self.series.items() if s.duration < 1800]
         if short:
@@ -330,16 +467,23 @@ class AllanWindow(tk.Toplevel):
         self.run_btn.config(state="disabled")
         self.save_btn.config(state="disabled")
         head, tail = float(self.head.get()), float(self.tail.get())
+        names = list(self.series)
+        self._work_status(f"Computing {len(names)} sensors with 2 workers…",
+                          0, len(names))
 
         def work():
+            started = time.perf_counter()
             try:
-                out = {}
-                for name, s in self.series.items():
-                    self.q.put(("progress", f"computing {name}…"))
-                    out[name] = allan.analyse(allan.trim(s, head, tail))
-                self.q.put(("done", out))
+                out = allan.analyse_many(
+                    self.series, head, tail, workers=2,
+                    progress=lambda i, n, name:
+                    self.q.put((
+                        "progress",
+                        (f"Computed {name} ({i+1}/{n})", i + 1, n))))
+                self.q.put(("done", (out, time.perf_counter() - started)))
             except Exception as exc:                      # noqa: BLE001
-                self.q.put(("error", f"compute failed: {exc}"))
+                self.q.put(("error", ("compute",
+                                      f"compute failed: {exc}")))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -348,6 +492,7 @@ class AllanWindow(tk.Toplevel):
         for i in self.tbl.get_children():
             self.tbl.delete(i)
         self.summary = {}
+        unmeasured = []
 
         for name in ("accel0", "gyro0", "accel1", "gyro1"):
             res = results.get(name)
@@ -362,14 +507,32 @@ class AllanWindow(tk.Toplevel):
                 d = self.summary[name]["axes"][ax]
                 if s.unit == "rad/s":
                     nq = f"{d['N_deg_sqrt_hr']:.4f} °/√h"
-                    bq = f"{d['B_deg_per_hr']:.2f} °/h"
+                    bq = (f"{d['B_deg_per_hr']:.2f} °/h"
+                          if math.isfinite(r.B) else "not measured")
                 else:
                     nq = f"{d['N_ug_sqrt_hz']:.1f} µg/√Hz"
-                    bq = f"{d['B_ug']:.1f} µg"
+                    bq = (f"{d['B_ug']:.1f} µg"
+                          if math.isfinite(r.B) else "not measured")
+
+                b_si = f"{r.B:.4e}" if math.isfinite(r.B) else "—"
+                k_si = f"{r.K:.4e}" if math.isfinite(r.K) else "—"
+                tau_b = f"{r.tau_B:.1f} s" if math.isfinite(r.tau_B) else "—"
                 self.tbl.insert(parent, "end", text=f"  {ax}",
-                                values=(f"{r.N:.4e}", nq, f"{r.B:.4e}", bq,
-                                        f"{r.K:.4e}", f"{r.tau_B:.1f} s"))
+                                values=(f"{r.N:.4e}", nq, b_si, bq,
+                                        k_si, tau_b))
+                if not math.isfinite(r.B):
+                    unmeasured.append(f"{name}.{ax} B")
+                if not math.isfinite(r.K):
+                    unmeasured.append(f"{name}.{ax} K")
             self.tbl.item(parent, open=True)
+
+        if unmeasured:
+            self.health.config(
+                text=self.health.cget("text") +
+                "\n⚠  not measurable from the available right-hand "
+                "long-τ curve: " + ", ".join(unmeasured),
+                foreground=WARN)
+
         self.save_btn.config(state="normal")
 
     # ---- save -----------------------------------------------------------
@@ -391,7 +554,10 @@ class AllanWindow(tk.Toplevel):
             "diagnostics": {
                 n: {"rate_hz": s.fs, "duration_s": s.duration,
                     "samples": int(s.xyz.shape[1]),
-                    "gaps": [{"at_s": a, "len_s": d} for a, d in s.gaps]}
+                    "gaps": [{"at_s": a, "len_s": d} for a, d in s.gaps],
+                    "resyncs": s.resyncs,
+                    "framing_rejected": s.rejected,
+                    "payload_rejected": s.dropped}
                 for n, s in self.series.items()
             },
         }
@@ -441,22 +607,37 @@ class AllanWindow(tk.Toplevel):
             while True:
                 kind, payload = self.q.get_nowait()
                 if kind == "progress":
-                    self.health.config(text=payload, foreground=MUTED)
+                    text, current, total = payload
+                    self._work_status(text, current, total)
                 elif kind == "loaded":
-                    self.series = payload
+                    self.series, elapsed = payload
                     self.busy = False
                     self._describe()
+                    self._work_status(
+                        f"Ready — {len(self.series)} sensors loaded in "
+                        f"{elapsed:.1f} s", 1, 1)
+                    self.sess_cb.config(state="readonly")
                     self.run_btn.config(
-                        state="normal" if payload else "disabled")
+                        state="normal" if self.series else "disabled")
                 elif kind == "done":
+                    results, elapsed = payload
                     self.busy = False
-                    self._show(payload)
-                    self.run_btn.config(state="normal")
                     self._describe()
-                elif kind == "error":
-                    self.busy = False
+                    self._show(results)
+                    self._work_status(
+                        f"Ready — Allan curves computed in {elapsed:.1f} s",
+                        1, 1)
                     self.run_btn.config(state="normal")
-                    self.health.config(text=payload, foreground="#ff6b81")
+                    self.sess_cb.config(state="readonly")
+                elif kind == "error":
+                    stage, message = payload
+                    self.busy = False
+                    self.run_btn.config(
+                        state="normal"
+                        if stage == "compute" and self.series else "disabled")
+                    self.sess_cb.config(state="readonly")
+                    self._work_status("Failed", 0, 1)
+                    self.health.config(text=message, foreground="#ff6b81")
         except queue.Empty:
             pass
         self.after(80, self._pump)

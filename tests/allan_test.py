@@ -100,6 +100,38 @@ def main() -> int:
     check(np.all(np.diff(tau) > 0), "tau not increasing")
     check(np.all(np.isfinite(adev)), "non-finite adev")
 
+    # ---- large float32 DC must not poison the integrated curve -----------
+    #
+    # A real overnight accelerometer run has ~1 g on one axis. Accumulating
+    # that in float32 before the Allan second difference loses the sensor
+    # noise entirely and creates a false knee. The result must be invariant to
+    # DC and to a float32 input array.
+
+    fs = 1000.0
+    noise = rng.normal(0.0, 0.002, 300_000)
+    with_dc = (noise.astype(np.float32) + np.float32(9.80665))
+    centred = with_dc.astype(np.float64) - np.mean(with_dc, dtype=np.float64)
+    tau_dc, adev_dc = allan.allan_deviation(with_dc, fs, points=60)
+    tau_ref, adev_ref = allan.allan_deviation(centred, fs, points=60)
+    dc_err = float(np.max(np.abs(adev_dc - adev_ref) /
+                          np.maximum(adev_ref, 1e-30)))
+    print(f"float32 DC:   max curve error {dc_err:.3e}")
+    check(np.array_equal(tau_dc, tau_ref), "DC test tau grids differ")
+    check(dc_err < 1e-12, f"float32 DC changes Allan curve by {dc_err:.3e}")
+
+    # A monotonically falling curve has not reached a bias-instability knee.
+    # Its last point is a bound, not a B measurement, and there is no
+    # right-hand branch from which K can be extracted.
+
+    tau_edge = np.logspace(-2, 3, 60)
+    edge = 1e-3 / np.sqrt(tau_edge)
+    r_edge = allan.coefficients(tau_edge, edge)
+    check(math.isfinite(r_edge.N), "edge-minimum curve lost measurable N")
+    check(not math.isfinite(r_edge.B), "edge minimum reported as a B knee")
+    check(not math.isfinite(r_edge.K), "K reported without a right branch")
+    check(not math.isfinite(r_edge.tau_B),
+          "tau_B reported for an unmeasured knee")
+
     # ---- trim removes what it says --------------------------------------
     t = np.arange(0, 100.0, 0.01)
     s = allan.Series("g", "rad/s", t, np.zeros((3, t.size)), fs=100.0)

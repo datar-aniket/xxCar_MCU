@@ -97,7 +97,10 @@ def main() -> int:
           "parts out of order")
 
     # ---- load and join ---------------------------------------------------
-    series = allan.load_session(sessions[7])
+    load_progress = []
+    series = allan.load_session(
+        sessions[7], workers=2,
+        progress=lambda i, n, name: load_progress.append((i, n, name)))
     g = series["gyro0"]
     print(f"  joined {len(sessions[7])} parts -> {g.xyz.shape[1]:,} samples, "
           f"{g.fs:.1f} Hz, {g.duration:.0f} s, {len(g.gaps)} gap(s)")
@@ -105,12 +108,24 @@ def main() -> int:
           f"joined {g.xyz.shape[1]} samples, want {total} - a part was lost")
     check(len(g.gaps) == 0, f"{len(g.gaps)} spurious gap(s) at the part joins")
     check(abs(g.fs - fs) < 1.0, f"rate {g.fs:.1f} != {fs}")
+    check(len(load_progress) == 3,
+          f"parallel loader reported {len(load_progress)} of 3 parts")
+    check({p[2] for p in load_progress} ==
+          {"log_007_00.ulg", "log_007_01.ulg", "log_007_02.ulg"},
+          "parallel loader progress omitted or duplicated a part")
 
     # ---- coefficients survive the join -----------------------------------
-    res = allan.analyse(g)
+    compute_progress = []
+    parallel_results = allan.analyse_many(
+        {"gyro0": g, "accel0": series["accel0"]}, workers=2,
+        progress=lambda i, n, name:
+        compute_progress.append((i, n, name)))
+    res = parallel_results["gyro0"]
     err = abs(res[0].N - want_N) / want_N
     print(f"  gyro0 x: N {res[0].N:.4e} want {want_N:.4e} ({err*100:.1f}%)")
     check(err < 0.10, f"N off by {err*100:.1f}% after joining parts")
+    check({p[2] for p in compute_progress} == {"gyro0", "accel0"},
+          "parallel computation progress omitted a sensor")
 
     # ---- trim actually shortens -------------------------------------------
     tr = allan.trim(g, 120.0, 60.0)
@@ -174,10 +189,11 @@ def main() -> int:
     # and the right behaviour is to send the measurable coefficients and leave
     # _RW unset - not to send a NaN and rely on the board refusing it, which
     # would leave the operator believing it had been saved.
-    measurable = {"IMU0_ACC_ND", "IMU0_ACC_BI",
-                  "IMU0_GYR_ND", "IMU0_GYR_BI"}
+    measurable = {"IMU0_ACC_ND", "IMU0_GYR_ND"}
     check(measurable <= set(saved),
           f"measurable params missing: {sorted(measurable - set(saved))}")
+    check("IMU0_GYR_BI" not in saved,
+          "bias instability was sent without a measured knee")
     check("IMU0_GYR_RW" not in saved,
           "an unmeasurable rate random walk was sent anyway")
     check(all(math.isfinite(v) for v in saved.values()),

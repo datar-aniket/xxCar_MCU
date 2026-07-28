@@ -24,6 +24,7 @@ from __future__ import annotations
 import math
 import re
 import struct
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -106,6 +107,19 @@ _KNOWN_TYPES = set(b"BFAILMPQSORDT")
 
 # A record is 2 bytes of msg_id plus the 24-byte accel/gyro payload.
 _REC_LEN = 26
+_WIRE_REC_SIZE = 29
+
+# Fixed wire layout of the logger's data-only region:
+#   uint16 len, uint8 type, uint16 msg_id, uint64 timestamp, float[4].
+#
+# Numpy can validate and separate millions of these records in C. Damaged or
+# non-standard streams fall back to the bytewise resynchronising parser below.
+_WIRE_DTYPE = np.dtype({
+    "names": ("length", "type", "msg_id", "timestamp", "values"),
+    "formats": ("<u2", "u1", "<u2", "<u8", ("<f4", 4)),
+    "offsets": (0, 2, 3, 5, 13),
+    "itemsize": _WIRE_REC_SIZE,
+})
 
 # No real sample steps backwards, and none leaps an hour. Both are cheap to
 # check and are what stops a resync locking onto plausible-looking garbage.
@@ -127,8 +141,8 @@ def read_ulg(path, progress=None):
     every 'D' among them must carry a msg_id the file's own subscription list
     declared, and its timestamp must move forwards by a sane amount.
 
-    Returns (subs, data, resyncs, rejected), where data maps msg_id ->
-    (timestamps_us, raw payload bytes).
+    Returns (subs, data, resyncs, rejected), where data maps msg_id to
+    (timestamps_us, xyz, temperature).
     """
     b = Path(path).read_bytes()
     n = len(b)
@@ -151,6 +165,49 @@ def read_ulg(path, progress=None):
         off += 3 + ln
 
     valid = set(subs)
+
+    # Fast path for files produced by this logger. After the definitions and
+    # subscriptions, every message is a fixed 29-byte data record. The old
+    # Python loop took minutes over an overnight session's ~108 million
+    # records. This vectorised validation and split produces the same arrays
+    # in seconds. Any framing or timestamp anomaly declines the fast path and
+    # is handled by the proven recovery parser below.
+
+    remaining = n - off
+    if valid and remaining > 0 and remaining % _WIRE_REC_SIZE == 0:
+        records = np.frombuffer(b, dtype=_WIRE_DTYPE, offset=off)
+        framing_ok = (
+            np.all(records["length"] == _REC_LEN) and
+            np.all(records["type"] == ord("D")) and
+            np.all(np.isin(records["msg_id"], tuple(valid)))
+        )
+
+        if framing_ok:
+            fast_data = {}
+            timestamps_ok = True
+            for m in valid:
+                select = records["msg_id"] == m
+                timestamps = np.ascontiguousarray(
+                    records["timestamp"][select], dtype=np.int64)
+                if timestamps.size == 0:
+                    continue
+                delta = np.diff(timestamps)
+                if np.any(delta <= 0) or np.any(delta >= _MAX_STEP_US):
+                    timestamps_ok = False
+                    break
+                values = np.ascontiguousarray(
+                    records["values"][select], dtype=np.float32)
+                fast_data[m] = (
+                    timestamps,
+                    np.ascontiguousarray(values[:, :3].T,
+                                         dtype=np.float32),
+                    np.ascontiguousarray(values[:, 3],
+                                         dtype=np.float32),
+                )
+
+            if timestamps_ok:
+                return subs, fast_data, 0, 0
+
     ts_out = {m: [] for m in valid}
     pay_out = {m: [] for m in valid}
     last: dict[int, int] = {}
@@ -203,14 +260,18 @@ def read_ulg(path, progress=None):
     data = {}
     for m in valid:
         if ts_out[m]:
-            xyz = np.frombuffer(b"".join(pay_out[m]),
-                                dtype="<f4").reshape(-1, 4)[:, :3]
+            values = np.frombuffer(b"".join(pay_out[m]),
+                                   dtype="<f4").reshape(-1, 4)
             data[m] = (np.asarray(ts_out[m], dtype=np.int64),
-                       np.ascontiguousarray(xyz.T, dtype=np.float32))
+                       np.ascontiguousarray(values[:, :3].T,
+                                            dtype=np.float32),
+                       np.ascontiguousarray(values[:, 3],
+                                            dtype=np.float32))
     return subs, data, resyncs, rejected
 
 
-def load_session(paths, progress=None, channels=None) -> dict[str, Series]:
+def load_session(paths, progress=None, channels=None,
+                 workers: int = 2) -> dict[str, Series]:
     """Concatenate every part of a session into one Series per channel.
 
     Timestamps are the sensor's own, in microseconds since boot, so they run
@@ -219,6 +280,10 @@ def load_session(paths, progress=None, channels=None) -> dict[str, Series]:
     `channels` restricts what is kept. A full-rate overnight run is tens of
     millions of samples per axis, and holding all four sensors at once costs
     over a gigabyte; the caller can work one sensor at a time instead.
+
+    `workers` is deliberately bounded by the caller (the GUI uses two).
+    Parallel part reads improve disk/numpy throughput, but each in-flight
+    100 MB rollover part temporarily owns its decoded arrays.
     """
     wanted = {name: (topic, mid, unit, fsr)
               for name, topic, mid, unit, fsr in CHANNELS
@@ -227,19 +292,43 @@ def load_session(paths, progress=None, channels=None) -> dict[str, Series]:
     resyncs: dict[str, int] = {name: 0 for name in wanted}
     rejects: dict[str, int] = {name: 0 for name in wanted}
 
-    for i, path in enumerate(paths):
-        if progress:
-            progress(i, len(paths), Path(path).name)
-        subs, data, nres, nrej = read_ulg(path)
+    paths = list(paths)
+
+    def consume(part_index, result):
+        subs, data, nres, nrej = result
         by_key = {(nm, mid): m for m, (nm, mid) in subs.items()}
         for name, (topic, mid, _unit, _fsr) in wanted.items():
             m = by_key.get((topic, mid))
             if m is None or m not in data:
                 continue
-            t, xyz = data[m]
-            raw[name].append((t.astype(np.float64), xyz))
+            t, xyz, temperature = data[m]
+            raw[name].append((part_index, t.astype(np.float64), xyz,
+                              temperature))
             resyncs[name] += nres
             rejects[name] += nrej
+
+    # Two readers overlap filesystem I/O and numpy's C-level validation while
+    # bounding the extra memory to two rollover parts. More workers are faster
+    # only on paper: each 100 MB part expands into several large sensor arrays.
+
+    worker_count = max(1, min(int(workers), len(paths))) if paths else 1
+    if worker_count == 1:
+        for i, path in enumerate(paths):
+            consume(i, read_ulg(path))
+            if progress:
+                progress(i, len(paths), Path(path).name)
+    else:
+        completed = 0
+        with ThreadPoolExecutor(max_workers=worker_count,
+                                thread_name_prefix="ulg-load") as pool:
+            pending = {pool.submit(read_ulg, path): (i, Path(path))
+                       for i, path in enumerate(paths)}
+            for future in as_completed(pending):
+                part_index, path = pending[future]
+                consume(part_index, future.result())
+                if progress:
+                    progress(completed, len(paths), path.name)
+                completed += 1
 
     out: dict[str, Series] = {}
     dropped: dict[str, int] = {}
@@ -247,24 +336,54 @@ def load_session(paths, progress=None, channels=None) -> dict[str, Series]:
         chunks = raw[name]
         if not chunks:
             continue
-        t = np.concatenate([c[0] for c in chunks])
-        xyz = np.hstack([c[1] for c in chunks])
-
-        order = np.argsort(t, kind="stable")
-        t, xyz = t[order], xyz[:, order]
+        chunks.sort(key=lambda c: c[0])
+        t = np.concatenate([c[1] for c in chunks])
+        xyz = np.hstack([c[2] for c in chunks])
+        temperature = np.concatenate([c[3] for c in chunks])
 
         # Drop samples that cannot be real. Removing them rather than clamping
         # matters: a clamped 1e38 becomes a full-scale reading, which is still
         # a large excursion the variance would happily believe in.
-        good = np.all(np.isfinite(xyz) & (np.abs(xyz) <= fsr), axis=0)
+        good = (np.all(np.isfinite(xyz) & (np.abs(xyz) <= fsr), axis=0) &
+                np.isfinite(temperature) &
+                (temperature >= -80.0) & (temperature <= 150.0))
+
+        # Payload corruption can remain numerically inside the sensor's full
+        # scale. In the overnight run one ICM gyro record decoded as a
+        # plausible 2.36 rad/s, but its temperature fell from 35 C to 1e-30
+        # for exactly one millisecond because the payload bytes were shifted.
+        # A die cannot make and undo a multi-degree step in one sample. Reject
+        # only that unambiguous one-sample pattern; a real temperature step
+        # persists and is deliberately retained.
+
+        if temperature.size >= 3:
+            jump_before = np.abs(temperature[1:-1] - temperature[:-2])
+            jump_after = np.abs(temperature[1:-1] - temperature[2:])
+            neighbors = np.abs(temperature[:-2] - temperature[2:])
+            isolated_temp = ((jump_before > 5.0) & (jump_after > 5.0) &
+                             (neighbors < 1.0))
+            good[1:-1] &= ~isolated_temp
+
         dropped[name] = int((~good).sum())
         if dropped[name]:
             t, xyz = t[good], xyz[:, good]
 
         t_s = (t - t[0]) / 1e6
         dt = np.diff(t_s)
-        good = dt[dt > 0]
-        fs = float(1.0 / np.median(good)) if good.size else 0.0
+
+        # The logger selects the first physical sample after each ideal output
+        # deadline. With an asynchronous sensor clock this produces two or
+        # more quantised interval lengths. Their median is one of those source
+        # intervals, not the delivered sample rate: a true 1000 Hz overnight
+        # log was consequently reported as 998--1022.5 Hz depending on sensor.
+        #
+        # Allan variance treats the accepted series as uniformly sampled, so
+        # use its actual sample count over elapsed time. Gaps are diagnosed
+        # separately below and make the long-tau result suspect regardless of
+        # which rate estimator is used.
+
+        duration = float(t_s[-1] - t_s[0]) if t_s.size > 1 else 0.0
+        fs = float((t_s.size - 1) / duration) if duration > 0 else 0.0
 
         # A gap is anything beyond five nominal sample intervals. Gaps matter
         # more than their size suggests: Allan variance assumes uniform
@@ -312,7 +431,18 @@ def allan_deviation(x: np.ndarray, fs: float, points: int = 100):
     """
     n = x.size
     dt = 1.0 / fs
-    theta = np.cumsum(x) * dt                       # integrate to angle/velocity
+
+    # Sensor topics are float32. Integrating 27 million samples without first
+    # promoting and removing DC made cumsum lose low bits: gravity accumulated
+    # to about 2.6e8 on accelerometer Z, then the second difference subtracted
+    # three nearly equal low-precision values. The resulting numerical noise
+    # invented a false Allan knee and coefficients thousands of times too
+    # large. A constant is analytically cancelled by the second difference, so
+    # remove it explicitly and integrate in float64.
+
+    rate = np.asarray(x, dtype=np.float64)
+    rate = rate - np.mean(rate, dtype=np.float64)
+    theta = np.cumsum(rate, dtype=np.float64) * dt  # angle/velocity
 
     max_m = (n - 1) // 3                            # need N > 2m to average at all
     if max_m < 2:
@@ -357,17 +487,29 @@ def coefficients(tau: np.ndarray, adev: np.ndarray) -> Result:
         return Result(nan, nan, nan, nan, tau, adev)
 
     imin = int(np.argmin(adev))
-    tau_B = float(tau[imin])
-    B = float(adev[imin] / 0.664)
+    min_tau = float(tau[imin])
+
+    # A lowest point at the right edge is not a measured bias-instability
+    # knee; it only says the sensor remained on its falling/flat branch for
+    # the duration of this run. Require at least a factor of two in tau and
+    # three evaluated points after the minimum before reporting B. The same
+    # right-hand coverage is independently sufficient to fit K even for a
+    # pure random walk whose minimum is the first point.
+
+    right = tau >= min_tau * 2.0
+    right_measured = np.count_nonzero(right) >= 3
+    knee_measured = imin > 0 and right_measured
+    tau_B = min_tau if knee_measured else float("nan")
+    B = float(adev[imin] / 0.664) if knee_measured else float("nan")
 
     # White noise lives left of the minimum; use the decade below it, bounded
     # away from the very shortest taus where filtering rolls the curve off.
-    hi_n = max(tau[0] * 2.0, tau_B / 5.0)
+    hi_n = max(tau[0] * 2.0, min_tau / 5.0)
     N = _fit_at(tau, adev, -0.5, 1.0, tau[0], hi_n)
 
     # Rate random walk lives right of the minimum.
-    lo_k = tau_B * 2.0
-    K = _fit_at(tau, adev, 0.5, 3.0, lo_k, tau[-1])
+    K = (_fit_at(tau, adev, 0.5, 3.0, min_tau * 2.0, tau[-1])
+         if right_measured else float("nan"))
 
     return Result(N=N, B=B, K=K, tau_B=tau_B, tau=tau, adev=adev)
 
@@ -376,6 +518,45 @@ def analyse(series: Series, points: int = 100) -> list[Result]:
     """Per-axis coefficients for one sensor."""
     return [coefficients(*allan_deviation(series.xyz[i], series.fs, points))
             for i in range(3)]
+
+
+def analyse_many(series_by_name: dict[str, Series], head_s: float = 0.0,
+                 tail_s: float = 0.0, points: int = 100, workers: int = 2,
+                 progress=None) -> dict[str, list[Result]]:
+    """Trim and analyse independent sensors with bounded parallelism.
+
+    Numpy releases the GIL in the large vector operations used by Allan
+    deviation, so two sensor workers overlap usefully. Keeping the bound at two
+    is important for overnight data: each active worker promotes a float32
+    axis and allocates integration/difference arrays in float64.
+    """
+    names = list(series_by_name)
+    if not names:
+        return {}
+
+    def one(name):
+        return analyse(trim(series_by_name[name], head_s, tail_s), points)
+
+    worker_count = max(1, min(int(workers), len(names)))
+    out = {}
+    if worker_count == 1:
+        for i, name in enumerate(names):
+            out[name] = one(name)
+            if progress:
+                progress(i, len(names), name)
+        return out
+
+    with ThreadPoolExecutor(max_workers=worker_count,
+                            thread_name_prefix="allan-compute") as pool:
+        pending = {pool.submit(one, name): name for name in names}
+        completed = 0
+        for future in as_completed(pending):
+            name = pending[future]
+            out[name] = future.result()
+            if progress:
+                progress(completed, len(names), name)
+            completed += 1
+    return out
 
 
 def summarise(name: str, unit: str, res: list[Result]) -> dict:
