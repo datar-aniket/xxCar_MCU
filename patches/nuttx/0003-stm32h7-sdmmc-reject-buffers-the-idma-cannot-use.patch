@@ -1,0 +1,54 @@
+diff --git a/arch/arm/src/stm32h7/stm32_sdmmc.c b/arch/arm/src/stm32h7/stm32_sdmmc.c
+index f8c252a1..1b353f01 100644
+--- a/arch/arm/src/stm32h7/stm32_sdmmc.c
++++ b/arch/arm/src/stm32h7/stm32_sdmmc.c
+@@ -3092,6 +3092,49 @@ static int stm32_dmapreflight(struct sdio_dev_s *dev,
+     }
+ #endif
+ 
++  /* Neither SDMMC's IDMA can reach the Tightly Coupled Memory: DTCM is
++   * private to the Cortex-M7 (and to MDMA through the CPU's AHBS port), and
++   * is simply not in the address map any other bus master sees.  This is the
++   * same class of restriction as the SRAM123/SRAM4 test above, and NuttX
++   * states it as well - "DMA transfers to/from DTCM are limited" in
++   * stm32_allocateheap.c.
++   *
++   * It is reachable here because DTCM is part of the general heap unless
++   * CONFIG_STM32H7_DTCMEXCLUDE is set, so an ordinary malloc() can hand a
++   * caller a buffer at 0x2000xxxx and FAT can then choose it for a direct
++   * multi-sector transfer.
++   *
++   * Test for overlap rather than containment: a buffer that merely straddles
++   * the boundary is just as unreachable, and the SRAM123/SRAM4 test above
++   * (upstream) would let that case through.
++   */
++
++  if ((uintptr_t)buffer < DTCM_END &&
++      (uintptr_t)buffer + buflen > DTCM_START)
++    {
++      mcerr("IDMA cannot access DTCM "
++            "buffer:0x%08" PRIxPTR " end:0x%08" PRIxPTR "\n",
++            (uintptr_t)buffer, (uintptr_t)(buffer + buflen - 1));
++      return -EFAULT;
++    }
++
++  /* The IDMA base-address register requires a 32-bit-aligned address,
++   * independently of the D-cache mode.  The cache-alignment check below is
++   * compiled out for write-through cache, which previously allowed FAT to
++   * start a direct multi-sector write at an address ending in 1, 2, or 3.
++   * IDMA discards those low address bits, duplicating or losing that many
++   * bytes at the sector boundary without reporting a transfer error.
++   *
++   * Return -EFAULT so callers such as FAT with CONFIG_FAT_DIRECT_RETRY can
++   * repeat the transfer through their aligned DMA sector buffer.
++   */
++
++  if (((uintptr_t)buffer & (sizeof(uint32_t) - 1)) != 0)
++    {
++      mcerr("unaligned IDMA address buffer:%p\n", buffer);
++      return -EFAULT;
++    }
++
+ #if defined(CONFIG_ARMV7M_DCACHE) && !defined(CONFIG_ARMV7M_DCACHE_WRITETHROUGH)
+   /* buffer alignment is required for DMA transfers with dcache in buffered
+    * mode (not write-through) because a) arch_invalidate_dcache could lose
