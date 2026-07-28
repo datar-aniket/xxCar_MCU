@@ -32,7 +32,19 @@
  ****************************************************************************/
 
 #define PARAM_NAME_MAX   16
-#define PARAM_FILE       "/fs/microsd/params.txt"
+
+/* The live file, and the staging file param_save() commits through.
+ *
+ * Overridable so the host test can point them at a temp directory; the board
+ * always uses the microSD paths below.
+ */
+
+#ifndef PARAM_FILE
+#  define PARAM_FILE     "/fs/microsd/params.txt"
+#endif
+#ifndef PARAM_TMPFILE
+#  define PARAM_TMPFILE  "/fs/microsd/params.tmp"
+#endif
 
 /* Serial port function (SER_*_FUNC). Which physical port runs NSH is just a
  * parameter like any other.

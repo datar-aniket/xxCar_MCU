@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <math.h>
@@ -421,7 +422,27 @@ int param_load(void)
   fp = fopen(PARAM_FILE, "r");
   if (fp == NULL)
     {
-      return -ENOENT;          /* no file yet: defaults are in effect */
+      /* Nothing under the live name. Either this is a fresh card, or power was
+       * lost inside param_save()'s unlink/rename commit window. Tell those
+       * apart by looking for the staging file: it exists only after fsync()
+       * succeeded, so if it is here it is a complete set of values and it is
+       * NEWER than whatever used to be at PARAM_FILE. Adopt it.
+       */
+
+      if (rename(PARAM_TMPFILE, PARAM_FILE) != 0)
+        {
+          return -ENOENT;      /* no file yet: defaults are in effect */
+        }
+
+      fp = fopen(PARAM_FILE, "r");
+      if (fp == NULL)
+        {
+          return -ENOENT;
+        }
+
+      syslog(LOG_WARNING,
+             "[param] recovered %s from %s - a save was interrupted\n",
+             PARAM_FILE, PARAM_TMPFILE);
     }
 
   while (fgets(line, sizeof(line), fp) != NULL)
@@ -500,25 +521,31 @@ int param_load(void)
   return loaded;
 }
 
-int param_save(void)
+/* Emit the whole file into an already-open stream.
+ *
+ * Returns the number of parameters written, or a negated errno. Every
+ * fprintf() result is checked: on a full card the first failing write is the
+ * only warning there will be, and a save that ignores it reports success over
+ * a truncated file.
+ */
+
+static int param_write_body(FAR FILE *fp, FAR size_t *bytes)
 {
-  FAR FILE *fp;
-  int i;
   int written = 0;
+  int total = 0;
+  int n;
+  int i;
 
-  param_ensure_init();
-
-  fp = fopen(PARAM_FILE, "w");
-  if (fp == NULL)
+  n = fprintf(fp,
+              "# xxCar parameters\n"
+              "# Edit and save, then run 'param load' or reboot.\n"
+              "# Only values that differ from the default are listed.\n");
+  if (n < 0)
     {
-      /* No card, or it is currently exported to the USB host */
-
-      return -errno;
+      return -EIO;
     }
 
-  fprintf(fp, "# xxCar parameters\n");
-  fprintf(fp, "# Edit and save, then run 'param load' or reboot.\n");
-  fprintf(fp, "# Only values that differ from the default are listed.\n");
+  total += n;
 
   for (i = 0; i < PARAM_COUNT; i++)
     {
@@ -529,18 +556,127 @@ int param_save(void)
 
       if (g_params[i].type == PARAM_TYPE_INT32)
         {
-          fprintf(fp, "%s %" PRId32 "\n", g_params[i].name, g_values[i].i);
+          n = fprintf(fp, "%s %" PRId32 "\n",
+                      g_params[i].name, g_values[i].i);
         }
       else
         {
-          fprintf(fp, "%s %.6f\n", g_params[i].name, (double)g_values[i].f);
+          n = fprintf(fp, "%s %.6f\n",
+                      g_params[i].name, (double)g_values[i].f);
         }
 
+      if (n < 0)
+        {
+          return -EIO;
+        }
+
+      total += n;
       written++;
     }
 
-  fclose(fp);
-  syslog(LOG_INFO, "[param] saved %d changed to %s\n", written, PARAM_FILE);
+  *bytes = (size_t)total;
+  return written;
+}
+
+/* Save every modified parameter, or leave the previous file exactly as it was.
+ *
+ * The old version opened PARAM_FILE with "w". That truncates the live file
+ * before a single new byte is known to be storable, ignored every fprintf()
+ * result, never flushed, and returned a count of parameters VISITED. A full
+ * card, a pulled card, or the card being exported over USB mid-write therefore
+ * produced an empty or half-written params.txt while calibration reported that
+ * it had saved - the operator's only copy of a calibration destroyed by the act
+ * of storing it.
+ *
+ * So: build the new contents in PARAM_TMPFILE, prove every write landed and is
+ * on the medium, and only then replace the live file.
+ *
+ * NuttX's FAT has no atomic replace - fat_rename() returns -EEXIST rather than
+ * overwriting (fs/fat/fs_fat32.c) - so the commit is unlink-then-rename, and
+ * there is a window where neither name is params.txt. That window is covered by
+ * param_load() below, which adopts a leftover PARAM_TMPFILE. It is a complete
+ * file by construction: it is only ever renamed after fsync() succeeded.
+ */
+
+int param_save(void)
+{
+  FAR FILE *fp;
+  size_t bytes = 0;
+  int written;
+  int err;
+
+  param_ensure_init();
+
+  fp = fopen(PARAM_TMPFILE, "w");
+  if (fp == NULL)
+    {
+      /* No card, or it is currently exported to the USB host */
+
+      return -errno;
+    }
+
+  written = param_write_body(fp, &bytes);
+
+  if (written >= 0 && fflush(fp) != 0)
+    {
+      written = -EIO;
+    }
+
+  /* fflush() only empties the stdio buffer into the file. fsync() is what puts
+   * it on the card, and it is the call that reports a write the FAT layer
+   * could not complete.
+   */
+
+  if (written >= 0 && fsync(fileno(fp)) != 0)
+    {
+      written = -errno;
+    }
+
+  /* A close can fail with data still unwritten, so its result matters as much
+   * as any other. Take it before deciding the file is good.
+   */
+
+  if (fclose(fp) != 0 && written >= 0)
+    {
+      written = -EIO;
+    }
+
+  if (written < 0)
+    {
+      err = written;
+      unlink(PARAM_TMPFILE);
+      syslog(LOG_ERR, "[param] save failed: %d; %s is unchanged\n",
+             err, PARAM_FILE);
+      return err;
+    }
+
+  /* Commit. ENOENT from the unlink just means there was nothing to replace. */
+
+  if (unlink(PARAM_FILE) != 0 && errno != ENOENT)
+    {
+      err = -errno;
+      unlink(PARAM_TMPFILE);
+      syslog(LOG_ERR, "[param] could not replace %s: %d\n", PARAM_FILE, err);
+      return err;
+    }
+
+  if (rename(PARAM_TMPFILE, PARAM_FILE) != 0)
+    {
+      err = -errno;
+
+      /* Deliberately keep PARAM_TMPFILE: it holds the only copy of the new
+       * values, and param_load() will adopt it on the next boot.
+       */
+
+      syslog(LOG_ERR,
+             "[param] wrote %s but could not rename it to %s: %d - "
+             "the values are safe, run 'param save' again\n",
+             PARAM_TMPFILE, PARAM_FILE, err);
+      return err;
+    }
+
+  syslog(LOG_INFO, "[param] saved %d changed (%zu bytes) to %s\n",
+         written, bytes, PARAM_FILE);
   return written;
 }
 
