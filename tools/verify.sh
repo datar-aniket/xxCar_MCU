@@ -65,7 +65,8 @@ rm -f "$STAMP"
 echo "=== symbols ==="
 NM="$(mktemp)"
 arm-none-eabi-nm deps/nuttx/nuttx >"$NM" 2>/dev/null || true
-for sym in cal_session cal_main param_init serial_manager_start; do
+for sym in cal_session cal_main param_init serial_manager_start \
+           sensors_start rotation_apply g_orb_vehicle_acceleration; do
   if grep -qE "^[0-9a-f]+ T $sym\$" "$NM"; then
     printf '  %-22s linked\n' "$sym"
   else

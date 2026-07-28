@@ -130,6 +130,50 @@ static const struct param_def_s g_params[] =
   { "SENS_BARO_RATE", PARAM_TYPE_INT32, I32(10),   I32(1),  I32(50),
     "Barometer rate (Hz)" },
 
+  /* ---- Sensor orientation ------------------------------------------------
+   *
+   * Values are PX4's enum Rotation, so a number copied from a PX4 config means
+   * the same thing here. Only the 90-degree multiples are implemented - those
+   * are exact axis permutations - and the 45-degree entries are REFUSED rather
+   * than approximated. PARAM_RANGE_ENUM matters more here than almost anywhere:
+   * clamping rotation 17 to 16 would not be "nearly right", it would silently
+   * mount the sensor on a different face.
+   *
+   * Body frame = SENS_BOARD_ROT applied after SENS_IMUn_ROT. Splitting them is
+   * what stops a change of vehicle mounting from having to be re-derived for
+   * each IMU separately:
+   *
+   *   SENS_IMUn_ROT    where sensor n sits relative to the BOARD - a property
+   *                    of the Pixhawk 6C, not of the vehicle
+   *   SENS_BOARD_ROT   how the board is bolted into the vehicle
+   *
+   * IMU1 defaults to yaw 90 because that is what the hardware measures.
+   * docs/imu-timestamp-audit-2026-07-26.md got, from motion correlation at
+   * 0.999 across all three axes, ICM x = -BMI y, ICM y = BMI x, ICM z = BMI z -
+   * exactly ROTATION_YAW_90 applied to the BMI. Confirm it after any change by
+   * rotating the board and checking the two corrected streams agree; if they
+   * only agree with a 90-degree swap still in them, this default is wrong.
+   */
+
+  { "SENS_BOARD_ROT", PARAM_TYPE_INT32, I32(0), I32(0), I32(37),
+    "Board mounting rotation (PX4 enum Rotation; 45s unsupported)",
+    PARAM_RANGE_ENUM },
+  { "SENS_IMU0_ROT",  PARAM_TYPE_INT32, I32(0), I32(0), I32(37),
+    "IMU0 (ICM-42688) rotation relative to the board", PARAM_RANGE_ENUM },
+  { "SENS_IMU1_ROT",  PARAM_TYPE_INT32, I32(2), I32(0), I32(37),
+    "IMU1 (BMI055) rotation relative to the board (2 = yaw 90, measured)",
+    PARAM_RANGE_ENUM },
+
+  /* Which IMU feeds vehicle_acceleration / vehicle_angular_velocity. There is
+   * no voting: with two sensors a disagreement cannot be resolved by majority,
+   * and picking one deliberately is more honest than averaging two that may
+   * not agree.
+   */
+
+  { "SENS_IMU_SEL",   PARAM_TYPE_INT32, I32(0), I32(0), I32(1),
+    "IMU feeding the corrected topics (0 = ICM-42688, 1 = BMI055)",
+    PARAM_RANGE_ENUM },
+
   /* ---- Logging (on request only; these choose WHAT gets logged) ---------- */
 
   { "LOG_ENABLE", PARAM_TYPE_INT32, I32(0), I32(0), I32(1),

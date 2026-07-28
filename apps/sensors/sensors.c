@@ -1,0 +1,557 @@
+/****************************************************************************
+ * apps/sensors/sensors.c
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * See sensors.h.
+ ****************************************************************************/
+
+#include <nuttx/config.h>
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdbool.h>
+#include <unistd.h>
+#include <errno.h>
+#include <poll.h>
+#include <sched.h>
+#include <pthread.h>
+#include <syslog.h>
+#include <time.h>
+
+#include <uORB/uORB.h>
+#include <nuttx/uorb.h>
+
+#include "sensors.h"
+#include "rotation.h"
+#include "../param/param.h"
+#include "../uorb_msgs/uorb_msgs.h"
+
+/****************************************************************************
+ * Pre-processor Definitions
+ ****************************************************************************/
+
+#define SENSORS_STACK  2048
+
+/* Above the logger, mavlink, rc and px4io, below the sensor drivers.
+ *
+ * This task sits between the drivers and everything that will consume an
+ * attitude estimate, so a lower priority would simply move the delay the
+ * driver priority fix removed one step downstream. It stays below
+ * FMUV6C_SENSOR_PRIO (150) because a driver that cannot drain its hardware
+ * FIFO loses samples outright, and no amount of promptness here recovers that.
+ *
+ *   224  HPWORK
+ *   150  sensor drivers
+ *   120  sensors        <- this
+ *   110  px4io
+ *   105  rc
+ *   104  mavlink
+ *   102  logger
+ *   100  NSH, LPWORK
+ */
+
+#define SENSORS_PRIO   (SCHED_PRIORITY_DEFAULT + 20)
+
+/* One poll wakeup can stand for several queued samples at 2 kHz. Bounded so a
+ * single topic cannot monopolise the loop if its producer runs concurrently -
+ * the same reasoning as the logger's drain bound.
+ */
+
+#define SENSORS_DRAIN_MAX  64
+
+/****************************************************************************
+ * Private Types
+ ****************************************************************************/
+
+/* A rotation reduced to what it does per axis: out[i] = sgn[i]*in[idx[i]].
+ *
+ * Composing the sensor and board rotations once at start, into this, keeps the
+ * per-sample cost to three loads and three sign flips - and, more usefully,
+ * makes the composed result something that can be named and printed rather
+ * than two switch statements whose combined effect nobody can read off.
+ */
+
+struct axis_map_s
+{
+  int8_t idx[3];
+  int8_t sgn[3];
+};
+
+/****************************************************************************
+ * Private Data
+ ****************************************************************************/
+
+static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+static volatile bool   g_running;
+static volatile bool   g_should_stop;
+static struct sensors_status_s g_status;
+
+/****************************************************************************
+ * Private Functions
+ ****************************************************************************/
+
+static uint64_t sensors_now_us(void)
+{
+  struct timespec ts;
+
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)(ts.tv_nsec / 1000);
+}
+
+/* Reduce a rotation to its per-axis form by rotating the basis vectors.
+ * Returns false if the rotation is one this build cannot perform exactly.
+ */
+
+static bool map_of_rotation(uint8_t rot, FAR struct axis_map_s *m)
+{
+  int j;
+
+  memset(m, 0, sizeof(*m));
+
+  for (j = 0; j < 3; j++)
+    {
+      float v[3] =
+      {
+        0.0f, 0.0f, 0.0f
+      };
+
+      int i;
+
+      v[j] = 1.0f;
+
+      if (!rotation_apply(rot, v))
+        {
+          return false;
+        }
+
+      for (i = 0; i < 3; i++)
+        {
+          if (v[i] != 0.0f)
+            {
+              m->idx[i] = (int8_t)j;
+              m->sgn[i] = v[i] > 0.0f ? 1 : -1;
+            }
+        }
+    }
+
+  return true;
+}
+
+static void map_apply(FAR const struct axis_map_s *m, FAR float v[3])
+{
+  float in[3];
+
+  in[0] = v[0];
+  in[1] = v[1];
+  in[2] = v[2];
+
+  v[0] = m->sgn[0] * in[m->idx[0]];
+  v[1] = m->sgn[1] * in[m->idx[1]];
+  v[2] = m->sgn[2] * in[m->idx[2]];
+}
+
+/* Compose sensor-then-board into one map, and find the enum value that names
+ * the result.
+ *
+ * The 24 axis permutations are a group, so a composition of two supported
+ * rotations is always another supported rotation - the search cannot fail
+ * unless the table itself is wrong, which is worth finding out at start rather
+ * than never. `named` is for the status line; the map is what does the work.
+ */
+
+static bool compose_rotations(uint8_t sensor_rot, uint8_t board_rot,
+                              FAR struct axis_map_s *m, FAR uint8_t *named)
+{
+  struct axis_map_s s;
+  struct axis_map_s b;
+  int rot;
+  int i;
+
+  if (!map_of_rotation(sensor_rot, &s) || !map_of_rotation(board_rot, &b))
+    {
+      return false;
+    }
+
+  /* board(sensor(v)): the sensor's rotation first, because the calibration and
+   * the sensor rotation both live in the chip's frame.
+   */
+
+  for (i = 0; i < 3; i++)
+    {
+      m->idx[i] = s.idx[b.idx[i]];
+      m->sgn[i] = (int8_t)(b.sgn[i] * s.sgn[b.idx[i]]);
+    }
+
+  *named = 0xff;
+
+  for (rot = 0; rot < ROTATION_MAX_SUPPORTED; rot++)
+    {
+      struct axis_map_s c;
+
+      if (map_of_rotation((uint8_t)rot, &c) &&
+          memcmp(&c, m, sizeof(c)) == 0)
+        {
+          *named = (uint8_t)rot;
+          break;
+        }
+    }
+
+  return true;
+}
+
+/* Read one calibration set. `have` says whether it was ever measured; when it
+ * was not, the identity is loaded so the pipeline still runs and the published
+ * message says calibrated=0 rather than going silent.
+ */
+
+static void load_cal(FAR const char *pfx, bool is_accel, FAR float off[3],
+                     FAR float scl[3], FAR bool *have)
+{
+  const char axis[3] =
+  {
+    'X', 'Y', 'Z'
+  };
+
+  char name[PARAM_NAME_MAX + 1];
+  int k;
+
+  for (k = 0; k < 3; k++)
+    {
+      off[k] = 0.0f;
+      scl[k] = 1.0f;
+    }
+
+  snprintf(name, sizeof(name), "%s_OK", pfx);
+  *have = param_i32(name) == 1;
+
+  if (!*have)
+    {
+      return;
+    }
+
+  for (k = 0; k < 3; k++)
+    {
+      snprintf(name, sizeof(name), "%s_%cOFF", pfx, axis[k]);
+      off[k] = param_f32(name);
+
+      if (is_accel)
+        {
+          snprintf(name, sizeof(name), "%s_%cSCL", pfx, axis[k]);
+          scl[k] = param_f32(name);
+        }
+    }
+}
+
+static int sensors_daemon(int argc, FAR char *argv[])
+{
+  struct axis_map_s amap;
+  struct axis_map_s gmap;
+  struct pollfd pfd[2];
+  struct sensor_accel araw;
+  struct sensor_gyro graw;
+  struct vehicle_acceleration_s aout;
+  struct vehicle_angular_velocity_s gout;
+  FAR const struct orb_metadata *ameta;
+  FAR const struct orb_metadata *gmeta;
+  float aoff[3];
+  float ascl[3];
+  float goff[3];
+  float gscl[3];
+  bool  acal;
+  bool  gcal;
+  uint8_t anamed;
+  uint8_t gnamed;
+  uint8_t board_rot;
+  uint8_t sensor_rot;
+  int32_t sel;
+  int asub = -1;
+  int gsub = -1;
+  int apub = -1;
+  int gpub = -1;
+
+  sel = param_i32("SENS_IMU_SEL");
+  if (sel < 0 || sel > 1)
+    {
+      sel = 0;
+    }
+
+  board_rot  = (uint8_t)param_i32("SENS_BOARD_ROT");
+  sensor_rot = (uint8_t)param_i32(sel == 0 ? "SENS_IMU0_ROT"
+                                           : "SENS_IMU1_ROT");
+
+  /* Refuse to run rather than publish data in an unknown frame. A rotation
+   * this build cannot perform is not "close to none" - the parameter says the
+   * sensor is mounted somewhere the code cannot express, and quietly using the
+   * identity would label sensor-frame data as body-frame.
+   */
+
+  if (!rotation_supported(board_rot) || !rotation_supported(sensor_rot))
+    {
+      syslog(LOG_ERR,
+             "[sensors] unsupported rotation: SENS_BOARD_ROT=%u "
+             "SENS_IMU%d_ROT=%u (45-degree rotations are not implemented)\n",
+             board_rot, (int)sel, sensor_rot);
+      return EXIT_FAILURE;
+    }
+
+  if (!compose_rotations(sensor_rot, board_rot, &amap, &anamed))
+    {
+      syslog(LOG_ERR, "[sensors] could not compose the rotations\n");
+      return EXIT_FAILURE;
+    }
+
+  /* Both dies sit on the same package, so they share the rotation. Kept as two
+   * maps anyway: the moment a board appears with the gyro mounted differently,
+   * that is a parameter change and not a rewrite.
+   */
+
+  gmap   = amap;
+  gnamed = anamed;
+
+  load_cal(sel == 0 ? "CAL_ACC0" : "CAL_ACC1", true, aoff, ascl, &acal);
+  load_cal(sel == 0 ? "CAL_GYRO0" : "CAL_GYRO1", false, goff, gscl, &gcal);
+
+  ameta = orb_get_meta("sensor_accel");
+  gmeta = orb_get_meta("sensor_gyro");
+
+  if (ameta == NULL || gmeta == NULL)
+    {
+      syslog(LOG_ERR, "[sensors] no sensor_accel/sensor_gyro metadata\n");
+      return EXIT_FAILURE;
+    }
+
+  /* orb_subscribe() is orb_subscribe_multi(meta, 0), and the instance is NOT
+   * carried in the metadata - which is how every consumer on this board ended
+   * up reading IMU0 twice and calling one of them IMU1.
+   */
+
+  asub = orb_subscribe_multi(ameta, (unsigned)sel);
+  gsub = orb_subscribe_multi(gmeta, (unsigned)sel);
+
+  if (asub < 0 || gsub < 0)
+    {
+      syslog(LOG_ERR, "[sensors] cannot subscribe to IMU%d\n", (int)sel);
+      goto out;
+    }
+
+  apub = vehicle_acceleration_advertise();
+  gpub = vehicle_angular_velocity_advertise();
+
+  if (apub < 0 || gpub < 0)
+    {
+      syslog(LOG_ERR, "[sensors] cannot advertise the corrected topics\n");
+      goto out;
+    }
+
+  pthread_mutex_lock(&g_lock);
+  memset(&g_status, 0, sizeof(g_status));
+  g_status.instance         = (uint8_t)sel;
+  g_status.accel_rot        = anamed;
+  g_status.gyro_rot         = gnamed;
+  g_status.accel_calibrated = acal;
+  g_status.gyro_calibrated  = gcal;
+  memcpy(g_status.accel_off, aoff, sizeof(aoff));
+  memcpy(g_status.accel_scl, ascl, sizeof(ascl));
+  memcpy(g_status.gyro_off, goff, sizeof(goff));
+  g_status.running = true;
+  pthread_mutex_unlock(&g_lock);
+
+  syslog(LOG_INFO,
+         "[sensors] IMU%d -> body, rotation %s, accel cal %s, gyro cal %s\n",
+         (int)sel, rotation_name(anamed),
+         acal ? "on" : "NONE (raw passthrough)",
+         gcal ? "on" : "NONE (raw passthrough)");
+
+  pfd[0].fd     = asub;
+  pfd[0].events = POLLIN;
+  pfd[1].fd     = gsub;
+  pfd[1].events = POLLIN;
+
+  g_running = true;
+
+  while (!g_should_stop)
+    {
+      int drained;
+
+      if (poll(pfd, 2, 100) <= 0)
+        {
+          continue;
+        }
+
+      if ((pfd[0].revents & POLLIN) != 0)
+        {
+          drained = 0;
+
+          while (drained++ < SENSORS_DRAIN_MAX &&
+                 orb_copy(ameta, asub, &araw) == 0)
+            {
+              float v[3];
+
+              v[0] = (araw.x - aoff[0]) * ascl[0];
+              v[1] = (araw.y - aoff[1]) * ascl[1];
+              v[2] = (araw.z - aoff[2]) * ascl[2];
+              map_apply(&amap, v);
+
+              memset(&aout, 0, sizeof(aout));
+              aout.timestamp_sample = araw.timestamp;
+              aout.timestamp        = sensors_now_us();
+              aout.x                = v[0];
+              aout.y                = v[1];
+              aout.z                = v[2];
+              aout.instance         = (uint8_t)sel;
+              aout.calibrated       = acal ? 1 : 0;
+
+              if (vehicle_acceleration_publish(apub, &aout) == 0)
+                {
+                  g_status.accel_out++;
+                }
+              else
+                {
+                  g_status.accel_skipped++;
+                }
+            }
+        }
+
+      if ((pfd[1].revents & POLLIN) != 0)
+        {
+          drained = 0;
+
+          while (drained++ < SENSORS_DRAIN_MAX &&
+                 orb_copy(gmeta, gsub, &graw) == 0)
+            {
+              float v[3];
+
+              /* No scale: a gyro's sensitivity cannot be measured without a
+               * rate table, so gscl stays 1.0 and is not applied at all
+               * rather than multiplied by one in the hot loop.
+               */
+
+              v[0] = graw.x - goff[0];
+              v[1] = graw.y - goff[1];
+              v[2] = graw.z - goff[2];
+              map_apply(&gmap, v);
+
+              memset(&gout, 0, sizeof(gout));
+              gout.timestamp_sample = graw.timestamp;
+              gout.timestamp        = sensors_now_us();
+              gout.x                = v[0];
+              gout.y                = v[1];
+              gout.z                = v[2];
+              gout.instance         = (uint8_t)sel;
+              gout.calibrated       = gcal ? 1 : 0;
+
+              if (vehicle_angular_velocity_publish(gpub, &gout) == 0)
+                {
+                  g_status.gyro_out++;
+                }
+              else
+                {
+                  g_status.gyro_skipped++;
+                }
+            }
+        }
+    }
+
+out:
+  if (asub >= 0)
+    {
+      orb_unsubscribe(asub);
+    }
+
+  if (gsub >= 0)
+    {
+      orb_unsubscribe(gsub);
+    }
+
+  if (apub >= 0)
+    {
+      orb_unadvertise(apub);
+    }
+
+  if (gpub >= 0)
+    {
+      orb_unadvertise(gpub);
+    }
+
+  pthread_mutex_lock(&g_lock);
+  g_status.running = false;
+  pthread_mutex_unlock(&g_lock);
+
+  g_running     = false;
+  g_should_stop = false;
+  return EXIT_SUCCESS;
+}
+
+/****************************************************************************
+ * Public Functions
+ ****************************************************************************/
+
+int sensors_start(void)
+{
+  int pid;
+  int spin;
+
+  if (g_running)
+    {
+      return -EALREADY;
+    }
+
+  g_should_stop = false;
+
+  pid = task_create("sensors", SENSORS_PRIO, SENSORS_STACK,
+                    sensors_daemon, NULL);
+  if (pid < 0)
+    {
+      return -errno;
+    }
+
+  /* Report what actually happened. A start that returns OK because a second
+   * elapsed - while the task exited on an unsupported rotation or a failed
+   * subscription - is the logger's old bug, and it is not worth repeating.
+   */
+
+  for (spin = 0; spin < 100; spin++)
+    {
+      if (g_running)
+        {
+          return OK;
+        }
+
+      usleep(10000);
+    }
+
+  return -EIO;
+}
+
+int sensors_stop(void)
+{
+  int spin;
+
+  if (!g_running)
+    {
+      return -ESRCH;
+    }
+
+  g_should_stop = true;
+
+  for (spin = 0; spin < 100; spin++)
+    {
+      if (!g_running)
+        {
+          return OK;
+        }
+
+      usleep(10000);
+    }
+
+  return -ETIMEDOUT;
+}
+
+void sensors_status(FAR struct sensors_status_s *out)
+{
+  pthread_mutex_lock(&g_lock);
+  *out = g_status;
+  pthread_mutex_unlock(&g_lock);
+}

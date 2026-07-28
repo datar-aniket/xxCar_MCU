@@ -1,0 +1,42 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config XXCAR_SENSORS
+	tristate "sensors: corrected, body-frame IMU"
+	default n
+	depends on UORB && SENSORS
+	select XXCAR_PARAM
+	select XXCAR_UORB_MSGS
+	---help---
+		Applies the stored IMU calibration and rotates the result into the
+		vehicle's frame, publishing vehicle_acceleration and
+		vehicle_angular_velocity.
+
+		The raw sensor_accel / sensor_gyro topics are NOT modified. They are
+		what the logger records, and keeping them raw is what allows a
+		calibration to be re-derived from a recording, or checked against one
+		taken before it. Correcting inside the driver would be simpler and
+		would destroy the raw data at the only point it still exists.
+
+		Which IMU feeds the corrected topics is SENS_IMU_SEL. Orientation is
+		SENS_IMU0_ROT / SENS_IMU1_ROT (sensor relative to the board) composed
+		with SENS_BOARD_ROT (board relative to the vehicle), numbered as PX4's
+		enum Rotation.
+
+if XXCAR_SENSORS
+
+config XXCAR_SENSORS_PROGNAME
+	string "Program name"
+	default "sensors"
+
+config XXCAR_SENSORS_PRIORITY
+	int "sensors (command) task priority"
+	default 100
+
+config XXCAR_SENSORS_STACKSIZE
+	int "sensors (command) stack size"
+	default 2048
+
+endif
