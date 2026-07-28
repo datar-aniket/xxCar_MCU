@@ -35,10 +35,11 @@
 #define CAL_DEVPATH  "/dev/ttyACM0"
 
 /* Protocol version, reported in `hello` so a mismatched GUI can say so instead
- * of misbehaving. 2 added batched, integer-encoded sample frames.
+ * of misbehaving. 2 added batched, integer-encoded sample frames; 3 added the
+ * `gyro <sensor>` bias command and the CAL_GYROn_OK flag that goes with it.
  */
 
-#define CAL_PROTO_VERSION 2
+#define CAL_PROTO_VERSION 3
 
 /* Binary sample frame.
  *

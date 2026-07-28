@@ -27,6 +27,7 @@
 
 #include "cal.h"
 #include "cal_accel.h"
+#include "cal_gyro.h"
 #include "../param/param.h"
 #include "../serial/serial.h"
 #include "../uorb_msgs/uorb_msgs.h"
@@ -419,14 +420,16 @@ static void cal_load_apply(int i, bool want, FAR struct cal_apply_s *a)
   pfx      = g_cal_prefix[i];
   is_accel = (g_sensors[i].kind == CAL_KIND_ACCEL);
 
-  if (is_accel)
-    {
-      snprintf(name, sizeof(name), "%s_OK", pfx);
+  /* Both kinds carry a validity flag now. The gyro used to have none, so its
+   * stored offsets were applied whether or not anything had ever measured
+   * them - which was harmless only because nothing ever wrote them.
+   */
 
-      if (param_i32(name) != 1)
-        {
-          return;                /* never calibrated: pass raw through */
-        }
+  snprintf(name, sizeof(name), "%s_OK", pfx);
+
+  if (param_i32(name) != 1)
+    {
+      return;                    /* never calibrated: pass raw through */
     }
 
   for (k = 0; k < 3; k++)
@@ -490,6 +493,48 @@ static int cal_capture_still(int i, int sub, int ms, FAR float mean[3],
 
   cal_stats(buf, n, 3, mean, sd);
   return n;
+}
+
+/* Average a gyro for the whole window rather than for a fixed sample count.
+ *
+ * The accel capture above stops at 200 samples, which at 500 Hz is 0.4 s. That
+ * is ample against gravity, and short for a bias: see the arithmetic in
+ * cal_gyro.h, where 0.4 s leaves ten times more white noise in the estimate
+ * than the bias instability it is trying to measure. Running the clock out
+ * instead needs no buffer, since cal_bias_s keeps sums.
+ *
+ * Returns the sample count, or a negative errno.
+ */
+
+static int cal_capture_bias(int i, int sub, int ms, FAR float mean[3],
+                            FAR float sd[3])
+{
+  struct cal_bias_s acc;
+  uint64_t deadline = cal_now_us() + (uint64_t)ms * 1000;
+
+  cal_bias_reset(&acc);
+
+  while (cal_now_us() < deadline)
+    {
+      float v[CAL_MAX_VALUES];
+      uint32_t t;
+
+      if (cal_read_values(i, sub, v, &t) == OK)
+        {
+          cal_bias_add(&acc, v);
+        }
+      else
+        {
+          usleep(1000);
+        }
+    }
+
+  if (cal_bias_result(&acc, mean, sd) == 0)
+    {
+      return -ETIMEDOUT;         /* sensor is not producing */
+    }
+
+  return acc.n;
 }
 
 /* Raw mode, saving what was there so it can be put back.
@@ -1189,6 +1234,157 @@ int cal_session(void)
               cal6_idx = -1;
               cal_emit(fd, "{\"evt\":\"ok\",\"what\":\"cal6 abort\"}\n");
             }
+        }
+      else if (strncmp(line, "gyro ", 5) == 0)
+        {
+          /* Zero-rate bias: hold the board still, average, store. One shot -
+           * there is nothing for the operator to reposition between, which is
+           * the whole difference from the six-position accel procedure.
+           */
+
+          char nm[PARAM_NAME_MAX + 1];
+          const char axis[3] = { 'X', 'Y', 'Z' };
+          float mean[3];
+          float sd[3];
+          FAR const char *pfx;
+          int bad = 0;
+          int sub;
+          int n;
+          int i;
+          int k;
+
+          for (i = 0; i < CAL_NSENSORS; i++)
+            {
+              if (strcmp(line + 5, g_sensors[i].name) == 0 &&
+                  g_sensors[i].kind == CAL_KIND_GYRO)
+                {
+                  break;
+                }
+            }
+
+          if (i == CAL_NSENSORS)
+            {
+              cal_emit(fd, "{\"evt\":\"error\","
+                           "\"msg\":\"not a gyroscope\"}\n");
+              continue;
+            }
+
+          sub = cal_subscribe(i);
+
+          if (sub < 0)
+            {
+              cal_emit(fd, "{\"evt\":\"error\","
+                           "\"msg\":\"sensor not available\"}\n");
+              continue;
+            }
+
+          cal_emit(fd, "{\"evt\":\"ok\",\"what\":\"gyro start\","
+                       "\"name\":\"%s\",\"secs\":4}\n", g_sensors[i].name);
+
+          orb_set_interval(sub, 2000);           /* 500 Hz is ample */
+          n = cal_capture_bias(i, sub, 4000, mean, sd);
+          orb_unsubscribe(sub);
+
+          if (n < 0)
+            {
+              cal_emit(fd, "{\"evt\":\"error\","
+                           "\"msg\":\"sensor produced nothing\"}\n");
+              continue;
+            }
+
+          switch (cal_gyro_judge(n, mean, sd))
+            {
+              case CAL_GYRO_TOO_FEW:
+                cal_emit(fd,
+                         "{\"evt\":\"error\",\"msg\":\"too few samples\","
+                         "\"n\":%d,\"need\":%d}\n", n, CAL_GYRO_MIN_N);
+                continue;
+
+              case CAL_GYRO_NOT_STILL:
+                cal_emit(fd,
+                         "{\"evt\":\"error\",\"msg\":\"not steady\","
+                         "\"sd\":[%.5f,%.5f,%.5f],\"limit\":%.5f}\n",
+                         (double)sd[0], (double)sd[1], (double)sd[2],
+                         (double)CAL_GYRO_SD_MAX);
+                continue;
+
+              case CAL_GYRO_TOO_LARGE:
+
+                /* Steady but turning: a constant rotation has zero standard
+                 * deviation and would otherwise be stored as bias.
+                 */
+
+                cal_emit(fd,
+                         "{\"evt\":\"error\",\"msg\":\"still turning\","
+                         "\"bias\":[%.5f,%.5f,%.5f],\"limit\":%.4f}\n",
+                         (double)mean[0], (double)mean[1], (double)mean[2],
+                         (double)CAL_GYRO_BIAS_MAX);
+                continue;
+
+              default:
+                break;
+            }
+
+          pfx = g_cal_prefix[i];
+
+          /* Same order as the accel save: invalidate first, so a failure
+           * partway cannot leave new offsets under an old OK=1.
+           */
+
+          snprintf(nm, sizeof(nm), "%s_OK", pfx);
+          if (param_set_i32(nm, 0) < 0)
+            {
+              cal_emit(fd, "{\"evt\":\"error\",\"msg\":\"cannot clear\","
+                           "\"param\":\"%s\"}\n", nm);
+              continue;
+            }
+
+          for (k = 0; k < 3; k++)
+            {
+              snprintf(nm, sizeof(nm), "%s_%cOFF", pfx, axis[k]);
+              if (param_set_f32(nm, mean[k]) < 0)
+                {
+                  cal_emit(fd,
+                           "{\"evt\":\"error\",\"msg\":\"out of range\","
+                           "\"param\":\"%s\",\"value\":%.5f}\n",
+                           nm, (double)mean[k]);
+                  bad = 1;
+                  break;
+                }
+            }
+
+          if (bad != 0)
+            {
+              continue;
+            }
+
+          snprintf(nm, sizeof(nm), "%s_OK", pfx);
+          if (param_set_i32(nm, 1) < 0)
+            {
+              cal_emit(fd, "{\"evt\":\"error\",\"msg\":\"cannot mark ok\","
+                           "\"param\":\"%s\"}\n", nm);
+              continue;
+            }
+
+          if (param_save() < 0)
+            {
+              cal_emit(fd, "{\"evt\":\"error\","
+                           "\"msg\":\"param save failed\"}\n");
+              continue;
+            }
+
+          if (st_idx == i)
+            {
+              cal_load_apply(st_idx, want_cal, &apply);
+            }
+
+          cal_emit(fd,
+                   "{\"evt\":\"ok\",\"what\":\"gyro save\",\"name\":\"%s\","
+                   "\"bias\":[%.6f,%.6f,%.6f],\"sd\":[%.6f,%.6f,%.6f],"
+                   "\"n\":%d}\n",
+                   g_sensors[i].name,
+                   (double)mean[0], (double)mean[1], (double)mean[2],
+                   (double)sd[0], (double)sd[1], (double)sd[2], n);
         }
       else if (strcmp(line, "stop") == 0)
         {

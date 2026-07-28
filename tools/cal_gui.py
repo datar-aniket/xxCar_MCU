@@ -30,7 +30,7 @@ except ImportError:
     raise SystemExit("pyserial missing:  pip install pyserial")
 
 SYNC = 0xA5
-PROTO = 2
+PROTO = 3
 ENC_I16, ENC_F32 = 0, 1
 
 # sync | len(u16) | id | seq | t0_us(u32) | dt_us(u16) | count | nvals | enc
@@ -524,6 +524,23 @@ class App(tk.Tk):
                                    state="disabled")
         self.save_btn.pack(side="left", expand=True, fill="x", padx=(3, 0))
 
+        # ---- gyro zero-rate bias
+        # Its own box, and deliberately not a step of the wizard above: there
+        # is nothing to reposition between, so folding it into a six-position
+        # checklist would imply an order that does not exist.
+        gb = ttk.Labelframe(p, text=" gyro bias ", padding=6)
+        gb.pack(fill="x", pady=(10, 0))
+        self.gyro_btn = ttk.Button(gb, text="Measure gyro bias",
+                                   command=self._gyro_start)
+        self.gyro_btn.pack(fill="x")
+        self.gyro_hint = ttk.Label(gb, text="select a gyroscope",
+                                   style="Muted.TLabel", wraplength=190,
+                                   justify="left")
+        self.gyro_hint.pack(anchor="w", pady=(6, 0))
+        # "not steady" is emitted by both the accel capture and the gyro
+        # average, so the message alone cannot say which panel it belongs to.
+        self.gyro_busy = False
+
         # ---- Allan-variance recording
         rb = ttk.Labelframe(p, text=" record to SD ", padding=6)
         rb.pack(fill="x", pady=(10, 0))
@@ -832,6 +849,23 @@ class App(tk.Tk):
         if self.link:
             self.link.send("cal6 save")
 
+    def _gyro_start(self):
+        if not self.link or self.active is None:
+            return
+        s = self.sensors[self.active]
+        if not s["name"].startswith("gyro"):
+            self._say("! pick a gyroscope first", "err")
+            self.gyro_hint.config(text="select a gyroscope in the list above.")
+            return
+        self.gyro_busy = True
+        self.gyro_btn.config(state="disabled")
+        self.gyro_hint.config(
+            text=f"measuring {s['name']} — put the board down and do not "
+                 "touch it for about four seconds.")
+        self.link.send(f"gyro {s['name']}")
+        # the board blocks for the whole averaging window
+        self.after(6000, lambda: self.gyro_btn.config(state="normal"))
+
     def _rec_estimate(self):
         """Say up front what the run will cost, and when FAT32 stops it.
 
@@ -908,6 +942,23 @@ class App(tk.Tk):
                 self.cal_on.set(True)
                 self._cal_toggle()
                 return
+            if what == "gyro start":
+                self.gyro_hint.config(
+                    text=f"averaging {msg.get('name','?')} for "
+                         f"{msg.get('secs', 4)} s — hands off.")
+                self._say(f"< {json.dumps(msg)}")
+                return
+            if what == "gyro save":
+                self.gyro_busy = False
+                b = msg.get("bias", [0, 0, 0])
+                self.gyro_hint.config(
+                    text=f"saved. bias {b[0]:+.5f} {b[1]:+.5f} {b[2]:+.5f} "
+                         f"rad/s from {msg.get('n', 0)} samples.")
+                self.gyro_btn.config(state="normal")
+                self._say(f"< {json.dumps(msg)}")
+                self.cal_on.set(True)
+                self._cal_toggle()
+                return
             if what == "record":
                 self.recording = True
                 self.rec_btn.config(text="Stop")
@@ -919,6 +970,32 @@ class App(tk.Tk):
                     text=f"stopped. {msg.get('samples',0)} samples, "
                          f"{msg.get('bytes',0)/1e6:.1f} MB, "
                          f"dropped {msg.get('dropped',0)}")
+        if evt == "error" and self.gyro_busy:
+            m = msg.get("msg", "")
+            self.gyro_busy = False
+            self.gyro_btn.config(state="normal")
+            if m == "not steady":
+                sd = msg.get("sd", [0, 0, 0])
+                self.gyro_hint.config(
+                    text="✗ the board moved — worst axis "
+                         f"{max(abs(v) for v in sd):.4f} rad/s, limit "
+                         f"{msg.get('limit', 0):.3f}.  Put it down and retry.")
+            elif m == "still turning":
+                # Steady AND rotating: the standard deviation cannot see this,
+                # which is exactly why the board checks the magnitude too.
+                b = msg.get("bias", [0, 0, 0])
+                self.gyro_hint.config(
+                    text="✗ the board is rotating, not still — "
+                         f"{max(abs(v) for v in b):.3f} rad/s.  "
+                         "Nothing was saved.")
+            elif m == "too few samples":
+                self.gyro_hint.config(
+                    text=f"✗ only {msg.get('n', 0)} samples, need "
+                         f"{msg.get('need', 0)} — is the gyro streaming?")
+            else:
+                self.gyro_hint.config(text=f"✗ {m} — nothing was saved.")
+            self._say(f"< {json.dumps(msg)}")
+            return
         if evt == "error":
             m = msg.get("msg", "")
             if "steady" in m or "square" in m:

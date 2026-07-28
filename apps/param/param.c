@@ -218,6 +218,17 @@ static const struct param_def_s g_params[] =
   { "CAL_ACC1_OK", PARAM_TYPE_INT32, I32(0), I32(0), I32(1),
     "Accel 1 calibrated (0 = raw passthrough)" },
 
+  /* The gyros need this flag for the same reason and more sharply: a gyro
+   * bias is a small number, so "calibrated, and the bias came out near zero"
+   * and "never calibrated" look identical in the offsets alone. Only a scale
+   * factor would give it away, and a gyro has none to calibrate.
+   */
+
+  { "CAL_GYRO0_OK", PARAM_TYPE_INT32, I32(0), I32(0), I32(1),
+    "Gyro 0 bias calibrated (0 = raw passthrough)" },
+  { "CAL_GYRO1_OK", PARAM_TYPE_INT32, I32(0), I32(0), I32(1),
+    "Gyro 1 bias calibrated (0 = raw passthrough)" },
+
   /* ---- IMU noise, from an Allan variance run ---------------------------
    * Not calibration - these do not change a reading. They are what an EKF
    * needs to know about how much to trust one: the white-noise density it

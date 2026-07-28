@@ -132,6 +132,45 @@ def main():
     check("0.0123" in app.cal_hint.cget("text"), "residual shown after save")
     check(app.cal_on.get() is True, "calibrated stream enabled after save")
 
+    # ---- gyro bias -------------------------------------------------------
+    # "not steady" is emitted by BOTH the accel capture and the gyro average,
+    # so the message alone cannot say which panel it belongs to. If it is
+    # routed by text, a gyro rejection lands on the accel checklist and the
+    # gyro box keeps saying "averaging… hands off" forever.
+    accel_hint_before = app.cal_hint.cget("text")
+    app.gyro_busy = True
+    app._on_json({"evt": "error", "msg": "not steady",
+                  "sd": [0.002, 0.031, 0.004], "limit": 0.01})
+    check("moved" in app.gyro_hint.cget("text"),
+          "gyro rejection did not reach the gyro panel")
+    check(app.cal_hint.cget("text") == accel_hint_before,
+          "a gyro rejection overwrote the accelerometer panel")
+    check(not app.gyro_btn.instate(["disabled"]),
+          "gyro button left disabled after a rejection - retry is impossible")
+
+    # Steady AND rotating. The standard deviation cannot see this at all, which
+    # is the whole reason the board also checks the magnitude.
+    app.gyro_busy = True
+    app._on_json({"evt": "error", "msg": "still turning",
+                  "bias": [0.0, 0.0, 0.9], "limit": 0.2})
+    check("rotating" in app.gyro_hint.cget("text"),
+          "a constant rotation was not explained as rotation")
+    # Substring-matching "saved" would pass on "Nothing was saved", so check
+    # for the success wording specifically.
+    check("Nothing was saved" in app.gyro_hint.cget("text"),
+          "a refused gyro measurement did not say nothing was stored")
+    check(not app.gyro_hint.cget("text").startswith("saved."),
+          "a refused gyro measurement reads as a completed one")
+
+    app.gyro_busy = True
+    app._on_json({"evt": "ok", "what": "gyro save", "name": "gyro0",
+                  "bias": [0.00312, -0.00721, 0.00154],
+                  "sd": [0.0016, 0.0016, 0.0016], "n": 7940})
+    check("saved" in app.gyro_hint.cget("text"), "gyro save not confirmed")
+    check("0.00312" in app.gyro_hint.cget("text"), "measured bias not shown")
+    check("7940" in app.gyro_hint.cget("text"), "sample count not shown")
+    check(app.gyro_busy is False, "gyro_busy stuck after a completed save")
+
     # ---- recording -------------------------------------------------------
     app._on_json({"evt": "ok", "what": "record",
                   "path": "/fs/microsd/log/log_007.ulg", "topics": 4})
