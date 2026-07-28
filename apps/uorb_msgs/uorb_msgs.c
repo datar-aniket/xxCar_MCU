@@ -13,6 +13,7 @@
 #include <errno.h>
 #include <assert.h>
 #include <stddef.h>
+#include <limits.h>
 
 #include "uorb_msgs.h"
 
@@ -24,6 +25,36 @@
  * every later field and print convincing nonsense, so make the compiler prove
  * the fields sit exactly where the format strings expect.
  ****************************************************************************/
+
+/****************************************************************************
+ * Topic-name length
+ *
+ * uORB registers a topic by building "/dev/uorb/<name><instance>" and copying
+ * that WHOLE PATH into struct sensor_reginfo_s, whose path field is only
+ * NAME_MAX bytes (nuttx/uorb.h) - while the string it is copied from is
+ * ORB_PATH_MAX = NAME_MAX + 16 (nuttx-apps system/uorb/uORB/uORB.c:79). A name
+ * that overruns is silently TRUNCATED, so the node is registered under a
+ * shortened path and the open() that immediately follows - using the full path
+ * - fails. orb_advertise() then returns -1 with nothing to say why.
+ *
+ * That cost a flash cycle: vehicle_angular_velocity produced a 35-character
+ * path against CONFIG_NAME_MAX=32 and `sensors start` reported only "cannot
+ * advertise". vehicle_acceleration, at 31, had fitted by a single byte.
+ *
+ * So the budget is checked here instead. With CONFIG_NAME_MAX=32 a topic name
+ * may be 20 characters: 32 - strlen("/dev/uorb/") - 1 instance digit - NUL.
+ ****************************************************************************/
+
+#define ORB_NAME_FITS(name)                                                   \
+  static_assert(sizeof(ORB_SENSOR_PATH name "0") <= NAME_MAX,                 \
+                "uORB topic name too long: /dev/uorb/<name><instance> must "  \
+                "fit in NAME_MAX, or the node is registered truncated and "   \
+                "orb_advertise() fails at runtime")
+
+ORB_NAME_FITS("optical_flow");
+ORB_NAME_FITS("distance_sensor");
+ORB_NAME_FITS("vehicle_accel");
+ORB_NAME_FITS("vehicle_gyro");
 
 static_assert(offsetof(struct optical_flow_s, timestamp)             ==  0, "layout");
 static_assert(offsetof(struct optical_flow_s, integration_time_us)   ==  8, "layout");
@@ -43,27 +74,27 @@ static_assert(offsetof(struct distance_sensor_s, type)               == 20, "lay
 static_assert(offsetof(struct distance_sensor_s, signal_quality)     == 23, "layout");
 static_assert(sizeof(struct distance_sensor_s)                       == 24, "layout");
 
-static_assert(offsetof(struct vehicle_acceleration_s, timestamp)        ==  0, "layout");
-static_assert(offsetof(struct vehicle_acceleration_s, timestamp_sample) ==  8, "layout");
-static_assert(offsetof(struct vehicle_acceleration_s, x)                == 16, "layout");
-static_assert(offsetof(struct vehicle_acceleration_s, y)                == 20, "layout");
-static_assert(offsetof(struct vehicle_acceleration_s, z)                == 24, "layout");
-static_assert(offsetof(struct vehicle_acceleration_s, instance)         == 28, "layout");
-static_assert(offsetof(struct vehicle_acceleration_s, calibrated)       == 29, "layout");
-static_assert(sizeof(struct vehicle_acceleration_s)                     == 32, "layout");
+static_assert(offsetof(struct vehicle_accel_s, timestamp)        ==  0, "layout");
+static_assert(offsetof(struct vehicle_accel_s, timestamp_sample) ==  8, "layout");
+static_assert(offsetof(struct vehicle_accel_s, x)                == 16, "layout");
+static_assert(offsetof(struct vehicle_accel_s, y)                == 20, "layout");
+static_assert(offsetof(struct vehicle_accel_s, z)                == 24, "layout");
+static_assert(offsetof(struct vehicle_accel_s, instance)         == 28, "layout");
+static_assert(offsetof(struct vehicle_accel_s, calibrated)       == 29, "layout");
+static_assert(sizeof(struct vehicle_accel_s)                     == 32, "layout");
 
 /* The two are deliberately the same shape, and the code that fills them relies
  * on that only through the field names - never by casting one to the other.
  */
 
-static_assert(offsetof(struct vehicle_angular_velocity_s, timestamp)        ==  0, "layout");
-static_assert(offsetof(struct vehicle_angular_velocity_s, timestamp_sample) ==  8, "layout");
-static_assert(offsetof(struct vehicle_angular_velocity_s, x)                == 16, "layout");
-static_assert(offsetof(struct vehicle_angular_velocity_s, y)                == 20, "layout");
-static_assert(offsetof(struct vehicle_angular_velocity_s, z)                == 24, "layout");
-static_assert(offsetof(struct vehicle_angular_velocity_s, instance)         == 28, "layout");
-static_assert(offsetof(struct vehicle_angular_velocity_s, calibrated)       == 29, "layout");
-static_assert(sizeof(struct vehicle_angular_velocity_s)                     == 32, "layout");
+static_assert(offsetof(struct vehicle_gyro_s, timestamp)        ==  0, "layout");
+static_assert(offsetof(struct vehicle_gyro_s, timestamp_sample) ==  8, "layout");
+static_assert(offsetof(struct vehicle_gyro_s, x)                == 16, "layout");
+static_assert(offsetof(struct vehicle_gyro_s, y)                == 20, "layout");
+static_assert(offsetof(struct vehicle_gyro_s, z)                == 24, "layout");
+static_assert(offsetof(struct vehicle_gyro_s, instance)         == 28, "layout");
+static_assert(offsetof(struct vehicle_gyro_s, calibrated)       == 29, "layout");
+static_assert(sizeof(struct vehicle_gyro_s)                     == 32, "layout");
 
 /****************************************************************************
  * Private Data
@@ -84,13 +115,13 @@ static const char distance_sensor_format[] =
   ",current_distance:%hf,min_distance:%hf,max_distance:%hf"
   ",type:%hhu,orientation:%hhu,covariance:%hhu,signal_quality:%hhu";
 
-static const char vehicle_acceleration_format[] =
+static const char vehicle_accel_format[] =
   "timestamp:%" PRIu64
   ",timestamp_sample:%" PRIu64
   ",x:%hf,y:%hf,z:%hf"
   ",instance:%hhu,calibrated:%hhu";
 
-static const char vehicle_angular_velocity_format[] =
+static const char vehicle_gyro_format[] =
   "timestamp:%" PRIu64
   ",timestamp_sample:%" PRIu64
   ",x:%hf,y:%hf,z:%hf"
@@ -103,10 +134,8 @@ static const char vehicle_angular_velocity_format[] =
 
 ORB_DEFINE(optical_flow, struct optical_flow_s, optical_flow_format);
 ORB_DEFINE(distance_sensor, struct distance_sensor_s, distance_sensor_format);
-ORB_DEFINE(vehicle_acceleration, struct vehicle_acceleration_s,
-           vehicle_acceleration_format);
-ORB_DEFINE(vehicle_angular_velocity, struct vehicle_angular_velocity_s,
-           vehicle_angular_velocity_format);
+ORB_DEFINE(vehicle_accel, struct vehicle_accel_s, vehicle_accel_format);
+ORB_DEFINE(vehicle_gyro, struct vehicle_gyro_s, vehicle_gyro_format);
 
 /****************************************************************************
  * Public Functions
@@ -142,34 +171,32 @@ int distance_sensor_publish(int fd, FAR const struct distance_sensor_s *msg)
   return orb_publish(ORB_ID(distance_sensor), fd, msg);
 }
 
-int vehicle_acceleration_advertise(void)
+int vehicle_accel_advertise(void)
 {
-  return orb_advertise(ORB_ID(vehicle_acceleration), NULL);
+  return orb_advertise(ORB_ID(vehicle_accel), NULL);
 }
 
-int vehicle_acceleration_publish(int fd,
-                                 FAR const struct vehicle_acceleration_s *msg)
+int vehicle_accel_publish(int fd, FAR const struct vehicle_accel_s *msg)
 {
   if (fd < 0 || msg == NULL)
     {
       return -EINVAL;
     }
 
-  return orb_publish(ORB_ID(vehicle_acceleration), fd, msg);
+  return orb_publish(ORB_ID(vehicle_accel), fd, msg);
 }
 
-int vehicle_angular_velocity_advertise(void)
+int vehicle_gyro_advertise(void)
 {
-  return orb_advertise(ORB_ID(vehicle_angular_velocity), NULL);
+  return orb_advertise(ORB_ID(vehicle_gyro), NULL);
 }
 
-int vehicle_angular_velocity_publish(
-  int fd, FAR const struct vehicle_angular_velocity_s *msg)
+int vehicle_gyro_publish(int fd, FAR const struct vehicle_gyro_s *msg)
 {
   if (fd < 0 || msg == NULL)
     {
       return -EINVAL;
     }
 
-  return orb_publish(ORB_ID(vehicle_angular_velocity), fd, msg);
+  return orb_publish(ORB_ID(vehicle_gyro), fd, msg);
 }

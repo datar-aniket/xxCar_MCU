@@ -251,8 +251,8 @@ static int sensors_daemon(int argc, FAR char *argv[])
   struct pollfd pfd[2];
   struct sensor_accel araw;
   struct sensor_gyro graw;
-  struct vehicle_acceleration_s aout;
-  struct vehicle_angular_velocity_s gout;
+  struct vehicle_accel_s aout;
+  struct vehicle_gyro_s gout;
   FAR const struct orb_metadata *ameta;
   FAR const struct orb_metadata *gmeta;
   float aoff[3];
@@ -336,12 +336,20 @@ static int sensors_daemon(int argc, FAR char *argv[])
       goto out;
     }
 
-  apub = vehicle_acceleration_advertise();
-  gpub = vehicle_angular_velocity_advertise();
+  apub = vehicle_accel_advertise();
+  gpub = vehicle_gyro_advertise();
+
+  /* Name the topic that failed. "cannot advertise the corrected topics" cost a
+   * flash cycle to diagnose: both are advertised together, only one had a name
+   * too long for uORB's node path, and the message could not say which.
+   */
 
   if (apub < 0 || gpub < 0)
     {
-      syslog(LOG_ERR, "[sensors] cannot advertise the corrected topics\n");
+      syslog(LOG_ERR, "[sensors] cannot advertise %s%s%s (errno %d)\n",
+             apub < 0 ? "vehicle_accel" : "",
+             (apub < 0 && gpub < 0) ? " and " : "",
+             gpub < 0 ? "vehicle_gyro" : "", errno);
       goto out;
     }
 
@@ -403,7 +411,7 @@ static int sensors_daemon(int argc, FAR char *argv[])
               aout.instance         = (uint8_t)sel;
               aout.calibrated       = acal ? 1 : 0;
 
-              if (vehicle_acceleration_publish(apub, &aout) == 0)
+              if (vehicle_accel_publish(apub, &aout) == 0)
                 {
                   g_status.accel_out++;
                 }
@@ -442,7 +450,7 @@ static int sensors_daemon(int argc, FAR char *argv[])
               gout.instance         = (uint8_t)sel;
               gout.calibrated       = gcal ? 1 : 0;
 
-              if (vehicle_angular_velocity_publish(gpub, &gout) == 0)
+              if (vehicle_gyro_publish(gpub, &gout) == 0)
                 {
                   g_status.gyro_out++;
                 }

@@ -10,8 +10,8 @@
  *   optical_flow     integrated optical flow + height, from the MTF-02 over
  *                    MAVLink today, from DroneCAN tomorrow.
  *   distance_sensor  a single ranged distance (lidar/sonar/ToF).
- *   vehicle_acceleration      corrected, body-frame accelerometer
- *   vehicle_angular_velocity  corrected, body-frame gyroscope
+ *   vehicle_accel    corrected, body-frame accelerometer
+ *   vehicle_gyro     corrected, body-frame gyroscope
  *
  * The publisher is whatever driver has the data (apps/mavlink for now); the
  * subscriber is the navigation/fusion code. Neither should have to link the
@@ -89,9 +89,20 @@ struct distance_sensor_s
  * applied and the sensor has been rotated into the body frame - the form a
  * state estimator wants and the form nothing should have to reconstruct.
  *
- * Splitting it this way is PX4's arrangement (sensor_accel -> vehicle_
- * acceleration) and it exists because the alternative - correcting inside the
- * driver - destroys the raw data at the only point where it is still available.
+ * Splitting it this way is PX4's arrangement (sensor_accel ->
+ * vehicle_acceleration) and it exists because the alternative - correcting
+ * inside the driver - destroys the raw data at the only point where it is
+ * still available.
+ *
+ * The names are SHORTER than PX4's. uORB builds a device node at
+ * /dev/uorb/<name><instance> and registers it through a NAME_MAX-sized field,
+ * so with CONFIG_NAME_MAX=32 a topic name may be 20 characters;
+ * vehicle_angular_velocity is 24 and was silently truncated, leaving
+ * orb_advertise() failing with nothing to say why. Unlike the rotation enum -
+ * where a value is copied between configs by hand and MUST match PX4 - nothing
+ * outside this firmware depends on a topic's name, so shortening both keeps
+ * the pair symmetric and leaves margin. uorb_msgs.c checks the budget at
+ * compile time.
  *
  * TWO timestamps, and the distinction is the entire point of the DRDY-edge
  * work in the IMU drivers:
@@ -106,7 +117,7 @@ struct distance_sensor_s
  * timebase exists to avoid.
  */
 
-struct vehicle_acceleration_s
+struct vehicle_accel_s
 {
   uint64_t timestamp;             /*  0: us, when this was published */
   uint64_t timestamp_sample;      /*  8: us, when it was measured */
@@ -126,7 +137,7 @@ struct vehicle_acceleration_s
   uint8_t  pad[2];                /* 30: no internal padding, size mult. of 8 */
 };
 
-struct vehicle_angular_velocity_s
+struct vehicle_gyro_s
 {
   uint64_t timestamp;             /*  0: us, when this was published */
   uint64_t timestamp_sample;      /*  8: us, when it was measured */
@@ -144,8 +155,8 @@ struct vehicle_angular_velocity_s
 
 ORB_DECLARE(optical_flow);
 ORB_DECLARE(distance_sensor);
-ORB_DECLARE(vehicle_acceleration);
-ORB_DECLARE(vehicle_angular_velocity);
+ORB_DECLARE(vehicle_accel);
+ORB_DECLARE(vehicle_gyro);
 
 /****************************************************************************
  * Public Function Prototypes
@@ -157,12 +168,10 @@ int optical_flow_publish(int fd, FAR const struct optical_flow_s *msg);
 int distance_sensor_advertise(void);
 int distance_sensor_publish(int fd, FAR const struct distance_sensor_s *msg);
 
-int vehicle_acceleration_advertise(void);
-int vehicle_acceleration_publish(int fd,
-                                 FAR const struct vehicle_acceleration_s *msg);
+int vehicle_accel_advertise(void);
+int vehicle_accel_publish(int fd, FAR const struct vehicle_accel_s *msg);
 
-int vehicle_angular_velocity_advertise(void);
-int vehicle_angular_velocity_publish(
-  int fd, FAR const struct vehicle_angular_velocity_s *msg);
+int vehicle_gyro_advertise(void);
+int vehicle_gyro_publish(int fd, FAR const struct vehicle_gyro_s *msg);
 
 #endif /* __APPS_UORB_MSGS_UORB_MSGS_H */
