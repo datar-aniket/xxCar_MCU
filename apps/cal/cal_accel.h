@@ -90,6 +90,43 @@ bool cal_accel_complete(FAR const struct cal_accel_s *s);
 int cal_accel_solve(FAR const struct cal_accel_s *s, FAR float off[3],
                     FAR float scl[3], FAR float *residual);
 
+/* Largest residual that may still be stored as a calibration, in m/s^2.
+ *
+ * Computing a residual and then displaying it without acting on it lets a bad
+ * fit be saved and applied: the six offsets and scales that came out of a badly
+ * placed board are numbers like any other, and everything downstream treats
+ * CAL_ACCn_OK=1 as "this was measured".
+ *
+ * The number below is measured, not reasoned. Six positions determine six
+ * parameters, so each axis pair is fitted exactly and the residual cannot come
+ * from the fit being overdetermined; what is left is how consistent the six
+ * placements are with each other. Sweeping the solver (tests/cal_accel_test.c
+ * pins the endpoints):
+ *
+ *   placement tilt        2.5 deg -> 0.009    10 deg -> 0.147
+ *                           5 deg -> 0.037    15 deg -> 0.323
+ *                                             17.5   -> 0.434
+ *   cross-axis coupling     0-10% at 5 deg tilt: 0.037 -> 0.060
+ *   motion during capture   0-2 m/s^2 on one position: 0.037 -> 0.099
+ *
+ * So this is overwhelmingly a PLACEMENT metric. Sensor imperfection barely
+ * moves it - which also means it is not the gate for a bad sensor, and should
+ * not be described as one.
+ *
+ * That has a consequence worth stating, because it was got wrong first: the
+ * scale saturates. cal_accel_classify() already refuses a position beyond
+ * about 20 degrees, so a residual above ~0.44 is unreachable and any threshold
+ * near 5% of g would be pure decoration - a gate that can never fire, in code
+ * written to stop a bad result being saved.
+ *
+ * 0.20 is about 11.5 degrees of placement error. It passes any board laid on a
+ * flat surface, and fails the set where one position was taken on an edge, a
+ * lid, or a cable - which is exactly the case classify() lets through, because
+ * classify only has to decide which face is up, one position at a time.
+ */
+
+#define CAL_RESIDUAL_MAX 0.20f
+
 /* Mean and standard deviation of an interleaved sample block.
  *
  * `samples` holds n frames of nv values. Standard deviation is what decides

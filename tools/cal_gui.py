@@ -923,6 +923,21 @@ class App(tk.Tk):
             m = msg.get("msg", "")
             if "steady" in m or "square" in m:
                 self.cal_hint.config(text=f"✗ {m} — reposition and retry")
+            elif m == "fit rejected":
+                # A refused save has to be as visible as an accepted one.
+                # Left in the log line alone, the operator sees the six ticks
+                # still lit, no error on the panel, and concludes it saved.
+                self.cal_hint.config(
+                    text=f"✗ fit rejected — residual {msg.get('residual', 0):.3f}"
+                         f" m/s² exceeds {msg.get('limit', 0):.2f}."
+                         "  Redo the six positions on a flat surface.")
+                self.save_btn.config(state="normal")
+            elif m == "out of range":
+                self.cal_hint.config(
+                    text=f"✗ {msg.get('param', '?')} = "
+                         f"{msg.get('value', 0):.5f} is outside its allowed "
+                         "range — nothing was saved.")
+                self.save_btn.config(state="normal")
         self._say(f"< {json.dumps(msg)}")
         if evt == "hello" and msg.get("proto") != PROTO:
             self._say(f"! protocol mismatch: board {msg.get('proto')}, "

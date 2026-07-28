@@ -104,6 +104,29 @@ def main():
     check(not app.save_btn.instate(["disabled"]), "Save enabled at 6/6")
     check(len(app.cal_have) == 6, "all six positions marked")
 
+    # ---- a refused save must look refused ---------------------------------
+    # The board can decline to store a result after all six positions are in:
+    # a residual over the limit, or a value the parameter range will not take.
+    # Both arrive as "error" events while the six ticks are still lit, so if
+    # the panel says nothing the operator reads it as saved. This is tested
+    # BEFORE the successful save below, so a handler that only ever appends
+    # cannot pass by leaving an earlier success message on screen.
+    app._on_json({"evt": "error", "msg": "fit rejected",
+                  "residual": 1.42, "limit": 0.5})
+    check("rejected" in app.cal_hint.cget("text"), "fit rejection not shown")
+    check("1.42" in app.cal_hint.cget("text"), "measured residual not shown")
+    check(app.cal_on.get() is not True,
+          "calibrated stream enabled by a rejected fit")
+    check(not app.save_btn.instate(["disabled"]),
+          "Save left disabled after a rejection - retry is impossible")
+
+    app._on_json({"evt": "error", "msg": "out of range",
+                  "param": "CAL_ACC0_XSCL", "value": 1.7315})
+    check("CAL_ACC0_XSCL" in app.cal_hint.cget("text"),
+          "out-of-range parameter not named")
+    check("1.73" in app.cal_hint.cget("text"),
+          "the value that would not fit was not shown")
+
     app._on_json({"evt": "ok", "what": "cal6 save", "off": [0.1, -0.2, 0.05],
                   "scl": [1.01, 0.99, 1.0], "residual": 0.0123})
     check("0.0123" in app.cal_hint.cget("text"), "residual shown after save")

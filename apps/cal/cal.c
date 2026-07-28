@@ -1068,6 +1068,8 @@ int cal_session(void)
               FAR const char *pfx;
               int k;
 
+              int bad = 0;
+
               if (cal6_idx < 0 || cal_accel_solve(&cal6, off, scl, &res) != 0)
                 {
                   cal_emit(fd,
@@ -1076,18 +1078,86 @@ int cal_session(void)
                   continue;
                 }
 
+              /* Judge the fit before storing it. The residual was already
+               * being computed and shown; without a threshold it was decoration
+               * on a result that gets applied either way.
+               *
+               * Written as !(res <= limit) rather than (res > limit) so a NaN
+               * residual - every comparison with which is false - is refused
+               * instead of accepted. That is the same trap that once let a NaN
+               * through param_set_f32().
+               */
+
+              if (!(res <= CAL_RESIDUAL_MAX))
+                {
+                  cal_emit(fd,
+                           "{\"evt\":\"error\",\"msg\":\"fit rejected\","
+                           "\"residual\":%.4f,\"limit\":%.4f}\n",
+                           (double)res, (double)CAL_RESIDUAL_MAX);
+                  continue;
+                }
+
               pfx = g_cal_prefix[cal6_idx];
 
-              for (k = 0; k < 3; k++)
+              /* Clear the validity flag FIRST. If a set below fails we stop
+               * with the live offsets half-updated, and a stale OK=1 from a
+               * previous good calibration would make that mixture look
+               * measured. Nothing is written to the card unless every step
+               * here succeeds, so params.txt still holds the old set.
+               */
+
+              snprintf(nm, sizeof(nm), "%s_OK", pfx);
+              if (param_set_i32(nm, 0) < 0)
+                {
+                  cal_emit(fd, "{\"evt\":\"error\",\"msg\":\"cannot clear\","
+                               "\"param\":\"%s\"}\n", nm);
+                  continue;
+                }
+
+              /* param_set_f32() returns -ERANGE when it CLAMPS as well as when
+               * it refuses, so ignoring it meant a scale outside 0.8-1.2 was
+               * silently stored as the bound while the GUI displayed the value
+               * the solver produced. Report the parameter and the value that
+               * would not fit rather than pretending either number is real.
+               */
+
+              for (k = 0; k < 3 && bad == 0; k++)
                 {
                   snprintf(nm, sizeof(nm), "%s_%cOFF", pfx, axis[k]);
-                  param_set_f32(nm, off[k]);
+                  if (param_set_f32(nm, off[k]) < 0)
+                    {
+                      cal_emit(fd,
+                               "{\"evt\":\"error\",\"msg\":\"out of range\","
+                               "\"param\":\"%s\",\"value\":%.5f}\n",
+                               nm, (double)off[k]);
+                      bad = 1;
+                      break;
+                    }
+
                   snprintf(nm, sizeof(nm), "%s_%cSCL", pfx, axis[k]);
-                  param_set_f32(nm, scl[k]);
+                  if (param_set_f32(nm, scl[k]) < 0)
+                    {
+                      cal_emit(fd,
+                               "{\"evt\":\"error\",\"msg\":\"out of range\","
+                               "\"param\":\"%s\",\"value\":%.5f}\n",
+                               nm, (double)scl[k]);
+                      bad = 1;
+                      break;
+                    }
+                }
+
+              if (bad != 0)
+                {
+                  continue;
                 }
 
               snprintf(nm, sizeof(nm), "%s_OK", pfx);
-              param_set_i32(nm, 1);
+              if (param_set_i32(nm, 1) < 0)
+                {
+                  cal_emit(fd, "{\"evt\":\"error\",\"msg\":\"cannot mark ok\","
+                               "\"param\":\"%s\"}\n", nm);
+                  continue;
+                }
 
               /* One write, at the end. The USB port dies on cable pull, and a
                * half-written calibration is worse than none.

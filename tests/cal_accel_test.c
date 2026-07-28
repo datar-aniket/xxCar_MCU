@@ -262,6 +262,90 @@ static void test_stats(void)
     }
 }
 
+/* Residual for a whole set placed at a uniform tilt, or -1 if a position was
+ * refused before it ever reached the solver.
+ */
+
+static float residual_at_tilt_deg(float deg)
+{
+  const float off[3] = { 0.25f, -0.40f, 0.10f };
+  const float scl[3] = { 1.02f, 0.97f, 1.01f };
+  float tilt = CAL_G * sinf(deg * 3.14159265f / 180.0f);
+  struct cal_accel_s s;
+  float go[3];
+  float gs[3];
+  float res = -1.0f;
+  int p;
+
+  cal_accel_reset(&s);
+
+  for (p = 0; p < CAL_NPOS; p++)
+    {
+      float a[3];
+
+      fake(p, off, scl, tilt, a);
+      if (cal_accel_add(&s, a) != p)
+        {
+          return -1.0f;
+        }
+    }
+
+  if (cal_accel_solve(&s, go, gs, &res) != 0)
+    {
+      return -1.0f;
+    }
+
+  return res;
+}
+
+/* CAL_RESIDUAL_MAX has to sit inside the range the residual can actually
+ * reach. It is dominated by placement tilt and saturates near 0.44, because
+ * cal_accel_classify() refuses a position past about 20 degrees - so a
+ * threshold chosen from "what would a bad SENSOR look like" lands above
+ * everything achievable and produces a gate that can never fire. The first
+ * version of this constant was 0.5 and did exactly that.
+ *
+ * These pin both ends: a well-placed set passes, a badly placed one is caught,
+ * and the limit stays reachable.
+ */
+
+static void test_residual_threshold_is_reachable_and_useful(void)
+{
+  float good = residual_at_tilt_deg(5.0f);
+  float bad  = residual_at_tilt_deg(15.0f);
+  float ceiling = residual_at_tilt_deg(17.5f);
+
+  if (good < 0.0f || bad < 0.0f || ceiling < 0.0f)
+    {
+      fail("residual: a tilt the classifier should accept was refused");
+      return;
+    }
+
+  if (good > CAL_RESIDUAL_MAX)
+    {
+      printf("FAIL residual: a 5 deg placement gives %.4f, over the %.2f "
+             "limit - good calibrations would be refused\n",
+             good, CAL_RESIDUAL_MAX);
+      g_fail++;
+    }
+
+  if (bad <= CAL_RESIDUAL_MAX)
+    {
+      printf("FAIL residual: a 15 deg placement gives %.4f, under the %.2f "
+             "limit - the gate does not catch a bad set\n",
+             bad, CAL_RESIDUAL_MAX);
+      g_fail++;
+    }
+
+  if (CAL_RESIDUAL_MAX >= ceiling)
+    {
+      printf("FAIL residual: limit %.2f is at or above the %.4f the metric "
+             "can reach before classify() refuses - it can never fire\n",
+             CAL_RESIDUAL_MAX, ceiling);
+      g_fail++;
+    }
+}
+
 int main(void)
 {
   test_classify_axes();
@@ -270,6 +354,7 @@ int main(void)
   test_applied_result_reads_one_g();
   test_incomplete_is_refused();
   test_stats();
+  test_residual_threshold_is_reachable_and_useful();
 
   if (g_fail != 0)
     {
