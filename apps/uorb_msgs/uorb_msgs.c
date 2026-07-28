@@ -43,6 +43,28 @@ static_assert(offsetof(struct distance_sensor_s, type)               == 20, "lay
 static_assert(offsetof(struct distance_sensor_s, signal_quality)     == 23, "layout");
 static_assert(sizeof(struct distance_sensor_s)                       == 24, "layout");
 
+static_assert(offsetof(struct vehicle_acceleration_s, timestamp)        ==  0, "layout");
+static_assert(offsetof(struct vehicle_acceleration_s, timestamp_sample) ==  8, "layout");
+static_assert(offsetof(struct vehicle_acceleration_s, x)                == 16, "layout");
+static_assert(offsetof(struct vehicle_acceleration_s, y)                == 20, "layout");
+static_assert(offsetof(struct vehicle_acceleration_s, z)                == 24, "layout");
+static_assert(offsetof(struct vehicle_acceleration_s, instance)         == 28, "layout");
+static_assert(offsetof(struct vehicle_acceleration_s, calibrated)       == 29, "layout");
+static_assert(sizeof(struct vehicle_acceleration_s)                     == 32, "layout");
+
+/* The two are deliberately the same shape, and the code that fills them relies
+ * on that only through the field names - never by casting one to the other.
+ */
+
+static_assert(offsetof(struct vehicle_angular_velocity_s, timestamp)        ==  0, "layout");
+static_assert(offsetof(struct vehicle_angular_velocity_s, timestamp_sample) ==  8, "layout");
+static_assert(offsetof(struct vehicle_angular_velocity_s, x)                == 16, "layout");
+static_assert(offsetof(struct vehicle_angular_velocity_s, y)                == 20, "layout");
+static_assert(offsetof(struct vehicle_angular_velocity_s, z)                == 24, "layout");
+static_assert(offsetof(struct vehicle_angular_velocity_s, instance)         == 28, "layout");
+static_assert(offsetof(struct vehicle_angular_velocity_s, calibrated)       == 29, "layout");
+static_assert(sizeof(struct vehicle_angular_velocity_s)                     == 32, "layout");
+
 /****************************************************************************
  * Private Data
  ****************************************************************************/
@@ -61,6 +83,18 @@ static const char distance_sensor_format[] =
   "timestamp:%" PRIu64
   ",current_distance:%hf,min_distance:%hf,max_distance:%hf"
   ",type:%hhu,orientation:%hhu,covariance:%hhu,signal_quality:%hhu";
+
+static const char vehicle_acceleration_format[] =
+  "timestamp:%" PRIu64
+  ",timestamp_sample:%" PRIu64
+  ",x:%hf,y:%hf,z:%hf"
+  ",instance:%hhu,calibrated:%hhu";
+
+static const char vehicle_angular_velocity_format[] =
+  "timestamp:%" PRIu64
+  ",timestamp_sample:%" PRIu64
+  ",x:%hf,y:%hf,z:%hf"
+  ",instance:%hhu,calibrated:%hhu";
 #endif
 
 /****************************************************************************
@@ -69,6 +103,10 @@ static const char distance_sensor_format[] =
 
 ORB_DEFINE(optical_flow, struct optical_flow_s, optical_flow_format);
 ORB_DEFINE(distance_sensor, struct distance_sensor_s, distance_sensor_format);
+ORB_DEFINE(vehicle_acceleration, struct vehicle_acceleration_s,
+           vehicle_acceleration_format);
+ORB_DEFINE(vehicle_angular_velocity, struct vehicle_angular_velocity_s,
+           vehicle_angular_velocity_format);
 
 /****************************************************************************
  * Public Functions
@@ -102,4 +140,36 @@ int distance_sensor_publish(int fd, FAR const struct distance_sensor_s *msg)
     }
 
   return orb_publish(ORB_ID(distance_sensor), fd, msg);
+}
+
+int vehicle_acceleration_advertise(void)
+{
+  return orb_advertise(ORB_ID(vehicle_acceleration), NULL);
+}
+
+int vehicle_acceleration_publish(int fd,
+                                 FAR const struct vehicle_acceleration_s *msg)
+{
+  if (fd < 0 || msg == NULL)
+    {
+      return -EINVAL;
+    }
+
+  return orb_publish(ORB_ID(vehicle_acceleration), fd, msg);
+}
+
+int vehicle_angular_velocity_advertise(void)
+{
+  return orb_advertise(ORB_ID(vehicle_angular_velocity), NULL);
+}
+
+int vehicle_angular_velocity_publish(
+  int fd, FAR const struct vehicle_angular_velocity_s *msg)
+{
+  if (fd < 0 || msg == NULL)
+    {
+      return -EINVAL;
+    }
+
+  return orb_publish(ORB_ID(vehicle_angular_velocity), fd, msg);
 }
