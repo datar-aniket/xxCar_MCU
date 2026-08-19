@@ -43,6 +43,7 @@
 #include <stdbool.h>
 #include <errno.h>
 #include <debug.h>
+#include <syslog.h>
 
 #include <nuttx/irq.h>
 #include <nuttx/clock.h>
@@ -82,6 +83,8 @@
 
 #define ACC_CHIPID_VAL          0xfa
 #define ACC_REG_PMU_RANGE       0x0f
+#define ACC_REG_PMU_BW          0x10
+#define ACC_REG_PMU_LPW         0x11
 #define ACC_REG_ACCD_HBW        0x13
 #define ACC_REG_INT_EN_1        0x17
 #define ACC_REG_INT_MAP_1       0x1a
@@ -100,6 +103,8 @@
 
 #define GYR_CHIPID_VAL          0x0f
 #define GYR_REG_RANGE           0x0f
+#define GYR_REG_BW              0x10
+#define GYR_REG_LPM1            0x11
 #define GYR_REG_RATE_HBW        0x13
 #define GYR_REG_INT_EN_0        0x15
 #define GYR_REG_INT_EN_1        0x16
@@ -280,6 +285,39 @@ static void bmi055_fifo_flush(FAR struct bmi055_dev_s *dev)
   dev->rate_anchor_timestamp = 0;
 }
 
+static void bmi055_log_config(FAR struct bmi055_dev_s *dev)
+{
+  uint8_t range = bmi055_read_reg(dev, dev->is_gyro ? GYR_REG_RANGE :
+                                                         ACC_REG_PMU_RANGE);
+  uint8_t bw = bmi055_read_reg(dev, dev->is_gyro ? GYR_REG_BW :
+                                                      ACC_REG_PMU_BW);
+  uint8_t low_power = bmi055_read_reg(dev, dev->is_gyro ? GYR_REG_LPM1 :
+                                                             ACC_REG_PMU_LPW);
+  uint8_t high_bw = bmi055_read_reg(dev, dev->is_gyro ? GYR_REG_RATE_HBW :
+                                                           ACC_REG_ACCD_HBW);
+  uint8_t fifo = bmi055_read_reg(dev, BMI_REG_FIFO_CONFIG_1);
+  bool verified;
+
+  if (dev->is_gyro)
+    {
+      verified = range == GYR_RANGE_2000DPS &&
+                 (high_bw & GYR_HBW_UNFILTERED) != 0 &&
+                 fifo == BMI_FIFO_MODE;
+    }
+  else
+    {
+      verified = (range & 0x0f) == ACC_RANGE_16G_SET &&
+                 (high_bw & ACC_HBW_UNFILTERED) != 0 &&
+                 fifo == BMI_FIFO_MODE;
+    }
+
+  syslog(verified ? LOG_INFO : LOG_WARNING,
+         "[imu-config] BMI055 %s range=%02x bw=%02x lp=%02x hbw=%02x"
+         " fifo=%02x verify=%s (observed, unchanged)\n",
+         dev->is_gyro ? "gyro" : "accel", range, bw, low_power, high_bw,
+         fifo, verified ? "PASS" : "FAIL");
+}
+
 static int bmi055_configure(FAR struct bmi055_dev_s *dev)
 {
   uint8_t want = dev->is_gyro ? GYR_CHIPID_VAL : ACC_CHIPID_VAL;
@@ -335,6 +373,8 @@ static int bmi055_configure(FAR struct bmi055_dev_s *dev)
     }
 
   bmi055_write_reg(dev, BMI_REG_FIFO_CONFIG_1, BMI_FIFO_MODE);
+
+  bmi055_log_config(dev);
 
   sninfo("BMI055 %s configured for 2 kHz FIFO streaming\n",
          dev->is_gyro ? "gyro" : "accel");

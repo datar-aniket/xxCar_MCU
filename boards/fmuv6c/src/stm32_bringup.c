@@ -281,6 +281,9 @@ static void stm32_i2ctool(void)
 int stm32_bringup(void)
 {
   int ret = OK;
+#if defined(CONFIG_SPI) && defined(CONFIG_I2C)
+  struct fmuv6c_sensor_probe_s sensor_probe;
+#endif
 #ifdef HAVE_RTC_DRIVER
   struct rtc_lowerhalf_s *lower;
 #endif
@@ -612,13 +615,23 @@ int stm32_bringup(void)
 #if defined(CONFIG_SPI) && defined(CONFIG_I2C)
   /* Stage 2 - Task 1: synchronous sensor discovery (logs a PASS/FAIL table) */
 
-  fmuv6c_sensor_probe();
+  fmuv6c_sensor_probe(&sensor_probe);
 #endif
 
 #ifdef CONFIG_SENSORS
   /* Stage 2 - Task 2: register onboard sensors on the uorb framework */
 
-  fmuv6c_sensors_initialize();
+#if defined(CONFIG_SPI) && defined(CONFIG_I2C)
+  ret = fmuv6c_sensors_initialize(&sensor_probe);
+#else
+  ret = fmuv6c_sensors_initialize(NULL);
+#endif
+  if (ret < 0)
+    {
+      syslog(LOG_WARNING,
+             "[sensors] registration completed in degraded state: %d\n",
+             ret);
+    }
 #endif
 
   /* Everything below is parameter-driven, so it has to come after the microSD

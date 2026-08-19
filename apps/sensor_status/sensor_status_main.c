@@ -78,8 +78,8 @@ static const struct sens_row_s g_rows[] =
 {
   { "sensor_accel0", "accel0  ICM-42688", KIND_ACCEL, NULL, 0 },
   { "sensor_gyro0",  "gyro0   ICM-42688", KIND_GYRO,  NULL, 0 },
-  { "sensor_accel1", "accel1  BMI055",    KIND_ACCEL, NULL, 1 },
-  { "sensor_gyro1",  "gyro1   BMI055",    KIND_GYRO,  NULL, 1 },
+  { "sensor_accel1", "accel1  Bosch-2nd", KIND_ACCEL, NULL, 1 },
+  { "sensor_gyro1",  "gyro1   Bosch-2nd", KIND_GYRO,  NULL, 1 },
   { "sensor_mag0",   "mag0    IST8310",   KIND_MAG,   NULL, 0 },
   { "sensor_baro0",  "baro0   MS5611",    KIND_BARO,  NULL, 0 },
   { "optical_flow",  "flow    MTF-02",    KIND_FLOW,

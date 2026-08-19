@@ -15,6 +15,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <string.h>
 #include <errno.h>
 #include <syslog.h>
 
@@ -117,13 +118,36 @@ static int i2c_write_cmd(FAR struct i2c_master_s *i2c, uint8_t addr,
  * Public Functions
  ****************************************************************************/
 
-int fmuv6c_sensor_probe(void)
+FAR const char *fmuv6c_secondary_imu_name(
+  enum fmuv6c_secondary_imu_e secondary_imu)
+{
+  switch (secondary_imu)
+    {
+      case FMUV6C_SECONDARY_IMU_BMI055:
+        return "BMI055";
+
+      case FMUV6C_SECONDARY_IMU_BMI088:
+        return "BMI088";
+
+      default:
+        return "unknown";
+    }
+}
+
+int fmuv6c_sensor_probe(FAR struct fmuv6c_sensor_probe_s *result)
 {
   FAR struct spi_dev_s     *spi;
   FAR struct i2c_master_s  *i2c;
   uint8_t id;
   uint8_t val;
   int fail = 0;
+
+  if (result == NULL)
+    {
+      return -EINVAL;
+    }
+
+  memset(result, 0, sizeof(*result));
 
   syslog(LOG_INFO, "==== FMUv6C sensor discovery ====\n");
 
@@ -141,6 +165,7 @@ int fmuv6c_sensor_probe(void)
 
       id = spi_read_id(spi, SPIDEV_IMU(FMUV6C_SPIDEV_ICM42688),
                        ICM42688_WHOAMI_REG, SPIDEV_MODE3, false);
+      result->icm42688_id = id;
       syslog(LOG_INFO, "[probe] ICM-42688-P  SPI1 CS PC13  WHOAMI=0x%02x  %s\n",
              id, PF(id == ICM42688_WHOAMI_VAL));
       fail += (id != ICM42688_WHOAMI_VAL);
@@ -176,11 +201,15 @@ int fmuv6c_sensor_probe(void)
           {
             part = "BMI055-accel";
             ok   = true;
+            result->secondary_imu = FMUV6C_SECONDARY_IMU_BMI055;
+            result->secondary_accel_id = buf[0];
           }
         else if (buf[1] == BMI088_ACC_CHIPID_VAL)   /* one dummy byte */
           {
             part = "BMI088-accel";
             ok   = true;
+            result->secondary_imu = FMUV6C_SECONDARY_IMU_BMI088;
+            result->secondary_accel_id = buf[1];
           }
         else
           {
@@ -200,6 +229,7 @@ int fmuv6c_sensor_probe(void)
 
       id = spi_read_id(spi, SPIDEV_ACCELEROMETER(FMUV6C_SPIDEV_BMI088_GYRO),
                        BMI_GYR_CHIPID_REG, SPIDEV_MODE0, false);
+      result->secondary_gyro_id = id;
       syslog(LOG_INFO, "[probe] BMI0xx-gyro  SPI1 CS PC14  CHIPID=0x%02x  %s\n",
              id, PF(id == BMI_GYR_CHIPID_VAL));
       fail += (id != BMI_GYR_CHIPID_VAL);
@@ -257,6 +287,13 @@ int fmuv6c_sensor_probe(void)
 
   syslog(LOG_INFO, "==== sensor discovery: %s (%d fail) ====\n",
          fail ? "INCOMPLETE" : "ALL PASS", fail);
+  result->failures = fail > UINT8_MAX ? UINT8_MAX : (uint8_t)fail;
+  syslog(LOG_INFO,
+         "[imu-id] primary=ICM42688(0x%02x) secondary=%s"
+         " accel=0x%02x gyro=0x%02x\n",
+         result->icm42688_id,
+         fmuv6c_secondary_imu_name(result->secondary_imu),
+         result->secondary_accel_id, result->secondary_gyro_id);
   return fail ? -ENODEV : OK;
 }
 

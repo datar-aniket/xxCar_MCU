@@ -36,6 +36,7 @@
 #include <stdbool.h>
 #include <errno.h>
 #include <debug.h>
+#include <syslog.h>
 
 #include <nuttx/irq.h>
 #include <nuttx/clock.h>
@@ -83,6 +84,21 @@
 #define ICM_REG_INT_SOURCE0     0x65
 #define ICM_REG_WHO_AM_I        0x75
 #define ICM_REG_BANK_SEL        0x76
+
+/* Bank 1 gyro and bank 2 accel anti-alias filter registers. Step 1 only
+ * reports these values; the filtering profile is deliberately unchanged.
+ */
+
+#define ICM_BANK_0              0
+#define ICM_BANK_1              1
+#define ICM_BANK_2              2
+#define ICM_REG_GYRO_STATIC2    0x0b
+#define ICM_REG_GYRO_STATIC3    0x0c
+#define ICM_REG_GYRO_STATIC4    0x0d
+#define ICM_REG_GYRO_STATIC5    0x0e
+#define ICM_REG_ACCEL_STATIC2   0x03
+#define ICM_REG_ACCEL_STATIC3   0x04
+#define ICM_REG_ACCEL_STATIC4   0x05
 
 #define ICM_WHO_AM_I_VAL        0x47
 #define ICM_SOFT_RESET          0x01
@@ -253,6 +269,68 @@ static bool icm42688_check_bits(FAR struct icm42688_dev_s *dev,
   return true;
 }
 
+/* Read one banked register and always restore bank 0. This is used only while
+ * the device is being initialized, before its worker can access the SPI bus.
+ */
+
+static uint8_t icm42688_read_bank_reg(FAR struct icm42688_dev_s *dev,
+                                      uint8_t bank, uint8_t reg)
+{
+  uint8_t value;
+
+  icm42688_write_reg(dev, ICM_REG_BANK_SEL, bank);
+  value = icm42688_read_reg(dev, reg);
+  icm42688_write_reg(dev, ICM_REG_BANK_SEL, ICM_BANK_0);
+  return value;
+}
+
+static void icm42688_log_config(FAR struct icm42688_dev_s *dev,
+                                bool verified)
+{
+  uint8_t pwr = icm42688_read_reg(dev, ICM_REG_PWR_MGMT0);
+  uint8_t gyro_odr = icm42688_read_reg(dev, ICM_REG_GYRO_CONFIG0);
+  uint8_t accel_odr = icm42688_read_reg(dev, ICM_REG_ACCEL_CONFIG0);
+  uint8_t gyro_ui = icm42688_read_reg(dev, ICM_REG_GYRO_CONFIG1);
+  uint8_t ui_bw = icm42688_read_reg(dev, ICM_REG_GYRO_ACCEL_CONFIG0);
+  uint8_t accel_ui = icm42688_read_reg(dev, ICM_REG_ACCEL_CONFIG1);
+  uint8_t timestamp = icm42688_read_reg(dev, ICM_REG_TMST_CONFIG);
+  uint8_t fifo = icm42688_read_reg(dev, ICM_REG_FIFO_CONFIG1);
+  uint8_t gyro_aaf2;
+  uint8_t gyro_aaf3;
+  uint8_t gyro_aaf4;
+  uint8_t gyro_aaf5;
+  uint8_t accel_aaf2;
+  uint8_t accel_aaf3;
+  uint8_t accel_aaf4;
+
+  gyro_aaf2 = icm42688_read_bank_reg(dev, ICM_BANK_1,
+                                     ICM_REG_GYRO_STATIC2);
+  gyro_aaf3 = icm42688_read_bank_reg(dev, ICM_BANK_1,
+                                     ICM_REG_GYRO_STATIC3);
+  gyro_aaf4 = icm42688_read_bank_reg(dev, ICM_BANK_1,
+                                     ICM_REG_GYRO_STATIC4);
+  gyro_aaf5 = icm42688_read_bank_reg(dev, ICM_BANK_1,
+                                     ICM_REG_GYRO_STATIC5);
+  accel_aaf2 = icm42688_read_bank_reg(dev, ICM_BANK_2,
+                                      ICM_REG_ACCEL_STATIC2);
+  accel_aaf3 = icm42688_read_bank_reg(dev, ICM_BANK_2,
+                                      ICM_REG_ACCEL_STATIC3);
+  accel_aaf4 = icm42688_read_bank_reg(dev, ICM_BANK_2,
+                                      ICM_REG_ACCEL_STATIC4);
+
+  syslog(verified ? LOG_INFO : LOG_WARNING,
+         "[imu-config] ICM42688 pwr=%02x gyro_odr=%02x accel_odr=%02x"
+         " gyro_ui=%02x ui_bw=%02x accel_ui=%02x tmst=%02x fifo=%02x"
+         " verify=%s\n",
+         pwr, gyro_odr, accel_odr, gyro_ui, ui_bw, accel_ui, timestamp,
+         fifo, verified ? "PASS" : "FAIL");
+  syslog(LOG_INFO,
+         "[imu-config] ICM42688 AAF gyro=%02x/%02x/%02x/%02x"
+         " accel=%02x/%02x/%02x (observed, unchanged)\n",
+         gyro_aaf2, gyro_aaf3, gyro_aaf4, gyro_aaf5,
+         accel_aaf2, accel_aaf3, accel_aaf4);
+}
+
 /****************************************************************************
  * Private Functions - configuration (register values from PX4 icm42688p)
  ****************************************************************************/
@@ -260,6 +338,8 @@ static bool icm42688_check_bits(FAR struct icm42688_dev_s *dev,
 static int icm42688_configure(FAR struct icm42688_dev_s *dev)
 {
   uint8_t id;
+  bool config_verified;
+  bool stream_verified;
 
   /* Soft reset and let the device re-initialise */
 
@@ -357,16 +437,35 @@ static int icm42688_configure(FAR struct icm42688_dev_s *dev)
    * driver is exposed to applications.
    */
 
-  if (!icm42688_check_bits(dev, ICM_REG_INT_CONFIG, 0x06, 0x01) ||
-      !icm42688_check_bits(dev, ICM_REG_FIFO_CONFIG, 0xc0, 0x00) ||
-      !icm42688_check_bits(dev, ICM_REG_FIFO_CONFIG1,
-                           ICM_FIFO_WM_GT_TH, 0x1f) ||
-      icm42688_read_reg(dev, ICM_REG_FIFO_CONFIG2) !=
-        ICM_FIFO_WM_SAMPLES * ICM_FIFO_PACKET ||
-      (icm42688_read_reg(dev, ICM_REG_FIFO_CONFIG3) & 0x0f) != 0 ||
-      !icm42688_check_bits(dev, ICM_REG_INT_CONFIG0, 0x08, 0x04) ||
-      !icm42688_check_bits(dev, ICM_REG_INT_CONFIG1, 0x00, 0x10) ||
-      icm42688_read_reg(dev, ICM_REG_INT_SOURCE0) != 0x00)
+  config_verified =
+    icm42688_check_bits(dev, ICM_REG_PWR_MGMT0, ICM_PWR_ALL_LOWNOISE, 0x00) &&
+    icm42688_check_bits(dev, ICM_REG_GYRO_CONFIG0, 0x05, 0xea) &&
+    icm42688_check_bits(dev, ICM_REG_ACCEL_CONFIG0, 0x05, 0xea) &&
+    icm42688_check_bits(dev, ICM_REG_GYRO_CONFIG1, 0x00, 0x0c) &&
+    icm42688_check_bits(dev, ICM_REG_GYRO_ACCEL_CONFIG0, 0x00, 0xff) &&
+    icm42688_check_bits(dev, ICM_REG_ACCEL_CONFIG1, 0x00, 0x18) &&
+    icm42688_check_bits(dev, ICM_REG_TMST_CONFIG, 0x1d, 0x02);
+
+  /* Preserve the original registration gate: Step 1 reports the expanded
+   * configuration result, but only the FIFO/interrupt checks that already
+   * guarded registration are allowed to stop the driver.
+   */
+
+  stream_verified =
+    icm42688_check_bits(dev, ICM_REG_INT_CONFIG, 0x06, 0x01) &&
+    icm42688_check_bits(dev, ICM_REG_FIFO_CONFIG, 0xc0, 0x00) &&
+    icm42688_check_bits(dev, ICM_REG_FIFO_CONFIG1,
+                        ICM_FIFO_WM_GT_TH, 0x1f) &&
+    icm42688_read_reg(dev, ICM_REG_FIFO_CONFIG2) ==
+      ICM_FIFO_WM_SAMPLES * ICM_FIFO_PACKET &&
+    (icm42688_read_reg(dev, ICM_REG_FIFO_CONFIG3) & 0x0f) == 0 &&
+    icm42688_check_bits(dev, ICM_REG_INT_CONFIG0, 0x08, 0x04) &&
+    icm42688_check_bits(dev, ICM_REG_INT_CONFIG1, 0x00, 0x10) &&
+    icm42688_read_reg(dev, ICM_REG_INT_SOURCE0) == 0x00;
+
+  icm42688_log_config(dev, config_verified && stream_verified);
+
+  if (!stream_verified)
     {
       snerr("ERROR: ICM-42688 FIFO/interrupt configuration verification"
             " failed\n");

@@ -282,6 +282,28 @@
 #define FMUV6C_MICROSD_BLOCKDEV   "/dev/mmcsd0"
 #define FMUV6C_MICROSD_MOUNTPOINT "/fs/microsd"
 
+/* The FMUv6C family uses one of two Bosch secondary IMUs on the same chip
+ * selects.  Their register maps and accel SPI framing are not compatible, so
+ * retain the part found during board discovery instead of making the runtime
+ * driver guess a second time.
+ */
+
+enum fmuv6c_secondary_imu_e
+{
+  FMUV6C_SECONDARY_IMU_UNKNOWN = 0,
+  FMUV6C_SECONDARY_IMU_BMI055,
+  FMUV6C_SECONDARY_IMU_BMI088,
+};
+
+struct fmuv6c_sensor_probe_s
+{
+  enum fmuv6c_secondary_imu_e secondary_imu;
+  uint8_t                     icm42688_id;
+  uint8_t                     secondary_accel_id;
+  uint8_t                     secondary_gyro_id;
+  uint8_t                     failures;
+};
+
 /****************************************************************************
  * Public Function Prototypes
  ****************************************************************************/
@@ -311,7 +333,9 @@ int stm32_bringup(void);
  *   and log a PASS/FAIL table via syslog. No threads, no uorb, no float.
  ****************************************************************************/
 
-int fmuv6c_sensor_probe(void);
+int fmuv6c_sensor_probe(FAR struct fmuv6c_sensor_probe_s *result);
+FAR const char *fmuv6c_secondary_imu_name(
+  enum fmuv6c_secondary_imu_e secondary_imu);
 
 /****************************************************************************
  * Name: fmuv6c_sensors_initialize
@@ -322,7 +346,8 @@ int fmuv6c_sensor_probe(void);
  ****************************************************************************/
 
 #ifdef CONFIG_SENSORS
-int fmuv6c_sensors_initialize(void);
+int fmuv6c_sensors_initialize(
+  FAR const struct fmuv6c_sensor_probe_s *probe);
 #endif
 
 /****************************************************************************
