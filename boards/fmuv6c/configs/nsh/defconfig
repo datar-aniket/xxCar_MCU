@@ -57,7 +57,9 @@ CONFIG_HAVE_CXXINITIALIZE=y
 CONFIG_I2C=y
 CONFIG_I2C_DRIVER=y
 CONFIG_I2CTOOL_MAXBUS=4
-CONFIG_IDLETHREAD_STACKSIZE=3072
+# Diagnostic only: keep the critical-monitor build's initial stack top at the
+# 0x2401ca90 address proven by the DWT-only boot image.
+CONFIG_IDLETHREAD_STACKSIZE=3040
 # The init task is ours, not NuttX's nsh_main.
 #
 # nsh_main unconditionally takes /dev/console and runs a shell on it, which made
