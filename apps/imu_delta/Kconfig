@@ -1,0 +1,31 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config XXCAR_IMU_DELTA
+	tristate "imu_delta: 400 Hz strapdown IMU packets"
+	default n
+	depends on UORB && SENSORS && XXCAR_SENSORS
+	select XXCAR_PARAM
+	select XXCAR_UORB_MSGS
+	---help---
+		Synchronizes the ICM42688 accel/gyro topics, applies calibration and
+		body rotation, and publishes unfiltered 400 Hz vehicle_imu delta
+		packets with quaternion coning and sculling compensation.
+
+if XXCAR_IMU_DELTA
+
+config XXCAR_IMU_DELTA_PROGNAME
+	string "Program name"
+	default "imu_delta"
+
+config XXCAR_IMU_DELTA_PRIORITY
+	int "command priority"
+	default 100
+
+config XXCAR_IMU_DELTA_STACKSIZE
+	int "command stack size"
+	default 3072
+
+endif

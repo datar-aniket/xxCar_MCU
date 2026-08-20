@@ -12,6 +12,7 @@
  *   distance_sensor  a single ranged distance (lidar/sonar/ToF).
  *   vehicle_accel    corrected, body-frame accelerometer
  *   vehicle_gyro     corrected, body-frame gyroscope
+ *   vehicle_imu      unfiltered coning/sculling-corrected IMU deltas
  *
  * The publisher is whatever driver has the data (apps/mavlink for now); the
  * subscriber is the navigation/fusion code. Neither should have to link the
@@ -149,6 +150,29 @@ struct vehicle_gyro_s
   uint8_t  pad[2];                /* 30 */
 };
 
+/* Calibrated body-frame increments for strapdown propagation. Unlike the
+ * corrected controller topics above, this path bypasses every configurable
+ * software LPF/notch. The hardware anti-alias filters remain part of the
+ * physical measurement chain.
+ */
+
+struct vehicle_imu_s
+{
+  uint64_t timestamp;             /*  0: us, publication time */
+  uint64_t timestamp_sample;      /*  8: us, end of integration window */
+  uint64_t timestamp_first;       /* 16: us, start of integration window */
+  float    delta_angle[3];        /* 24: rad, coning corrected */
+  float    delta_velocity[3];     /* 36: m/s, sculling corrected */
+  float    delta_angle_dt;        /* 48: s */
+  float    delta_velocity_dt;     /* 52: s */
+  uint16_t samples;               /* 56: native intervals in this packet */
+  uint16_t reset_counter;         /* 58: discontinuity reset generation */
+  uint8_t  instance;              /* 60: source IMU */
+  uint8_t  clipping;              /* 61: accel XYZ bits 0..2, gyro bits 3..5 */
+  uint8_t  accel_calibrated;      /* 62 */
+  uint8_t  gyro_calibrated;       /* 63 */
+};
+
 /****************************************************************************
  * Public Data
  ****************************************************************************/
@@ -157,6 +181,7 @@ ORB_DECLARE(optical_flow);
 ORB_DECLARE(distance_sensor);
 ORB_DECLARE(vehicle_accel);
 ORB_DECLARE(vehicle_gyro);
+ORB_DECLARE(vehicle_imu);
 
 /****************************************************************************
  * Public Function Prototypes
@@ -173,5 +198,8 @@ int vehicle_accel_publish(int fd, FAR const struct vehicle_accel_s *msg);
 
 int vehicle_gyro_advertise(void);
 int vehicle_gyro_publish(int fd, FAR const struct vehicle_gyro_s *msg);
+
+int vehicle_imu_advertise(void);
+int vehicle_imu_publish(int fd, FAR const struct vehicle_imu_s *msg);
 
 #endif /* __APPS_UORB_MSGS_UORB_MSGS_H */

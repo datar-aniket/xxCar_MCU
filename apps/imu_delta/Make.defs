@@ -1,0 +1,9 @@
+############################################################################
+# apps/imu_delta/Make.defs
+#
+# SPDX-License-Identifier: Apache-2.0
+############################################################################
+
+ifneq ($(CONFIG_XXCAR_IMU_DELTA),)
+CONFIGURED_APPS += $(APPDIR)/xxcar/imu_delta
+endif

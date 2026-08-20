@@ -1,0 +1,46 @@
+/****************************************************************************
+ * apps/imu_delta/imu_delta.h
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ ****************************************************************************/
+
+#ifndef __APPS_IMU_DELTA_IMU_DELTA_H
+#define __APPS_IMU_DELTA_IMU_DELTA_H
+
+#include <stdbool.h>
+#include <stdint.h>
+
+struct imu_delta_status_s
+{
+  uint64_t first_packet_us;
+  uint64_t last_packet_us;
+  uint64_t total_window_us;
+  float    total_delta_angle[3];
+  float    total_delta_velocity[3];
+  uint32_t packets;
+  uint32_t paired_samples;
+  uint32_t sync_drops;
+  uint32_t queue_overruns;
+  uint32_t publish_errors;
+  uint32_t clipped_packets;
+  uint32_t resets;
+  uint32_t gaps;
+  uint32_t duplicates;
+  uint32_t backwards;
+  uint32_t invalid;
+  uint32_t min_window_us;
+  uint32_t max_window_us;
+  uint16_t min_samples;
+  uint16_t max_samples;
+  uint8_t  sensor_rotation;
+  uint8_t  board_rotation;
+  bool     accel_calibrated;
+  bool     gyro_calibrated;
+  bool     running;
+};
+
+int imu_delta_start(void);
+int imu_delta_stop(void);
+void imu_delta_status(struct imu_delta_status_s *status);
+
+#endif /* __APPS_IMU_DELTA_IMU_DELTA_H */

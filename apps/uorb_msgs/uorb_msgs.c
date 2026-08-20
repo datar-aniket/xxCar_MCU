@@ -55,6 +55,7 @@ ORB_NAME_FITS("optical_flow");
 ORB_NAME_FITS("distance_sensor");
 ORB_NAME_FITS("vehicle_accel");
 ORB_NAME_FITS("vehicle_gyro");
+ORB_NAME_FITS("vehicle_imu");
 
 static_assert(offsetof(struct optical_flow_s, timestamp)             ==  0, "layout");
 static_assert(offsetof(struct optical_flow_s, integration_time_us)   ==  8, "layout");
@@ -96,6 +97,16 @@ static_assert(offsetof(struct vehicle_gyro_s, instance)         == 28, "layout")
 static_assert(offsetof(struct vehicle_gyro_s, calibrated)       == 29, "layout");
 static_assert(sizeof(struct vehicle_gyro_s)                     == 32, "layout");
 
+static_assert(offsetof(struct vehicle_imu_s, timestamp)         ==  0, "layout");
+static_assert(offsetof(struct vehicle_imu_s, timestamp_sample)  ==  8, "layout");
+static_assert(offsetof(struct vehicle_imu_s, timestamp_first)   == 16, "layout");
+static_assert(offsetof(struct vehicle_imu_s, delta_angle)       == 24, "layout");
+static_assert(offsetof(struct vehicle_imu_s, delta_velocity)    == 36, "layout");
+static_assert(offsetof(struct vehicle_imu_s, delta_angle_dt)    == 48, "layout");
+static_assert(offsetof(struct vehicle_imu_s, samples)           == 56, "layout");
+static_assert(offsetof(struct vehicle_imu_s, instance)          == 60, "layout");
+static_assert(sizeof(struct vehicle_imu_s)                      == 64, "layout");
+
 /****************************************************************************
  * Private Data
  ****************************************************************************/
@@ -126,6 +137,17 @@ static const char vehicle_gyro_format[] =
   ",timestamp_sample:%" PRIu64
   ",x:%hf,y:%hf,z:%hf"
   ",instance:%hhu,calibrated:%hhu";
+
+static const char vehicle_imu_format[] =
+  "timestamp:%" PRIu64
+  ",timestamp_sample:%" PRIu64
+  ",timestamp_first:%" PRIu64
+  ",delta_angle[0]:%hf,delta_angle[1]:%hf,delta_angle[2]:%hf"
+  ",delta_velocity[0]:%hf,delta_velocity[1]:%hf,delta_velocity[2]:%hf"
+  ",delta_angle_dt:%hf,delta_velocity_dt:%hf"
+  ",samples:%hu,reset_counter:%hu"
+  ",instance:%hhu,clipping:%hhu"
+  ",accel_calibrated:%hhu,gyro_calibrated:%hhu";
 #endif
 
 /****************************************************************************
@@ -136,6 +158,7 @@ ORB_DEFINE(optical_flow, struct optical_flow_s, optical_flow_format);
 ORB_DEFINE(distance_sensor, struct distance_sensor_s, distance_sensor_format);
 ORB_DEFINE(vehicle_accel, struct vehicle_accel_s, vehicle_accel_format);
 ORB_DEFINE(vehicle_gyro, struct vehicle_gyro_s, vehicle_gyro_format);
+ORB_DEFINE(vehicle_imu, struct vehicle_imu_s, vehicle_imu_format);
 
 /****************************************************************************
  * Public Functions
@@ -199,4 +222,19 @@ int vehicle_gyro_publish(int fd, FAR const struct vehicle_gyro_s *msg)
     }
 
   return orb_publish(ORB_ID(vehicle_gyro), fd, msg);
+}
+
+int vehicle_imu_advertise(void)
+{
+  return orb_advertise(ORB_ID(vehicle_imu), NULL);
+}
+
+int vehicle_imu_publish(int fd, FAR const struct vehicle_imu_s *msg)
+{
+  if (fd < 0 || msg == NULL)
+    {
+      return -EINVAL;
+    }
+
+  return orb_publish(ORB_ID(vehicle_imu), fd, msg);
 }
