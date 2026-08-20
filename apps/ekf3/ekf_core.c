@@ -33,6 +33,24 @@
 #define EKF_ALIGN_ACCEL_RMS_MAX     0.50f
 #define EKF_ALIGN_GYRO_RMS_MAX      0.02f
 
+#define EKF_DYNAMICS_TIME_CONSTANT  0.25f
+#define EKF_DYNAMICS_ENTRY_TIME     0.50f
+#define EKF_DYNAMICS_ACCEL_DEV_IN   0.60f
+#define EKF_DYNAMICS_ACCEL_DEV_OUT  1.20f
+#define EKF_DYNAMICS_GYRO_IN        0.08f
+#define EKF_DYNAMICS_GYRO_OUT       0.20f
+#define EKF_DYNAMICS_ACCEL_RMS_IN   0.50f
+#define EKF_DYNAMICS_ACCEL_RMS_OUT  1.00f
+#define EKF_DYNAMICS_GYRO_RMS_IN    0.03f
+#define EKF_DYNAMICS_GYRO_RMS_OUT   0.08f
+
+#define EKF_GRAVITY_MEAS_NOISE      0.35f
+#define EKF_MEASUREMENT_NIS_GATE    16.3f
+#define EKF_GYRO_BIAS_LIMIT         0.10f
+#define EKF_ACCEL_BIAS_LIMIT        2.00f
+#define EKF_GYRO_BIAS_LIMIT_VAR     (0.02f * 0.02f)
+#define EKF_ACCEL_BIAS_LIMIT_VAR    (0.20f * 0.20f)
+
 /* Continuous-time noise densities. These deliberately start conservative;
  * later stages will expose bounded parameters and vibration adaptation.
  */
@@ -211,6 +229,132 @@ static void alignment_clear(FAR struct ekf_core_s *ekf)
   ekf->align_samples = 0;
 }
 
+static void dynamics_clear(FAR struct ekf_core_s *ekf)
+{
+  memset(ekf->dynamics_accel_mean, 0,
+         sizeof(ekf->dynamics_accel_mean));
+  memset(ekf->dynamics_gyro_mean, 0,
+         sizeof(ekf->dynamics_gyro_mean));
+  memset(ekf->dynamics_accel_variance, 0,
+         sizeof(ekf->dynamics_accel_variance));
+  memset(ekf->dynamics_gyro_variance, 0,
+         sizeof(ekf->dynamics_gyro_variance));
+  ekf->low_dynamics_dwell_s = 0.0f;
+  ekf->dynamics_seeded = false;
+
+  if (ekf->low_dynamics)
+    {
+      ekf->low_dynamics = false;
+      ekf->low_dynamics_exit_count++;
+    }
+}
+
+static void dynamics_update(FAR struct ekf_core_s *ekf,
+                            FAR const struct ekf_imu_sample_s *sample)
+{
+  float accel[3];
+  float gyro[3];
+  float accel_variance = 0.0f;
+  float gyro_variance = 0.0f;
+  float alpha;
+  bool entry_candidate;
+  bool remain_candidate;
+  int axis;
+
+  for (axis = 0; axis < 3; axis++)
+    {
+      accel[axis] = sample->delta_velocity[axis] /
+                    sample->delta_velocity_dt - ekf->accel_bias[axis];
+      gyro[axis] = sample->delta_angle[axis] /
+                   sample->delta_angle_dt - ekf->gyro_bias[axis];
+    }
+
+  if (!ekf->dynamics_seeded)
+    {
+      memcpy(ekf->dynamics_accel_mean, accel,
+             sizeof(ekf->dynamics_accel_mean));
+      memcpy(ekf->dynamics_gyro_mean, gyro,
+             sizeof(ekf->dynamics_gyro_mean));
+      ekf->dynamics_seeded = true;
+    }
+  else
+    {
+      alpha = sample->delta_angle_dt /
+              (EKF_DYNAMICS_TIME_CONSTANT + sample->delta_angle_dt);
+
+      for (axis = 0; axis < 3; axis++)
+        {
+          float accel_delta = accel[axis] -
+                              ekf->dynamics_accel_mean[axis];
+          float gyro_delta = gyro[axis] -
+                             ekf->dynamics_gyro_mean[axis];
+
+          ekf->dynamics_accel_mean[axis] += alpha * accel_delta;
+          ekf->dynamics_gyro_mean[axis] += alpha * gyro_delta;
+          ekf->dynamics_accel_variance[axis] =
+            (1.0f - alpha) *
+            (ekf->dynamics_accel_variance[axis] +
+             alpha * accel_delta * accel_delta);
+          ekf->dynamics_gyro_variance[axis] =
+            (1.0f - alpha) *
+            (ekf->dynamics_gyro_variance[axis] +
+             alpha * gyro_delta * gyro_delta);
+        }
+    }
+
+  for (axis = 0; axis < 3; axis++)
+    {
+      accel_variance += ekf->dynamics_accel_variance[axis];
+      gyro_variance += ekf->dynamics_gyro_variance[axis];
+    }
+
+  entry_candidate =
+    sample->clipping == 0 &&
+    fabsf(vector_norm(accel) - EKF_GRAVITY) <
+      EKF_DYNAMICS_ACCEL_DEV_IN &&
+    vector_norm(gyro) < EKF_DYNAMICS_GYRO_IN &&
+    sqrtf(accel_variance) < EKF_DYNAMICS_ACCEL_RMS_IN &&
+    sqrtf(gyro_variance) < EKF_DYNAMICS_GYRO_RMS_IN;
+
+  remain_candidate =
+    sample->clipping == 0 &&
+    fabsf(vector_norm(accel) - EKF_GRAVITY) <
+      EKF_DYNAMICS_ACCEL_DEV_OUT &&
+    vector_norm(gyro) < EKF_DYNAMICS_GYRO_OUT &&
+    sqrtf(accel_variance) < EKF_DYNAMICS_ACCEL_RMS_OUT &&
+    sqrtf(gyro_variance) < EKF_DYNAMICS_GYRO_RMS_OUT;
+
+  if (ekf->low_dynamics)
+    {
+      if (!remain_candidate)
+        {
+          ekf->low_dynamics = false;
+          ekf->low_dynamics_dwell_s = 0.0f;
+          ekf->low_dynamics_exit_count++;
+        }
+      else
+        {
+          ekf->low_dynamics_dwell_s += sample->delta_angle_dt;
+        }
+
+      return;
+    }
+
+  if (!entry_candidate)
+    {
+      ekf->low_dynamics_dwell_s = 0.0f;
+      return;
+    }
+
+  ekf->low_dynamics_dwell_s += sample->delta_angle_dt;
+
+  if (ekf->low_dynamics_dwell_s >= EKF_DYNAMICS_ENTRY_TIME)
+    {
+      ekf->low_dynamics = true;
+      ekf->low_dynamics_entry_count++;
+    }
+}
+
 static void covariance_accumulator_clear(FAR struct ekf_core_s *ekf)
 {
   memset(ekf->covariance_delta_angle, 0,
@@ -235,6 +379,7 @@ static void restart_alignment(FAR struct ekf_core_s *ekf)
   memset(ekf->accel_bias, 0, sizeof(ekf->accel_bias));
   memset(ekf->covariance, 0, sizeof(ekf->covariance));
   alignment_clear(ekf);
+  dynamics_clear(ekf);
   covariance_accumulator_clear(ekf);
   ekf->first_predict_timestamp = 0;
 }
@@ -545,6 +690,427 @@ static bool covariance_predict(FAR struct ekf_core_s *ekf)
   return true;
 }
 
+static bool invert_symmetric_3x3(FAR const float matrix[3][3],
+                                 FAR float inverse[3][3])
+{
+  float determinant =
+    matrix[0][0] * (matrix[1][1] * matrix[2][2] -
+                    matrix[1][2] * matrix[1][2]) -
+    matrix[0][1] * (matrix[0][1] * matrix[2][2] -
+                    matrix[1][2] * matrix[0][2]) +
+    matrix[0][2] * (matrix[0][1] * matrix[1][2] -
+                    matrix[1][1] * matrix[0][2]);
+
+  if (!isfinite(determinant) || determinant <= 1.0e-18f)
+    {
+      return false;
+    }
+
+  inverse[0][0] = (matrix[1][1] * matrix[2][2] -
+                   matrix[1][2] * matrix[1][2]) / determinant;
+  inverse[0][1] = (matrix[0][2] * matrix[1][2] -
+                   matrix[0][1] * matrix[2][2]) / determinant;
+  inverse[0][2] = (matrix[0][1] * matrix[1][2] -
+                   matrix[0][2] * matrix[1][1]) / determinant;
+  inverse[1][0] = inverse[0][1];
+  inverse[1][1] = (matrix[0][0] * matrix[2][2] -
+                   matrix[0][2] * matrix[0][2]) / determinant;
+  inverse[1][2] = (matrix[0][1] * matrix[0][2] -
+                   matrix[0][0] * matrix[1][2]) / determinant;
+  inverse[2][0] = inverse[0][2];
+  inverse[2][1] = inverse[1][2];
+  inverse[2][2] = (matrix[0][0] * matrix[1][1] -
+                   matrix[0][1] * matrix[0][1]) / determinant;
+  return isfinite(inverse[0][0]) && isfinite(inverse[1][1]) &&
+         isfinite(inverse[2][2]);
+}
+
+static bool covariance_reset_attitude(FAR struct ekf_core_s *ekf,
+                                      FAR const float correction[3])
+{
+  float reset[3][3] =
+  {
+    {1.0f, 0.5f * correction[2], -0.5f * correction[1]},
+    {-0.5f * correction[2], 1.0f, 0.5f * correction[0]},
+    {0.5f * correction[1], -0.5f * correction[0], 1.0f}
+  };
+  float old_block[3][3];
+  float temporary[3][3];
+  float transformed[3][3];
+  int row;
+  int column;
+  int inner;
+
+  for (row = 0; row < 3; row++)
+    {
+      for (column = 0; column < 3; column++)
+        {
+          old_block[row][column] =
+            ekf->covariance[EKF_P_INDEX(row, column)];
+        }
+    }
+
+  for (column = 3; column < EKF_STATE_DIM; column++)
+    {
+      float old_cross[3];
+
+      for (row = 0; row < 3; row++)
+        {
+          old_cross[row] =
+            ekf->covariance[EKF_P_INDEX(row, column)];
+        }
+
+      for (row = 0; row < 3; row++)
+        {
+          float value = 0.0f;
+
+          for (inner = 0; inner < 3; inner++)
+            {
+              value += reset[row][inner] * old_cross[inner];
+            }
+
+          if (!isfinite(value))
+            {
+              return false;
+            }
+
+          ekf->covariance[EKF_P_INDEX(row, column)] = value;
+          ekf->covariance[EKF_P_INDEX(column, row)] = value;
+        }
+    }
+
+  for (row = 0; row < 3; row++)
+    {
+      for (column = 0; column < 3; column++)
+        {
+          temporary[row][column] = 0.0f;
+
+          for (inner = 0; inner < 3; inner++)
+            {
+              temporary[row][column] +=
+                reset[row][inner] * old_block[inner][column];
+            }
+        }
+    }
+
+  for (row = 0; row < 3; row++)
+    {
+      for (column = 0; column < 3; column++)
+        {
+          transformed[row][column] = 0.0f;
+
+          for (inner = 0; inner < 3; inner++)
+            {
+              transformed[row][column] +=
+                temporary[row][inner] * reset[column][inner];
+            }
+
+          if (!isfinite(transformed[row][column]))
+            {
+              return false;
+            }
+        }
+    }
+
+  for (row = 0; row < 3; row++)
+    {
+      for (column = row; column < 3; column++)
+        {
+          float value = 0.5f *
+            (transformed[row][column] + transformed[column][row]);
+
+          ekf->covariance[EKF_P_INDEX(row, column)] = value;
+          ekf->covariance[EKF_P_INDEX(column, row)] = value;
+        }
+    }
+
+  return true;
+}
+
+static void constrain_biases(FAR struct ekf_core_s *ekf)
+{
+  int axis;
+
+  for (axis = 0; axis < 3; axis++)
+    {
+      if (ekf->gyro_bias[axis] > EKF_GYRO_BIAS_LIMIT)
+        {
+          ekf->gyro_bias[axis] = EKF_GYRO_BIAS_LIMIT;
+          ekf->bias_limit_count++;
+        }
+      else if (ekf->gyro_bias[axis] < -EKF_GYRO_BIAS_LIMIT)
+        {
+          ekf->gyro_bias[axis] = -EKF_GYRO_BIAS_LIMIT;
+          ekf->bias_limit_count++;
+        }
+
+      if (ekf->accel_bias[axis] > EKF_ACCEL_BIAS_LIMIT)
+        {
+          ekf->accel_bias[axis] = EKF_ACCEL_BIAS_LIMIT;
+          ekf->bias_limit_count++;
+        }
+      else if (ekf->accel_bias[axis] < -EKF_ACCEL_BIAS_LIMIT)
+        {
+          ekf->accel_bias[axis] = -EKF_ACCEL_BIAS_LIMIT;
+          ekf->bias_limit_count++;
+        }
+
+      if (fabsf(ekf->gyro_bias[axis]) >= EKF_GYRO_BIAS_LIMIT &&
+          ekf->covariance[EKF_P_INDEX(9 + axis, 9 + axis)] <
+          EKF_GYRO_BIAS_LIMIT_VAR)
+        {
+          ekf->covariance[EKF_P_INDEX(9 + axis, 9 + axis)] =
+            EKF_GYRO_BIAS_LIMIT_VAR;
+        }
+
+      if (fabsf(ekf->accel_bias[axis]) >= EKF_ACCEL_BIAS_LIMIT &&
+          ekf->covariance[EKF_P_INDEX(12 + axis, 12 + axis)] <
+          EKF_ACCEL_BIAS_LIMIT_VAR)
+        {
+          ekf->covariance[EKF_P_INDEX(12 + axis, 12 + axis)] =
+            EKF_ACCEL_BIAS_LIMIT_VAR;
+        }
+    }
+}
+
+/* Returns one for an accepted update, zero for a gated innovation, and minus
+ * one for a numerical failure. The covariance expression is the expanded
+ * Joseph form:
+ *
+ *   P - KHP - PH'K' + K(HPH' + R)K'
+ *
+ * which avoids two 15x15 workspaces without dropping the stabilizing terms.
+ */
+
+static int measurement_update_3d(
+  FAR struct ekf_core_s *ekf,
+  FAR const float h[3][EKF_STATE_DIM],
+  FAR const float residual[3], float noise_variance, FAR float *nis)
+{
+  float pht[EKF_STATE_DIM][3];
+  float innovation[3][3];
+  float innovation_inverse[3][3];
+  float gain[EKF_STATE_DIM][3];
+  float correction[EKF_STATE_DIM];
+  float delta_quaternion[4];
+  float next_quaternion[4];
+  float local_nis = 0.0f;
+  int row;
+  int column;
+  int measurement;
+  int inner;
+
+  memset(pht, 0, sizeof(pht));
+
+  for (row = 0; row < EKF_STATE_DIM; row++)
+    {
+      for (measurement = 0; measurement < 3; measurement++)
+        {
+          for (inner = 0; inner < EKF_STATE_DIM; inner++)
+            {
+              pht[row][measurement] +=
+                ekf->covariance[EKF_P_INDEX(row, inner)] *
+                h[measurement][inner];
+            }
+        }
+    }
+
+  for (row = 0; row < 3; row++)
+    {
+      for (column = 0; column < 3; column++)
+        {
+          innovation[row][column] = row == column ?
+                                    noise_variance : 0.0f;
+
+          for (inner = 0; inner < EKF_STATE_DIM; inner++)
+            {
+              innovation[row][column] +=
+                h[row][inner] * pht[inner][column];
+            }
+        }
+    }
+
+  if (!invert_symmetric_3x3(innovation, innovation_inverse))
+    {
+      return -1;
+    }
+
+  for (row = 0; row < 3; row++)
+    {
+      for (column = 0; column < 3; column++)
+        {
+          local_nis += residual[row] * innovation_inverse[row][column] *
+                       residual[column];
+        }
+    }
+
+  *nis = local_nis;
+
+  if (!isfinite(local_nis))
+    {
+      return -1;
+    }
+
+  if (local_nis > EKF_MEASUREMENT_NIS_GATE)
+    {
+      return 0;
+    }
+
+  memset(gain, 0, sizeof(gain));
+  memset(correction, 0, sizeof(correction));
+
+  for (row = 0; row < EKF_STATE_DIM; row++)
+    {
+      for (measurement = 0; measurement < 3; measurement++)
+        {
+          for (inner = 0; inner < 3; inner++)
+            {
+              gain[row][measurement] +=
+                pht[row][inner] * innovation_inverse[inner][measurement];
+            }
+
+          correction[row] += gain[row][measurement] *
+                             residual[measurement];
+        }
+    }
+
+  for (row = 0; row < EKF_STATE_DIM; row++)
+    {
+      for (column = row; column < EKF_STATE_DIM; column++)
+        {
+          float first = 0.0f;
+          float second = 0.0f;
+          float third = 0.0f;
+          float value;
+
+          for (measurement = 0; measurement < 3; measurement++)
+            {
+              first += gain[row][measurement] *
+                       pht[column][measurement];
+              second += pht[row][measurement] *
+                        gain[column][measurement];
+
+              for (inner = 0; inner < 3; inner++)
+                {
+                  third += gain[row][measurement] *
+                           innovation[measurement][inner] *
+                           gain[column][inner];
+                }
+            }
+
+          value = ekf->covariance[EKF_P_INDEX(row, column)] -
+                  first - second + third;
+
+          if (!isfinite(value))
+            {
+              return -1;
+            }
+
+          ekf->covariance[EKF_P_INDEX(row, column)] = value;
+          ekf->covariance[EKF_P_INDEX(column, row)] = value;
+        }
+    }
+
+  rotation_vector_quaternion(correction, delta_quaternion);
+  quaternion_multiply(ekf->quaternion, delta_quaternion,
+                      next_quaternion);
+  memcpy(ekf->quaternion, next_quaternion, sizeof(ekf->quaternion));
+
+  if (!quaternion_normalize(ekf->quaternion))
+    {
+      return -1;
+    }
+
+  for (row = 0; row < 3; row++)
+    {
+      ekf->velocity[row] += correction[3 + row];
+      ekf->position[row] += correction[6 + row];
+      ekf->gyro_bias[row] += correction[9 + row];
+      ekf->accel_bias[row] += correction[12 + row];
+    }
+
+  if (!covariance_reset_attitude(ekf, correction))
+    {
+      return -1;
+    }
+
+  constrain_biases(ekf);
+
+  for (row = 0; row < EKF_STATE_DIM; row++)
+    {
+      float *diagonal =
+        &ekf->covariance[EKF_P_INDEX(row, row)];
+
+      if (!isfinite(*diagonal))
+        {
+          return -1;
+        }
+
+      if (*diagonal < EKF_MIN_VARIANCE)
+        {
+          *diagonal = EKF_MIN_VARIANCE;
+        }
+    }
+
+  return 1;
+}
+
+static bool low_dynamics_updates(FAR struct ekf_core_s *ekf)
+{
+  float h[3][EKF_STATE_DIM];
+  float residual[3];
+  float rotation[3][3];
+  float gravity_body[3];
+  float dt = ekf->covariance_dt;
+  int result;
+  int axis;
+
+  if (!ekf->low_dynamics)
+    {
+      return true;
+    }
+
+  quaternion_to_rotation(ekf->quaternion, rotation);
+  gravity_body[0] = rotation[2][0] * EKF_GRAVITY;
+  gravity_body[1] = rotation[2][1] * EKF_GRAVITY;
+  gravity_body[2] = rotation[2][2] * EKF_GRAVITY;
+  memset(h, 0, sizeof(h));
+
+  h[0][1] = -gravity_body[2];
+  h[0][2] = gravity_body[1];
+  h[1][0] = gravity_body[2];
+  h[1][2] = -gravity_body[0];
+  h[2][0] = -gravity_body[1];
+  h[2][1] = gravity_body[0];
+
+  for (axis = 0; axis < 3; axis++)
+    {
+      h[axis][12 + axis] = 1.0f;
+      residual[axis] = ekf->covariance_delta_velocity[axis] / dt -
+                       gravity_body[axis] - ekf->accel_bias[axis];
+    }
+
+  result = measurement_update_3d(
+    ekf, h, residual,
+    EKF_GRAVITY_MEAS_NOISE * EKF_GRAVITY_MEAS_NOISE,
+    &ekf->last_gravity_nis);
+
+  if (result < 0)
+    {
+      return false;
+    }
+  else if (result == 0)
+    {
+      ekf->gravity_reject_count++;
+    }
+  else
+    {
+      ekf->gravity_accept_count++;
+    }
+
+  return true;
+}
+
 static bool nominal_predict(FAR struct ekf_core_s *ekf,
                             FAR const struct ekf_imu_sample_s *sample)
 {
@@ -619,7 +1185,7 @@ static bool nominal_predict(FAR struct ekf_core_s *ekf,
 
   if (ekf->covariance_phase >= EKF_COVARIANCE_INTERVAL)
     {
-      if (!covariance_predict(ekf))
+      if (!covariance_predict(ekf) || !low_dynamics_updates(ekf))
         {
           return false;
         }
@@ -715,6 +1281,8 @@ int ekf_core_process(FAR struct ekf_core_s *ekf,
     {
       ekf->clipping_count++;
     }
+
+  dynamics_update(ekf, sample);
 
   if (!ekf->initialized)
     {

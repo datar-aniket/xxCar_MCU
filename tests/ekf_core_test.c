@@ -149,6 +149,10 @@ static void test_initialization_and_static_prediction(void)
 
   assert(ekf.predict_count == 400);
   assert(ekf.covariance_count == 100);
+  assert(ekf.low_dynamics);
+  assert(ekf.low_dynamics_entry_count == 1);
+  assert(ekf.gravity_accept_count == 100);
+  assert(ekf.gravity_reject_count == 0);
 
   for (index = 0; index < 3; index++)
     {
@@ -197,6 +201,58 @@ static void test_yaw_prediction(void)
   assert_near(euler[0], 0.0f, 2.0e-4f);
   assert_near(euler[1], 0.0f, 2.0e-4f);
   assert_near(euler[2], 0.5f, 3.0e-4f);
+  assert(!ekf.low_dynamics);
+  assert(ekf.low_dynamics_exit_count == 1);
+  assert(ekf.gravity_accept_count == 0);
+}
+
+static void test_low_dynamics_updates(void)
+{
+  struct ekf_core_s ekf;
+  struct ekf_imu_sample_s sample;
+  const float zero_gyro[3] = {0.0f, 0.0f, 0.0f};
+  float biased_gyro[3] = {0.006f, -0.004f, 0.0f};
+  float biased_accel[3] = {0.0f, 0.0f, TEST_GRAVITY + 0.20f};
+  float transient_accel[3] = {1.6f, 0.0f, TEST_GRAVITY};
+  float euler[3];
+  uint64_t timestamp = 6000000ull;
+  uint32_t rejected_before;
+  int index;
+
+  ekf_core_init(&ekf);
+  initialize_tilted(&ekf, &timestamp, 0.0f, 0.0f, zero_gyro);
+  assert(ekf.low_dynamics);
+
+  for (index = 0; index < 2000; index++)
+    {
+      timestamp += TEST_DT_US;
+      make_sample(&sample, timestamp, biased_accel, biased_gyro);
+      assert(ekf_core_process(&ekf, &sample) == EKF_PROCESS_PREDICTED);
+    }
+
+  ekf_core_euler(&ekf, euler);
+  assert_near(ekf.gyro_bias[0], biased_gyro[0], 1.5e-3f);
+  assert_near(ekf.gyro_bias[1], biased_gyro[1], 1.5e-3f);
+  assert_near(ekf.accel_bias[2], 0.20f, 3.0e-2f);
+  assert_near(euler[0], 0.0f, 4.0e-3f);
+  assert_near(euler[1], 0.0f, 4.0e-3f);
+  assert(ekf.gravity_accept_count > 450);
+  assert(ekf.gravity_reject_count == 0);
+  assert(ekf.bias_limit_count == 0);
+  assert_covariance_positive_definite(&ekf);
+
+  rejected_before = ekf.gravity_reject_count;
+
+  for (index = 0; index < EKF_COVARIANCE_INTERVAL; index++)
+    {
+      timestamp += TEST_DT_US;
+      make_sample(&sample, timestamp, transient_accel, biased_gyro);
+      assert(ekf_core_process(&ekf, &sample) == EKF_PROCESS_PREDICTED);
+    }
+
+  assert(ekf.low_dynamics);
+  assert(ekf.gravity_reject_count == rejected_before + 1);
+  assert(ekf.last_gravity_nis > 16.3f);
 }
 
 static void test_fault_resets(void)
@@ -249,6 +305,7 @@ int main(void)
 {
   test_initialization_and_static_prediction();
   test_yaw_prediction();
+  test_low_dynamics_updates();
   test_fault_resets();
   puts("ekf core tests: PASS");
   return 0;

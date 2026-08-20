@@ -68,6 +68,14 @@ struct ekf_core_s
   float align_time_s;
   uint32_t align_samples;
 
+  float dynamics_accel_mean[3];
+  float dynamics_gyro_mean[3];
+  float dynamics_accel_variance[3];
+  float dynamics_gyro_variance[3];
+  float low_dynamics_dwell_s;
+  bool dynamics_seeded;
+  bool low_dynamics;
+
   float covariance_delta_angle[3];
   float covariance_delta_velocity[3];
   float covariance_dt;
@@ -93,6 +101,12 @@ struct ekf_core_s
   uint32_t source_reset_count;
   uint32_t numerical_reset_count;
   uint32_t alignment_restart_count;
+  uint32_t low_dynamics_entry_count;
+  uint32_t low_dynamics_exit_count;
+  uint32_t gravity_accept_count;
+  uint32_t gravity_reject_count;
+  uint32_t bias_limit_count;
+  float last_gravity_nis;
 };
 
 void ekf_core_init(FAR struct ekf_core_s *ekf);

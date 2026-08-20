@@ -7,6 +7,7 @@
 #include <nuttx/config.h>
 
 #include <inttypes.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,6 +27,8 @@ static void print_status(void)
   FAR const struct ekf_core_s *core;
   float euler[3];
   float progress;
+  float accel_rms;
+  float gyro_rms;
   double output_rate = 0.0;
   double predict_rate = 0.0;
   const float rad_to_deg = 57.29577951308232f;
@@ -51,6 +54,12 @@ static void print_status(void)
     }
 
   progress = core->align_time_s * 100.0f;
+  accel_rms = sqrtf(core->dynamics_accel_variance[0] +
+                    core->dynamics_accel_variance[1] +
+                    core->dynamics_accel_variance[2]);
+  gyro_rms = sqrtf(core->dynamics_gyro_variance[0] +
+                   core->dynamics_gyro_variance[1] +
+                   core->dynamics_gyro_variance[2]);
 
   if (progress > 100.0f)
     {
@@ -70,6 +79,13 @@ static void print_status(void)
          " restarts %" PRIu32 "\n",
          (double)progress, core->align_samples,
          core->alignment_restart_count);
+  printf("  dynamics %s dwell %.2fs accel_rms %.3f gyro_rms %.4f"
+         " entries %" PRIu32 " exits %" PRIu32 "\n",
+         core->low_dynamics ? "LOW" : "MOTION",
+         (double)core->low_dynamics_dwell_s,
+         (double)accel_rms, (double)gyro_rms,
+         core->low_dynamics_entry_count,
+         core->low_dynamics_exit_count);
   printf("  attitude RPY %+.3f %+.3f %+.3f deg (yaw relative)\n",
          (double)(euler[0] * rad_to_deg),
          (double)(euler[1] * rad_to_deg),
@@ -96,6 +112,10 @@ static void print_status(void)
          (double)core->covariance[EKF_P_INDEX(3, 3)],
          (double)core->covariance[EKF_P_INDEX(4, 4)],
          (double)core->covariance[EKF_P_INDEX(5, 5)]);
+  printf("  gravity update accept %" PRIu32 " reject %" PRIu32
+         " NIS %.3f bias_limit %" PRIu32 "\n",
+         core->gravity_accept_count, core->gravity_reject_count,
+         (double)core->last_gravity_nis, core->bias_limit_count);
   printf("  faults reject %" PRIu32 " stale %" PRIu32
          " uncal %" PRIu32 " clip %" PRIu32 " dup %" PRIu32
          " back %" PRIu32 " gap %" PRIu32 " source_reset %" PRIu32
