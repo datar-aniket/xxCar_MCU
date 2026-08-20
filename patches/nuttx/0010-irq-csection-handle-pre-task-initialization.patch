@@ -1,0 +1,85 @@
+diff --git a/sched/irq/irq_csection.c b/sched/irq/irq_csection.c
+--- a/sched/irq/irq_csection.c
++++ b/sched/irq/irq_csection.c
+@@ -109,6 +109,16 @@ irqstate_t enter_critical_section_notrace(void)
+ 
+   ret = up_irq_save();
+ 
++  /* Before nx_start() initializes the task lists there is no current TCB.
++   * Local interrupt masking is sufficient because secondary CPUs and task
++   * switching are not active yet.
++   */
++
++  if (!OSINIT_TASK_READY())
++    {
++      return ret;
++    }
++
+   /* If called from an interrupt handler, then just take the spinlock.
+    * If we are already in a critical section, this will lock the CPU
+    * in the interrupt handler.  Sounds worse than it is.
+@@ -263,6 +273,13 @@ irqstate_t enter_critical_section_notrace(void)
+ 
+   ret = up_irq_save();
+ 
++  /* Before nx_start() initializes the task lists there is no current TCB. */
++
++  if (!OSINIT_TASK_READY())
++    {
++      return ret;
++    }
++
+   /* Check if we were called from an interrupt handler */
+ 
+   if (!up_interrupt_context())
+@@ -292,6 +309,11 @@ irqstate_t enter_critical_section(void)
+   FAR struct tcb_s *rtcb;
+   irqstate_t flags;
+ 
++  if (!OSINIT_TASK_READY())
++    {
++      return enter_critical_section_notrace();
++    }
++
+   /* If CONFIG_SCHED_CRITMONITOR_MAXTIME_BUSYWAIT >= 0,
+    * start counting time of busy-waiting.
+    */
+@@ -336,6 +358,12 @@ void leave_critical_section_notrace(irqstate_t flags)
+ {
+   int cpu;
+ 
++  if (!OSINIT_TASK_READY())
++    {
++      up_irq_restore(flags);
++      return;
++    }
++
+   /* If called from an interrupt handler, then just release the
+    * spinlock.  The interrupt handling logic should already hold the
+    * spinlock if enter_critical_section() has been called.  Unlocking
+@@ -434,6 +462,12 @@ void leave_critical_section_notrace(irqstate_t flags)
+ #else
+ void leave_critical_section_notrace(irqstate_t flags)
+ {
++  if (!OSINIT_TASK_READY())
++    {
++      up_irq_restore(flags);
++      return;
++    }
++
+   /* Check if we were called from an interrupt handler and that the tasks
+    * lists have been initialized.
+    */
+@@ -464,6 +498,12 @@ void leave_critical_section(irqstate_t flags)
+ {
+   FAR struct tcb_s *rtcb;
+ 
++  if (!OSINIT_TASK_READY())
++    {
++      leave_critical_section_notrace(flags);
++      return;
++    }
++
+   if (!up_interrupt_context())
+     {
+       rtcb = this_task();
