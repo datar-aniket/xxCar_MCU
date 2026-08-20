@@ -174,6 +174,12 @@ struct vehicle_imu_s
   uint8_t  gyro_calibrated;       /* 63 */
 };
 
+/* IMU increments are not snapshots: overwriting one loses motion forever.
+ * Eight entries cover about 20 ms at 400 Hz while the estimator is scheduled.
+ */
+
+#define VEHICLE_IMU_QUEUE_SIZE 8u
+
 /* Current-time estimator output. The first EKF stage publishes attitude at
  * IMU packet rate while deliberately leaving velocity and position invalid
  * until an aiding source makes them observable. Variances are the diagonal of

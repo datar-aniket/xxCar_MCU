@@ -107,6 +107,8 @@ static_assert(offsetof(struct vehicle_imu_s, delta_angle_dt)    == 48, "layout")
 static_assert(offsetof(struct vehicle_imu_s, samples)           == 56, "layout");
 static_assert(offsetof(struct vehicle_imu_s, instance)          == 60, "layout");
 static_assert(sizeof(struct vehicle_imu_s)                      == 64, "layout");
+static_assert(VEHICLE_IMU_QUEUE_SIZE >= 4u,
+              "vehicle_imu must be queued; delta packets cannot be overwritten");
 
 static_assert(offsetof(struct estimator_state_s, timestamp)          ==   0, "layout");
 static_assert(offsetof(struct estimator_state_s, timestamp_sample)   ==   8, "layout");
@@ -263,7 +265,8 @@ int vehicle_gyro_publish(int fd, FAR const struct vehicle_gyro_s *msg)
 
 int vehicle_imu_advertise(void)
 {
-  return orb_advertise(ORB_ID(vehicle_imu), NULL);
+  return orb_advertise_queue(ORB_ID(vehicle_imu), NULL,
+                             VEHICLE_IMU_QUEUE_SIZE);
 }
 
 int vehicle_imu_publish(int fd, FAR const struct vehicle_imu_s *msg)
