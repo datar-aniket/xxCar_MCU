@@ -30,7 +30,7 @@
 #include "../uorb_msgs/uorb_msgs.h"
 
 #define IMU_DELTA_PRIORITY       (SCHED_PRIORITY_DEFAULT + 25)
-#define IMU_DELTA_STACK          3072
+#define IMU_DELTA_STACK          4096
 #define IMU_DELTA_DRAIN_MAX      64
 #define IMU_DELTA_QUEUE_SIZE     32
 #define ICM_ACCEL_CLIP_M_S2      (0.98f * 16.0f * 9.80665f)
