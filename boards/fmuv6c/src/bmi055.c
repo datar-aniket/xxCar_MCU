@@ -93,7 +93,9 @@
 
 #define ACC_RANGE_16G_SET       0x0c   /* range<3:0> = 1100b */
 #define ACC_RANGE_16G_CLR       0x03
-#define ACC_HBW_UNFILTERED      0x80
+#define ACC_BW_2KHZ_1KHZ_LPF    0x0f   /* 2 kHz ODR, 1 kHz filtered BW */
+#define ACC_LPW_NORMAL          0x00
+#define ACC_HBW_FILTERED        0x00
 #define ACC_INT_FWM_EN          0x40
 #define ACC_INT1_FWM            0x02
 #define ACC_INT1_OD_LVL         0x03   /* clear -> push-pull, active low */
@@ -113,7 +115,9 @@
 #define GYR_REG_FIFO_CONFIG_0   0x3d
 
 #define GYR_RANGE_2000DPS       0x00
-#define GYR_HBW_UNFILTERED      0x80
+#define GYR_BW_2KHZ_230HZ_LPF   0x81   /* 2 kHz ODR, 230 Hz filtered BW */
+#define GYR_LPM_NORMAL          0x00
+#define GYR_HBW_FILTERED        0x00
 #define GYR_INT_FIFO_EN         0x40   /* INT_EN_0: fifo_en */
 #define GYR_INT1_FIFO           0x04   /* INT_MAP_1: int1_fifo */
 #define GYR_FIFO_WM_ENABLE      0x88   /* fifo_wm_en | required bit3 */
@@ -126,7 +130,7 @@
 #define BMI_FIFO_WM_SAMPLES     8      /* watermark -> ~250 Hz interrupt */
 #define BMI_FIFO_MAX_READ       64     /* per DMA read (*6=384 <= 512) */
 
-/* Both unfiltered data streams are sampled at the BMI055's documented 2 kHz
+/* Both filtered data streams are sampled at the BMI055's documented 2 kHz
  * rate. Keep the timestamp state in 1/32 us units so the TIM5 phase correction
  * can move smoothly by fractions of a microsecond without quantizing every
  * watermark adjustment.
@@ -285,7 +289,7 @@ static void bmi055_fifo_flush(FAR struct bmi055_dev_s *dev)
   dev->rate_anchor_timestamp = 0;
 }
 
-static void bmi055_log_config(FAR struct bmi055_dev_s *dev)
+static bool bmi055_log_config(FAR struct bmi055_dev_s *dev)
 {
   uint8_t range = bmi055_read_reg(dev, dev->is_gyro ? GYR_REG_RANGE :
                                                          ACC_REG_PMU_RANGE);
@@ -301,21 +305,27 @@ static void bmi055_log_config(FAR struct bmi055_dev_s *dev)
   if (dev->is_gyro)
     {
       verified = range == GYR_RANGE_2000DPS &&
-                 (high_bw & GYR_HBW_UNFILTERED) != 0 &&
+                 bw == GYR_BW_2KHZ_230HZ_LPF &&
+                 low_power == GYR_LPM_NORMAL &&
+                 high_bw == GYR_HBW_FILTERED &&
                  fifo == BMI_FIFO_MODE;
     }
   else
     {
       verified = (range & 0x0f) == ACC_RANGE_16G_SET &&
-                 (high_bw & ACC_HBW_UNFILTERED) != 0 &&
+                 bw == ACC_BW_2KHZ_1KHZ_LPF &&
+                 low_power == ACC_LPW_NORMAL &&
+                 high_bw == ACC_HBW_FILTERED &&
                  fifo == BMI_FIFO_MODE;
     }
 
   syslog(verified ? LOG_INFO : LOG_WARNING,
          "[imu-config] BMI055 %s range=%02x bw=%02x lp=%02x hbw=%02x"
-         " fifo=%02x verify=%s (observed, unchanged)\n",
+         " fifo=%02x verify=%s (configured)\n",
          dev->is_gyro ? "gyro" : "accel", range, bw, low_power, high_bw,
          fifo, verified ? "PASS" : "FAIL");
+
+  return verified;
 }
 
 static int bmi055_configure(FAR struct bmi055_dev_s *dev)
@@ -340,10 +350,16 @@ static int bmi055_configure(FAR struct bmi055_dev_s *dev)
 
   if (dev->is_gyro)
     {
-      /* +/-2000 dps, unfiltered, FIFO watermark -> INT1 (push-pull, low) */
+      /* ArduPilot's BMI055 profile: +/-2000 dps and a 2 kHz ODR with the
+       * die's 230 Hz low-pass filter enabled. RATE_HBW bit7 selects the raw
+       * high-bandwidth path when set, so write zero rather than preserving
+       * its reset state.
+       */
 
       bmi055_write_reg(dev, GYR_REG_RANGE, GYR_RANGE_2000DPS);
-      bmi055_modify(dev, GYR_REG_RATE_HBW, GYR_HBW_UNFILTERED, 0x00);
+      bmi055_write_reg(dev, GYR_REG_BW, GYR_BW_2KHZ_230HZ_LPF);
+      bmi055_write_reg(dev, GYR_REG_LPM1, GYR_LPM_NORMAL);
+      bmi055_write_reg(dev, GYR_REG_RATE_HBW, GYR_HBW_FILTERED);
 
       /* Program the complete interrupt path deterministically. In particular,
        * FIFO_WM_ENABLE is the Bosch-defined value 0x88, not only bit7. Bit3
@@ -361,11 +377,17 @@ static int bmi055_configure(FAR struct bmi055_dev_s *dev)
     }
   else
     {
-      /* +/-16 g, unfiltered, FIFO watermark -> INT1 (push-pull, low) */
+      /* Keep the accel at 2 kHz, but select its filtered data path. The
+       * BMI055 couples accel ODR and bandwidth, so 0x0f is the only filtered
+       * 2 kHz profile (1 kHz bandwidth). A lower cutoff also lowers the ODR
+       * and belongs in the later ODR/timestamp step.
+       */
 
       bmi055_modify(dev, ACC_REG_PMU_RANGE, ACC_RANGE_16G_SET,
                     ACC_RANGE_16G_CLR);
-      bmi055_modify(dev, ACC_REG_ACCD_HBW, ACC_HBW_UNFILTERED, 0x00);
+      bmi055_write_reg(dev, ACC_REG_PMU_BW, ACC_BW_2KHZ_1KHZ_LPF);
+      bmi055_write_reg(dev, ACC_REG_PMU_LPW, ACC_LPW_NORMAL);
+      bmi055_write_reg(dev, ACC_REG_ACCD_HBW, ACC_HBW_FILTERED);
       bmi055_modify(dev, ACC_REG_INT_EN_1, ACC_INT_FWM_EN, 0x00);
       bmi055_modify(dev, ACC_REG_INT_MAP_1, ACC_INT1_FWM, 0x00);
       bmi055_modify(dev, ACC_REG_INT_OUT_CTRL, 0x00, ACC_INT1_OD_LVL);
@@ -374,7 +396,12 @@ static int bmi055_configure(FAR struct bmi055_dev_s *dev)
 
   bmi055_write_reg(dev, BMI_REG_FIFO_CONFIG_1, BMI_FIFO_MODE);
 
-  bmi055_log_config(dev);
+  if (!bmi055_log_config(dev))
+    {
+      snerr("ERROR: BMI055 %s configuration verification failed\n",
+            dev->is_gyro ? "gyro" : "accel");
+      return -EIO;
+    }
 
   sninfo("BMI055 %s configured for 2 kHz FIFO streaming\n",
          dev->is_gyro ? "gyro" : "accel");
