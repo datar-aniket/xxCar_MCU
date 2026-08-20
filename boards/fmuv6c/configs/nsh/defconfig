@@ -247,16 +247,14 @@ CONFIG_USART6_RXFIFO_THRES=1
 # handles a 1 kHz tick trivially (PX4 runs the same).
 CONFIG_USEC_PER_TICK=1000
 
-# CPU-load accounting via SYSCLK tick-sampling. TICKSPERSEC MUST equal the system
-# tick rate (1e6/USEC_PER_TICK = 1000 Hz): the sampler re-arms every
-# (TICK_PER_SEC/TICKSPERSEC) ticks, so any value > the tick rate floors that
-# period to 0 -> a 0-tick self-rearming watchdog that spins forever in the timer
-# ISR and HARD-HANGS the board. You cannot sample CPU load faster than the tick.
-# NOTE: even at 1 kHz this remains a sampling estimate, not exact per-thread
-# cycle accounting; treat single-thread % for tick-aligned periodic threads as
-# an upper bound (the DWT/CRITMONITOR alternative faulted at boot on this H7).
-CONFIG_SCHED_CPULOAD_SYSCLK=y
-CONFIG_SCHED_CPULOAD_TICKSPERSEC=1000
+# Exact CPU runtime accounting. The Cortex-M7 DWT cycle counter runs at the
+# 480 MHz core clock and NuttX snapshots it at every context switch. This is
+# elapsed execution time, unlike SYSCLK cpuload's 1 kHz active-task sampling.
+# Thresholds remain disabled: CRITMONITOR is used only as a runtime accumulator.
+CONFIG_ARCH_PERF_EVENTS=y
+CONFIG_SCHED_CRITMONITOR=y
+CONFIG_SCHED_CRITMONITOR_MAXTIME_THREAD=0
+CONFIG_SCHED_CPULOAD_NONE=y
 
 CONFIG_CDCACM=y
 CONFIG_SERIAL_REMOVABLE=y
@@ -330,6 +328,7 @@ CONFIG_STM32H7_USART_INVERT=y
 CONFIG_XXCAR_RC=y
 CONFIG_XXCAR_UORB_MSGS=y
 CONFIG_XXCAR_SENSOR_STATUS=y
+CONFIG_XXCAR_CPU_STATUS=y
 CONFIG_XXCAR_SENSORS=y
 CONFIG_XXCAR_LOGGER=y
 CONFIG_XXCAR_REBOOT=y

@@ -1,0 +1,9 @@
+############################################################################
+# apps/cpu_status/Make.defs
+#
+# SPDX-License-Identifier: Apache-2.0
+############################################################################
+
+ifneq ($(CONFIG_XXCAR_CPU_STATUS),)
+CONFIGURED_APPS += $(APPDIR)/xxcar/cpu_status
+endif

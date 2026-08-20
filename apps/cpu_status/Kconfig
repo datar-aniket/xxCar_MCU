@@ -1,0 +1,29 @@
+#
+# For a description of the syntax of this configuration file, see the
+# kconfig-language.txt file in the NuttX tools repository.
+#
+
+config XXCAR_CPU_STATUS
+	tristate "cpu_status: hardware-cycle CPU runtime audit"
+	default n
+	depends on ARCH_PERF_EVENTS && SCHED_CRITMONITOR
+	---help---
+		Measure total and per-thread CPU execution using Cortex-M hardware
+		cycles accumulated at scheduler context switches. Unlike NuttX's
+		SYSCLK cpuload, this does not sample the active task at timer ticks.
+
+if XXCAR_CPU_STATUS
+
+config XXCAR_CPU_STATUS_PROGNAME
+	string "Program name"
+	default "cpu_status"
+
+config XXCAR_CPU_STATUS_PRIORITY
+	int "task priority"
+	default 100
+
+config XXCAR_CPU_STATUS_STACKSIZE
+	int "stack size"
+	default 4096
+
+endif

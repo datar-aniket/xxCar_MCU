@@ -1,0 +1,13 @@
+diff --git a/sched/sched/sched_critmonitor.c b/sched/sched/sched_critmonitor.c
+index 8ee7b68d..b83c8df2 100644
+--- a/sched/sched/sched_critmonitor.c
++++ b/sched/sched/sched_critmonitor.c
+@@ -380,7 +380,7 @@ void nxsched_switch_critmon(FAR struct tcb_s *from, FAR struct tcb_s *to)
+
+ #if CONFIG_SCHED_CRITMONITOR_MAXTIME_THREAD >= 0
+   from->run_time += elapsed;
+-  to->run_time = current;
++  to->run_start = current;
+   if (elapsed > from->run_max)
+     {
+       from->run_max = elapsed;
