@@ -25,7 +25,7 @@
  * Configured to match the primary IMU where the silicon allows:
  *   rate  : 2 kHz         (same as primary)
  *   range : +/-16 g, +/-2000 dps (same as primary)
- *   filter: unfiltered / high-bandwidth (no extra group delay)
+ *   filter: accel 1 kHz LPF, gyro 230 Hz LPF
  *
  * RESOLUTION IS A HARDWARE LIMIT, NOT A CONFIG CHOICE. The BMI055 accel ADC is
  * 12-bit: at +/-16 g that is 128 LSB/g (7.8 mg/LSB) versus the ICM-42688-P's
@@ -58,6 +58,7 @@
 #include "stm32_gpio.h"
 #include "fmuv6c.h"
 #include "bmi055.h"
+#include "bmi055_timing.h"
 
 #if defined(CONFIG_SENSORS) && defined(CONFIG_SPI)
 
@@ -136,12 +137,6 @@
  * watermark adjustment.
  */
 
-#define BMI_TIMESTAMP_FRAC_BITS 5
-#define BMI_NOMINAL_PERIOD_Q5   (500ull << BMI_TIMESTAMP_FRAC_BITS)
-#define BMI_RATE_WINDOW_US      1000000ull /* update once per TIM5 second */
-#define BMI_PERIOD_AVG_SAMPLES  4      /* four-second moving average */
-#define BMI_PERIOD_MIN_Q5       (450ull << BMI_TIMESTAMP_FRAC_BITS)
-#define BMI_PERIOD_MAX_Q5       (550ull << BMI_TIMESTAMP_FRAC_BITS)
 #define BMI_PHASE_SLEW_DIV      32     /* at most 1/32 period per FIFO batch */
 #define BMI_EDGE_ERROR_PERIODS  2      /* reject a mis-associated DRDY edge */
 
@@ -152,7 +147,7 @@
 /* Scales. See the resolution note in the file header. */
 
 #define BMI_ACCEL_SCALE         (9.80665f / 128.0f)              /* +/-16 g   */
-#define BMI_GYRO_SCALE          (0.017453292519943295f / 16.384f) /* +/-2000dps */
+#define BMI_GYRO_SCALE          (0.017453292519943295f / 16.384f)
 #define BMI_TEMP_SCALE          0.5f                             /* 0.5 K/LSB */
 #define BMI_TEMP_OFFSET         23.0f
 
@@ -174,13 +169,8 @@ struct bmi055_dev_s
   bool                      enabled;
   bool                      streaming;
   uint64_t                  last_timestamp_q5;
-  uint64_t                  sample_period_q5;
   uint64_t                  sample_count;
-  uint64_t                  rate_anchor_sample;
-  uint64_t                  rate_anchor_timestamp;
-  uint64_t                  period_history_q5[BMI_PERIOD_AVG_SAMPLES];
-  uint64_t                  period_history_sum_q5;
-  uint8_t                   period_history_index;
+  struct bmi055_timing_s    timing;
   volatile uint64_t         drdy_timestamp;
   volatile uint32_t         drdy_sequence;
   volatile uint32_t         consumed_drdy_sequence;
@@ -286,7 +276,7 @@ static void bmi055_fifo_flush(FAR struct bmi055_dev_s *dev)
   dev->consumed_drdy_sequence = dev->drdy_sequence;
   leave_critical_section(flags);
 
-  dev->rate_anchor_timestamp = 0;
+  bmi055_timing_reset_anchor(&dev->timing);
 }
 
 static bool bmi055_log_config(FAR struct bmi055_dev_s *dev)
@@ -447,69 +437,29 @@ static void bmi055_publish(FAR struct bmi055_dev_s *dev,
     }
 }
 
-/* Estimate the die's real FIFO period from watermark edges measured one TIM5
- * second apart. Bosch specifies both unfiltered streams as nominal 2 kHz, but
- * each die has an independent oscillator. Dividing elapsed TIM5 time by the
- * absolute FIFO-sample count makes the estimate independent of the scheduler
- * and of how many frames happened to be drained in each batch.
- *
- * Four nominal observations seed the moving-average history. Consequently a
- * single bad-but-in-range observation cannot directly replace the active
- * period, while four seconds is short enough to acquire the actual rate before
- * calibration or logging normally begins.
+/* Report the one-time fast lock without using floating-point formatting in
+ * the sensor worker. The estimator continues to track each die silently with
+ * its existing four-observation, one-second moving average after this lock.
  */
 
-static void bmi055_update_period(FAR struct bmi055_dev_s *dev,
-                                 uint64_t edge_timestamp,
-                                 uint64_t edge_sample)
+static void bmi055_log_timing_lock(FAR struct bmi055_dev_s *dev)
 {
-  uint64_t delta_samples;
-  uint64_t delta_us;
-  uint64_t observed_q5;
-  uint64_t replaced_q5;
+  uint64_t period_q5 = dev->timing.period_q5;
+  uint64_t period_us = period_q5 >> BMI055_TIME_FRAC_BITS;
+  uint64_t period_milli_us =
+    (period_q5 & ((1u << BMI055_TIME_FRAC_BITS) - 1u)) * 1000u /
+    (1u << BMI055_TIME_FRAC_BITS);
+  uint64_t rate_millihz =
+    (1000000000ull << BMI055_TIME_FRAC_BITS) / period_q5;
 
-  if (dev->rate_anchor_timestamp == 0)
-    {
-      dev->rate_anchor_timestamp = edge_timestamp;
-      dev->rate_anchor_sample = edge_sample;
-      return;
-    }
-
-  if (edge_timestamp <= dev->rate_anchor_timestamp ||
-      edge_sample <= dev->rate_anchor_sample)
-    {
-      dev->rate_anchor_timestamp = edge_timestamp;
-      dev->rate_anchor_sample = edge_sample;
-      return;
-    }
-
-  delta_us = edge_timestamp - dev->rate_anchor_timestamp;
-  if (delta_us < BMI_RATE_WINDOW_US)
-    {
-      return;
-    }
-
-  delta_samples = edge_sample - dev->rate_anchor_sample;
-  observed_q5 = ((delta_us << BMI_TIMESTAMP_FRAC_BITS) +
-                 delta_samples / 2) / delta_samples;
-
-  if (observed_q5 >= BMI_PERIOD_MIN_Q5 &&
-      observed_q5 <= BMI_PERIOD_MAX_Q5)
-    {
-      replaced_q5 =
-        dev->period_history_q5[dev->period_history_index];
-      dev->period_history_sum_q5 -= replaced_q5;
-      dev->period_history_q5[dev->period_history_index] = observed_q5;
-      dev->period_history_sum_q5 += observed_q5;
-      dev->period_history_index =
-        (dev->period_history_index + 1) % BMI_PERIOD_AVG_SAMPLES;
-      dev->sample_period_q5 =
-        (dev->period_history_sum_q5 + BMI_PERIOD_AVG_SAMPLES / 2) /
-        BMI_PERIOD_AVG_SAMPLES;
-    }
-
-  dev->rate_anchor_timestamp = edge_timestamp;
-  dev->rate_anchor_sample = edge_sample;
+  syslog(LOG_INFO,
+         "[imu-timing] BMI055 %s locked period=%llu.%03lluus"
+         " rate=%llu.%03lluHz\n",
+         dev->is_gyro ? "gyro" : "accel",
+         (unsigned long long)period_us,
+         (unsigned long long)period_milli_us,
+         (unsigned long long)(rate_millihz / 1000ull),
+         (unsigned long long)(rate_millihz % 1000ull));
 }
 
 static void bmi055_drain_fifo(FAR struct bmi055_dev_s *dev)
@@ -528,6 +478,7 @@ static void bmi055_drain_fifo(FAR struct bmi055_dev_s *dev)
   uint64_t watermark_edge_sample;
   uint32_t drdy_sequence;
   uint32_t drdy_events;
+  enum bmi055_timing_update_e timing_update;
   irqstate_t flags;
   float    temp;
 
@@ -588,10 +539,15 @@ static void bmi055_drain_fifo(FAR struct bmi055_dev_s *dev)
     {
       watermark_edge_sample = dev->sample_count +
                               BMI_FIFO_WM_SAMPLES - 1;
-      bmi055_update_period(dev, drdy_timestamp, watermark_edge_sample);
+      timing_update = bmi055_timing_update(&dev->timing, drdy_timestamp,
+                                           watermark_edge_sample);
+      if (timing_update == BMI055_TIMING_ACQUIRED)
+        {
+          bmi055_log_timing_lock(dev);
+        }
     }
 
-  period_q5 = dev->sample_period_q5;
+  period_q5 = dev->timing.period_q5;
 
   /* Predict the next batch from the preceding sample and the measured die
    * period, then phase-lock that prediction to TIM5 DRDY edges. PE4/PE5 are
@@ -609,7 +565,7 @@ static void bmi055_drain_fifo(FAR struct bmi055_dev_s *dev)
    */
 
   batch_now_q5 =
-    fmuv6c_imu_time_now() << BMI_TIMESTAMP_FRAC_BITS;
+    fmuv6c_imu_time_now() << BMI055_TIME_FRAC_BITS;
   batch_span_q5 = (uint64_t)total * period_q5;
 
   if (batch_now_q5 <= batch_span_q5)
@@ -635,7 +591,7 @@ static void bmi055_drain_fifo(FAR struct bmi055_dev_s *dev)
   if (drdy_events != 0 && total >= BMI_FIFO_WM_SAMPLES)
     {
       uint64_t edge_q5 =
-        drdy_timestamp << BMI_TIMESTAMP_FRAC_BITS;
+        drdy_timestamp << BMI055_TIME_FRAC_BITS;
       uint64_t edge_span_q5 =
         (uint64_t)BMI_FIFO_WM_SAMPLES * period_q5;
 
@@ -645,9 +601,19 @@ static void bmi055_drain_fifo(FAR struct bmi055_dev_s *dev)
 
           if (edge_base_q5 <= causal_base_q5)
             {
-              if (dev->last_timestamp_q5 == 0)
+              if (dev->last_timestamp_q5 == 0 || !dev->timing.acquired)
                 {
-                  base_q5 = edge_base_q5;
+                  /* Before the multi-watermark lock, anchor directly to the
+                   * physical edge. Provisional edge-to-edge period updates
+                   * keep the within-batch spacing close to the real die rate
+                   * without accumulating nominal-500-us startup error.
+                   */
+
+                  if (dev->last_timestamp_q5 == 0 ||
+                      edge_base_q5 > dev->last_timestamp_q5)
+                    {
+                      base_q5 = edge_base_q5;
+                    }
                 }
               else
                 {
@@ -719,8 +685,9 @@ static void bmi055_drain_fifo(FAR struct bmi055_dev_s *dev)
           uint64_t ts_q5 = base_q5 + (uint64_t)idx * period_q5;
 
           bmi055_publish(dev, dev->fifobuf + i * BMI_FIFO_FRAME, temp,
-                         (ts_q5 + (1ull << (BMI_TIMESTAMP_FRAC_BITS - 1))) >>
-                         BMI_TIMESTAMP_FRAC_BITS);
+                         (ts_q5 +
+                          (1ull << (BMI055_TIME_FRAC_BITS - 1))) >>
+                         BMI055_TIME_FRAC_BITS);
           dev->last_timestamp_q5 = ts_q5;
         }
 
@@ -781,20 +748,9 @@ static int bmi055_thread(int argc, FAR char **argv)
 
 static void bmi055_stream_start(FAR struct bmi055_dev_s *dev)
 {
-  int i;
-
   dev->last_timestamp_q5 = 0;
-  dev->sample_period_q5 = BMI_NOMINAL_PERIOD_Q5;
   dev->sample_count = 0;
-  dev->rate_anchor_sample = 0;
-  dev->rate_anchor_timestamp = 0;
-  dev->period_history_sum_q5 = 0;
-  dev->period_history_index = 0;
-  for (i = 0; i < BMI_PERIOD_AVG_SAMPLES; i++)
-    {
-      dev->period_history_q5[i] = BMI_NOMINAL_PERIOD_Q5;
-      dev->period_history_sum_q5 += BMI_NOMINAL_PERIOD_Q5;
-    }
+  bmi055_timing_init(&dev->timing);
 
   dev->drdy_timestamp = 0;
   dev->drdy_sequence = 0;

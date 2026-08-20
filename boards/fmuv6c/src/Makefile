@@ -63,6 +63,7 @@ ifeq ($(CONFIG_SPI),y)
 CSRCS += fmuv6c_imu_time.c
 CSRCS += icm42688.c
 CSRCS += bmi055.c
+CSRCS += bmi055_timing.c
 endif
 endif
 
