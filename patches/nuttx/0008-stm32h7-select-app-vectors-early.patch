@@ -1,0 +1,27 @@
+diff --git a/arch/arm/src/stm32h7/stm32_start.c b/arch/arm/src/stm32h7/stm32_start.c
+--- a/arch/arm/src/stm32h7/stm32_start.c
++++ b/arch/arm/src/stm32h7/stm32_start.c
+@@ -89,6 +89,8 @@
+ 
+ const uintptr_t g_idle_topstack = HEAP_BASE;
+ 
++extern const void * const _vectors[];
++
+ /****************************************************************************
+  * Private Function prototypes
+  ****************************************************************************/
+@@ -192,6 +194,14 @@ void __start(void)
+                    "r"(CONFIG_IDLETHREAD_STACKSIZE - 64) :);
+ #endif
+ 
++  /* The bootloader owns VTOR before this point.  Select the application's
++   * vector table before any early initialization can generate an exception.
++   */
++
++  putreg32((uint32_t)(uintptr_t)_vectors, NVIC_VECTAB);
++  UP_DSB();
++  UP_ISB();
++
+ #ifdef CONFIG_ARCH_CHIP_STM32H7_CORTEXM4
+   /* Wait for CM7 initialization done */
+ 
