@@ -1,4 +1,5 @@
 diff --git a/arch/arm/src/armv7-m/arm_perf.c b/arch/arm/src/armv7-m/arm_perf.c
+index a8b58c5e..792b0afc 100644
 --- a/arch/arm/src/armv7-m/arm_perf.c
 +++ b/arch/arm/src/armv7-m/arm_perf.c
 @@ -26,10 +26,10 @@
@@ -13,26 +14,7 @@ diff --git a/arch/arm/src/armv7-m/arm_perf.c b/arch/arm/src/armv7-m/arm_perf.c
  #include "nvic.h"
  
  #ifdef CONFIG_ARCH_HAVE_PERF_EVENTS
-@@ -40,24 +40,106 @@
- 
- static unsigned long g_cpu_freq = ULONG_MAX;
- 
-+#ifdef CONFIG_DEBUG_FEATURES
-+static void arm_perf_puthex(uint32_t value)
-+{
-+  static const char hex[] = "0123456789abcdef";
-+  int shift;
-+
-+  for (shift = 28; shift >= 0; shift -= 4)
-+    {
-+      arm_lowputc(hex[(value >> shift) & 0xf]);
-+    }
-+}
-+#endif
-+
- /****************************************************************************
-  * Public Functions
-  ****************************************************************************/
+@@ -46,6 +46,10 @@ static unsigned long g_cpu_freq = ULONG_MAX;
  
  void up_perf_init(void *arg)
  {
@@ -40,25 +22,10 @@ diff --git a/arch/arm/src/armv7-m/arm_perf.c b/arch/arm/src/armv7-m/arm_perf.c
 +  uint32_t numcomp;
 +  uint32_t i;
 +
-+#ifdef CONFIG_DEBUG_FEATURES
-+  arm_lowputc('F');
-+#endif
-+
    g_cpu_freq = (unsigned long)(uintptr_t)arg;
  
-+#ifdef CONFIG_DEBUG_FEATURES
-+  arm_lowputc('G');
-+#endif
-+
    /* Enable ITM and DWT resources, if not left enabled by debugger. */
- 
-   modifyreg32(NVIC_DEMCR, 0, NVIC_DEMCR_TRCENA);
- 
-+#ifdef CONFIG_DEBUG_FEATURES
-+  arm_lowputc('R');
-+#endif
-+
-   /* Make sure the high speed cycle counter is running.  It will be started
+@@ -56,8 +60,37 @@ void up_perf_init(void *arg)
     * automatically only if a debugger is connected.
     */
  
@@ -72,19 +39,6 @@ diff --git a/arch/arm/src/armv7-m/arm_perf.c b/arch/arm/src/armv7-m/arm_perf.c
 +    {
 +      numcomp = 4;
 +    }
-+
-+#ifdef CONFIG_DEBUG_FEATURES
-+  arm_lowputc('N');
-+  arm_perf_puthex(getreg32(NVIC_DHCSR));
-+  arm_lowputc('M');
-+  arm_perf_puthex(getreg32(NVIC_DEMCR));
-+
-+  for (i = 0; i < numcomp; i++)
-+    {
-+      arm_lowputc('0' + i);
-+      arm_perf_puthex(getreg32(DWT_FUNCTION0 + 16 * i));
-+    }
-+#endif
 +
 +  /* A bootloader or debugger can leave DWT comparators and trace/event
 +   * controls armed across the application handoff.  Disable every comparator
@@ -105,20 +59,9 @@ diff --git a/arch/arm/src/armv7-m/arm_perf.c b/arch/arm/src/armv7-m/arm_perf.c
 +
 +  putreg32(0, DWT_CYCCNT);
 +
-+#ifdef CONFIG_DEBUG_FEATURES
-+  arm_lowputc('I');
-+  arm_lowputc('Q');
-+  arm_lowputc('q');
-+#endif
-+
 +  putreg32(DWT_CTRL_CYCCNTENA_MASK, DWT_CTRL);
 +  UP_DSB();
 +  UP_ISB();
-+
-+#ifdef CONFIG_DEBUG_FEATURES
-+  arm_lowputc('W');
-+  arm_lowputc('w');
-+#endif
  }
  
  unsigned long up_perf_getfreq(void)
