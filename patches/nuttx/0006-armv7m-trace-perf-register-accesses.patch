@@ -1,8 +1,16 @@
 diff --git a/arch/arm/src/armv7-m/arm_perf.c b/arch/arm/src/armv7-m/arm_perf.c
-index a8b58c5e..3ee8fa5e 100644
+index a8b58c5e..6cba3b17 100644
 --- a/arch/arm/src/armv7-m/arm_perf.c
 +++ b/arch/arm/src/armv7-m/arm_perf.c
-@@ -46,18 +46,39 @@ static unsigned long g_cpu_freq = ULONG_MAX;
+@@ -29,7 +29,6 @@
+
+ #include "arm_internal.h"
+ #include "dwt.h"
+-#include "itm.h"
+ #include "nvic.h"
+
+ #ifdef CONFIG_ARCH_HAVE_PERF_EVENTS
+@@ -46,18 +45,40 @@ static unsigned long g_cpu_freq = ULONG_MAX;
  
  void up_perf_init(void *arg)
  {
@@ -28,7 +36,9 @@ index a8b58c5e..3ee8fa5e 100644
     * automatically only if a debugger is connected.
     */
  
-   putreg32(0xc5acce55, ITM_LAR);
+-  putreg32(0xc5acce55, ITM_LAR);
++  DWT_GRANT_ACCESS();
++  putreg32(0, DWT_CYCCNT);
 +
 +#ifdef CONFIG_DEBUG_FEATURES
 +  arm_lowputc('I');
