@@ -16,6 +16,7 @@
 CONFIG_NSH_DISABLE_REBOOT=y
 # CONFIG_STANDARD_SERIAL is not set
 # CONFIG_STM32H7_USE_LEGACY_PINMAP is not set
+# CONFIG_SYSLOG_CRLF is not set
 CONFIG_ARCH="arm"
 CONFIG_ARCH_BOARD_CUSTOM=y
 CONFIG_ARCH_BOARD_CUSTOM_DIR="../../boards/fmuv6c"
@@ -144,9 +145,10 @@ CONFIG_STM32H7_SPI1=y
 CONFIG_SYSLOG_CONSOLE=y
 CONFIG_SYSLOG_MAX_CHANNELS=2
 # Format each task-context syslog call into one buffer before writing it to the
-# console and RAMLOG channels. Without this, concurrent boot tasks emit one
-# character at a time and their lines can interleave. Interrupt-context logging
-# remains on the existing unbuffered path.
+# console and RAMLOG channels. The generic SYSLOG_CRLF layer stays disabled
+# because it splits each record from its newline into separate locked writes;
+# the console device already converts LF to CRLF atomically, while RAMLOG should
+# retain plain LF. Interrupt-context logging remains on the existing path.
 CONFIG_SYSLOG_BUFFER=y
 CONFIG_SYSLOG_BUFSIZE=128
 CONFIG_SYSTEM_DMESG=y
