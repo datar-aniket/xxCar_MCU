@@ -35,6 +35,7 @@
 #include <uORB/uORB.h>
 
 #include "logger.h"
+#include "log_batch.h"
 #include "log_write.h"
 #include "../param/param.h"
 #include "../rc_in/rc_in.h"
@@ -100,6 +101,7 @@
 
 #define LOG_RECMAX    64
 #define LOG_DRAIN_MAX 1024
+#define LOG_READ_BATCH 32
 
 /* ULog message types. */
 
@@ -240,6 +242,12 @@ static uint32_t g_part_bytes;
 
 static uint8_t  g_buf[LOG_BUFSIZE] aligned_data(32);
 static size_t   g_buflen;
+
+/* uORB can return multiple queued events in one read. Keep this out of the
+ * logger's 4 KB stack and reuse it for one subscription at a time.
+ */
+
+static uint8_t  g_read_buf[LOG_RECMAX * LOG_READ_BATCH];
 
 /****************************************************************************
  * Private Functions - the buffered ULog writer
@@ -584,7 +592,6 @@ static int log_daemon(int argc, FAR char *argv[])
   struct log_sub_s subs[NTOPICS];
   struct pollfd    pfd[NTOPICS];
   char             path[48];
-  uint8_t          rec[LOG_RECMAX];
   uint64_t         last_flush;
   int32_t          rate;
   uint32_t         min_interval;
@@ -622,6 +629,13 @@ static int log_daemon(int argc, FAR char *argv[])
       meta = t->direct_meta ? t->direct_meta : orb_get_meta(t->orb_name);
       if (meta == NULL)
         {
+          continue;
+        }
+
+      if (meta->o_size > LOG_RECMAX || t->rec_size > meta->o_size)
+        {
+          syslog(LOG_ERR, "logger: invalid record size for %s\n",
+                 t->ulog_name);
           continue;
         }
 
@@ -717,54 +731,69 @@ static int log_daemon(int argc, FAR char *argv[])
                * indefinitely if its producer happens to run concurrently.
                */
 
-              while (drained++ < LOG_DRAIN_MAX &&
-                     orb_copy(subs[i].meta, subs[i].fd, rec) == 0)
+              while (drained < LOG_DRAIN_MAX)
                 {
-                  /* The sample's own timestamp is its first 8 bytes. Use it
-                   * for decimation so spacing is measured in sample time, not
-                   * loop-wakeup time.
-                   */
+                  size_t stride = subs[i].meta->o_size;
+                  size_t request = LOG_DRAIN_MAX - drained;
+                  size_t count;
+                  size_t j;
+                  ssize_t copied;
 
-                  if (min_interval > 0)
+                  if (request > LOG_READ_BATCH)
                     {
-                      uint64_t ts;
+                      request = LOG_READ_BATCH;
+                    }
 
-                      memcpy(&ts, rec, sizeof(ts));
+                  copied = orb_copy_multi(subs[i].fd, g_read_buf,
+                                          request * stride);
+                  count = log_batch_count(copied, stride);
+                  if (count == 0)
+                    {
+                      break;
+                    }
 
-                      if (subs[i].next_us == 0)
-                        {
-                          subs[i].next_us = ts;
-                        }
+                  drained += count;
+                  for (j = 0; j < count; j++)
+                    {
+                      FAR const uint8_t *rec =
+                        log_batch_record(g_read_buf, j, stride);
 
-                      if (ts < subs[i].next_us)
-                        {
-                          continue;
-                        }
-
-                      /* Advance the ideal output schedule, not "accepted
-                       * sample + interval". Keeping the schedule independent
-                       * of the accepted sample prevents sensor-clock phase and
-                       * small ODR tolerances from accumulating into a lower
-                       * than requested average logging rate.
+                      /* The sample's own timestamp is its first 8 bytes. Use
+                       * it for decimation so spacing is measured in sample
+                       * time, not loop-wakeup time.
                        */
 
-                      subs[i].next_us +=
-                        ((ts - subs[i].next_us) / min_interval + 1) *
-                        min_interval;
-                    }
+                      if (min_interval > 0)
+                        {
+                          uint64_t ts;
 
-                  if (log_data(subs[i].msg_id, rec,
-                               subs[i].topic->rec_size))
-                    {
-                      pthread_mutex_lock(&g_lock);
-                      g_status.samples++;
-                      pthread_mutex_unlock(&g_lock);
-                    }
-                  else
-                    {
-                      pthread_mutex_lock(&g_lock);
-                      g_status.dropped++;
-                      pthread_mutex_unlock(&g_lock);
+                          memcpy(&ts, rec, sizeof(ts));
+
+                          /* Advance an ideal output schedule rather than
+                           * accepted-sample time, avoiding accumulated ODR
+                           * phase error.
+                           */
+
+                          if (!log_sample_due(ts, min_interval,
+                                              &subs[i].next_us))
+                            {
+                              continue;
+                            }
+                        }
+
+                      if (log_data(subs[i].msg_id, rec,
+                                   subs[i].topic->rec_size))
+                        {
+                          pthread_mutex_lock(&g_lock);
+                          g_status.samples++;
+                          pthread_mutex_unlock(&g_lock);
+                        }
+                      else
+                        {
+                          pthread_mutex_lock(&g_lock);
+                          g_status.dropped++;
+                          pthread_mutex_unlock(&g_lock);
+                        }
                     }
                 }
             }
