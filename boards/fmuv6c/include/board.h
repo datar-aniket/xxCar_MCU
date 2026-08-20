@@ -627,6 +627,22 @@
 
 #ifndef __ASSEMBLY__
 
+struct fmuv6c_sdmmc_status_s
+{
+  uint32_t clkcr;
+  uint32_t status;
+  uint32_t idmactrl;
+  uint32_t read_transfers;
+  uint32_t write_transfers;
+  uint64_t read_bytes;
+  uint64_t write_bytes;
+  uint32_t bounced_reads;
+  uint32_t data_crc_errors;
+  uint32_t data_timeouts;
+  uint32_t rx_overruns;
+  uint32_t tx_underruns;
+};
+
 #undef EXTERN
 #if defined(__cplusplus)
 #define EXTERN extern "C"
@@ -639,6 +655,9 @@ extern "C"
 /****************************************************************************
  * Public Function Prototypes
  ****************************************************************************/
+
+int fmuv6c_sdmmc_get_status(struct fmuv6c_sdmmc_status_s *status,
+                            bool reset);
 
 #ifdef CONFIG_USBMSC_COMPOSITE
 

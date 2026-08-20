@@ -1,0 +1,149 @@
+diff --git a/arch/arm/src/stm32h7/stm32_sdmmc.c b/arch/arm/src/stm32h7/stm32_sdmmc.c
+--- a/arch/arm/src/stm32h7/stm32_sdmmc.c
++++ b/arch/arm/src/stm32h7/stm32_sdmmc.c
+@@ -388,6 +388,8 @@ struct stm32_dev_s
+                      aligned_data(ARMV7M_DCACHE_LINESIZE);
+   bool               unaligned_rx; /* read buffer is not cache-line or 32 bit aligned */
+ 
++  struct stm32_sdmmc_stats_s stats; /* Low-overhead transfer diagnostics */
++
+   /* Input dma buffer for unaligned transfers */
+ #if defined(CONFIG_STM32H7_SDMMC_IDMA)
+   uint8_t sdmmc_rxbuffer[SDMMC_MAX_BLOCK_SIZE]
+@@ -1728,6 +1730,7 @@ static int stm32_sdmmc_interrupt(int irq, void *context, void *arg)
+                *  Sets STM32_SDMMC_ICR_DCRCFAILC
+                */
+ 
++              priv->stats.data_crc_errors++;
+               mcerr("ERROR: Data block CRC failure, remaining: %u\n",
+                     priv->remaining);
+ 
+@@ -1743,6 +1746,7 @@ static int stm32_sdmmc_interrupt(int irq, void *context, void *arg)
+                *  Sets STM32_SDMMC_ICR_DTIMEOUTC
+                */
+ 
++              priv->stats.data_timeouts++;
+               mcerr("ERROR: Data timeout, remaining: %u\n",
+                     priv->remaining);
+ 
+@@ -1758,6 +1762,7 @@ static int stm32_sdmmc_interrupt(int irq, void *context, void *arg)
+                * Sets STM32_SDMMC_ICR_RXOVERRC
+                */
+ 
++              priv->stats.rx_overruns++;
+               mcerr("ERROR: RX FIFO overrun, remaining: %u\n",
+                     priv->remaining);
+ 
+@@ -1773,6 +1778,7 @@ static int stm32_sdmmc_interrupt(int irq, void *context, void *arg)
+                * Sets STM32_SDMMC_ICR_TXUNDERRC
+                */
+ 
++              priv->stats.tx_underruns++;
+               mcerr("ERROR: TX FIFO underrun, remaining: %u\n",
+                     priv->remaining);
+ 
+@@ -3217,6 +3227,13 @@ static int stm32_dmarecvsetup(struct sdio_dev_s *dev,
+ 
+ #endif
+ 
++  priv->stats.read_transfers++;
++  priv->stats.read_bytes += buflen;
++  if (priv->unaligned_rx)
++    {
++      priv->stats.bounced_reads++;
++    }
++
+   /* Reset the DPSM configuration */
+ 
+   stm32_datadisable(priv);
+@@ -3302,6 +3319,9 @@ static int stm32_dmasendsetup(struct sdio_dev_s *dev,
+ 
+   priv->unaligned_rx = false;
+ 
++  priv->stats.write_transfers++;
++  priv->stats.write_bytes += buflen;
++
+   /* Reset the DPSM configuration */
+ 
+   stm32_datadisable(priv);
+@@ -3457,6 +3477,37 @@ static void stm32_default(struct stm32_dev_s *priv)
+  * Public Functions
+  ****************************************************************************/
+ 
++/****************************************************************************
++ * Name: stm32_sdmmc_getstats
++ ****************************************************************************/
++
++int stm32_sdmmc_getstats(struct sdio_dev_s *dev,
++                         struct stm32_sdmmc_stats_s *stats,
++                         bool reset)
++{
++  struct stm32_dev_s *priv = (struct stm32_dev_s *)dev;
++  irqstate_t flags;
++
++  if (priv == NULL || stats == NULL)
++    {
++      return -EINVAL;
++    }
++
++  flags = enter_critical_section();
++  *stats = priv->stats;
++  stats->clkcr = sdmmc_getreg32(priv, STM32_SDMMC_CLKCR_OFFSET);
++  stats->status = sdmmc_getreg32(priv, STM32_SDMMC_STA_OFFSET);
++  stats->idmactrl = sdmmc_getreg32(priv, STM32_SDMMC_IDMACTRLR_OFFSET);
++
++  if (reset)
++    {
++      memset(&priv->stats, 0, sizeof(priv->stats));
++    }
++
++  leave_critical_section(flags);
++  return OK;
++}
++
+ /****************************************************************************
+  * Name: sdio_initialize
+  *
+diff --git a/arch/arm/src/stm32h7/stm32_sdmmc.h b/arch/arm/src/stm32h7/stm32_sdmmc.h
+--- a/arch/arm/src/stm32h7/stm32_sdmmc.h
++++ b/arch/arm/src/stm32h7/stm32_sdmmc.h
+@@ -30,6 +30,7 @@
+ #include <nuttx/config.h>
+ #include <sys/types.h>
+ #include <stdbool.h>
++#include <stdint.h>
+ 
+ #include "chip.h"
+ #include "hardware/stm32_sdmmc.h"
+@@ -67,6 +68,31 @@ extern "C"
+ struct sdio_dev_s; /* See include/nuttx/sdio.h */
+ struct sdio_dev_s *sdio_initialize(int slotno);
+ 
++/* Lightweight controller diagnostics.  Counters are accumulated by the
++ * transfer setup and error paths and do not add timestamps or logging to the
++ * normal SDMMC path.
++ */
++
++struct stm32_sdmmc_stats_s
++{
++  uint32_t clkcr;
++  uint32_t status;
++  uint32_t idmactrl;
++  uint32_t read_transfers;
++  uint32_t write_transfers;
++  uint64_t read_bytes;
++  uint64_t write_bytes;
++  uint32_t bounced_reads;
++  uint32_t data_crc_errors;
++  uint32_t data_timeouts;
++  uint32_t rx_overruns;
++  uint32_t tx_underruns;
++};
++
++int stm32_sdmmc_getstats(struct sdio_dev_s *dev,
++                         struct stm32_sdmmc_stats_s *stats,
++                         bool reset);
++
+ /****************************************************************************
+  * Name: sdio_mediachange
+  *

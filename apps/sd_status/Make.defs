@@ -1,0 +1,9 @@
+############################################################################
+# apps/sd_status/Make.defs
+#
+# SPDX-License-Identifier: Apache-2.0
+############################################################################
+
+ifneq ($(CONFIG_XXCAR_SD_STATUS),)
+CONFIGURED_APPS += $(APPDIR)/xxcar/sd_status
+endif
