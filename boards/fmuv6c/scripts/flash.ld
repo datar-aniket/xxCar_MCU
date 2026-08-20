@@ -173,7 +173,12 @@ SECTIONS
         *(.bss .bss.*)
         *(.gnu.linkonce.b.*)
         *(COMMON)
-        . = ALIGN(4);
+        /* ARM EABI and NuttX require an 8-byte-aligned initial stack.  The
+         * idle stack starts immediately above _ebss, so preserve that
+         * alignment regardless of the final BSS object's size.
+         */
+
+        . = ALIGN(8);
         _ebss = ABSOLUTE(.);
     } > sram
 
