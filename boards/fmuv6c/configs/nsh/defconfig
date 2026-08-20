@@ -249,8 +249,7 @@ CONFIG_USART6_RXFIFO_THRES=1
 # handles a 1 kHz tick trivially (PX4 runs the same).
 CONFIG_USEC_PER_TICK=1000
 
-# Critical-monitor-only boot diagnostic: keep the cpu_status application out
-# while enabling the scheduler's DWT-backed accounting and TCB fields.
+# DWT-backed scheduler accounting and the on-demand cpu_status audit command.
 CONFIG_ARCH_PERF_EVENTS=y
 CONFIG_SCHED_CRITMONITOR=y
 CONFIG_SCHED_CRITMONITOR_MAXTIME_THREAD=0
@@ -312,6 +311,7 @@ CONFIG_XXCAR_SDMSC=y
 CONFIG_XXCAR_GREP=y
 CONFIG_XXCAR_CAL=y
 CONFIG_XXCAR_CLEAR=y
+CONFIG_XXCAR_CPU_STATUS=y
 CONFIG_XXCAR_PARAM=y
 CONFIG_XXCAR_PX4IO=y
 CONFIG_XXCAR_RC_IN=y
@@ -328,7 +328,6 @@ CONFIG_STM32H7_USART_INVERT=y
 CONFIG_XXCAR_RC=y
 CONFIG_XXCAR_UORB_MSGS=y
 CONFIG_XXCAR_SENSOR_STATUS=y
-# CONFIG_XXCAR_CPU_STATUS is not set
 CONFIG_XXCAR_SENSORS=y
 CONFIG_XXCAR_LOGGER=y
 CONFIG_XXCAR_REBOOT=y
