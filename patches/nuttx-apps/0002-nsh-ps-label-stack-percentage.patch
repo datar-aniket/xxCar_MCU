@@ -1,0 +1,13 @@
+diff --git a/nshlib/nsh_proccmds.c b/nshlib/nsh_proccmds.c
+index 92acb4508..4678afc75 100644
+--- a/nshlib/nsh_proccmds.c
++++ b/nshlib/nsh_proccmds.c
+@@ -651,7 +651,7 @@ static void ps_title(FAR struct nsh_vtbl_s *vtbl, bool heap)
+               , "STACK"
+ #endif
+ #ifdef PS_SHOW_STACKUSAGE
+-              , "USED", "FILLED"
++              , "USED", "STACK%"
+ #endif
+ #ifdef NSH_HAVE_CPULOAD
+               , "CPU"

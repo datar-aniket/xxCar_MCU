@@ -11,6 +11,7 @@ config XXCAR_CPU_STATUS
 		Measure total and per-thread CPU execution using Cortex-M hardware
 		cycles accumulated at scheduler context switches. Unlike NuttX's
 		SYSCLK cpuload, this does not sample the active task at timer ticks.
+		Builds both the one-shot cpu_status audit and a live top command.
 
 if XXCAR_CPU_STATUS
 
