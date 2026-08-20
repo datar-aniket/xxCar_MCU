@@ -29,10 +29,14 @@
 #include <sys/types.h>
 #include <syslog.h>
 #include <errno.h>
+#include <inttypes.h>
+#include <stdbool.h>
+#include <time.h>
 
 #include <arch/board/board.h>
 
 #include <nuttx/fs/fs.h>
+#include <nuttx/clock.h>
 
 #ifdef CONFIG_USBMONITOR
 #  include <nuttx/usb/usbmonitor.h>
@@ -87,7 +91,6 @@
 #endif
 
 #ifdef CONFIG_XXCAR_PX4IO
-#  include <inttypes.h>
 #  include "../../../apps/px4io/px4io.h"
 #endif
 
@@ -103,6 +106,109 @@
 /****************************************************************************
  * Private Functions
  ****************************************************************************/
+
+enum fmuv6c_boot_stage_e
+{
+  BOOT_STAGE_CORE = 0,
+  BOOT_STAGE_USB,
+  BOOT_STAGE_STORAGE,
+  BOOT_STAGE_DEVICES,
+  BOOT_STAGE_SENSORS,
+  BOOT_STAGE_SERVICES,
+  BOOT_STAGE_COUNT
+};
+
+struct fmuv6c_boot_report_s
+{
+  uint64_t start_us;
+  uint64_t stage_start_us;
+  uint32_t elapsed_us[BOOT_STAGE_COUNT];
+  uint16_t required_failures;
+  uint16_t optional_failures;
+};
+
+static uint64_t fmuv6c_boot_now_us(void)
+{
+  struct timespec ts;
+
+  clock_systime_timespec(&ts);
+  return (uint64_t)ts.tv_sec * 1000000ull + ts.tv_nsec / 1000;
+}
+
+static void fmuv6c_boot_stage_begin(FAR struct fmuv6c_boot_report_s *report)
+{
+  report->stage_start_us = fmuv6c_boot_now_us();
+}
+
+static void fmuv6c_boot_stage_end(FAR struct fmuv6c_boot_report_s *report,
+                                  enum fmuv6c_boot_stage_e stage)
+{
+  static FAR const char * const stage_name[BOOT_STAGE_COUNT] =
+    {
+      "core", "usb", "storage", "devices", "sensors", "services"
+    };
+  static const uint32_t warn_us[BOOT_STAGE_COUNT] =
+    {
+      500000, 500000, 1500000, 500000, 1000000, 1000000
+    };
+  uint64_t elapsed = fmuv6c_boot_now_us() - report->stage_start_us;
+
+  report->elapsed_us[stage] = elapsed > UINT32_MAX ? UINT32_MAX : elapsed;
+
+  if (elapsed > warn_us[stage])
+    {
+      syslog(LOG_WARNING, "[boot] slow stage %s: %" PRIu64 "us\n",
+             stage_name[stage], elapsed);
+    }
+}
+
+static void fmuv6c_boot_required_failure(
+  FAR struct fmuv6c_boot_report_s *report)
+{
+  report->required_failures++;
+}
+
+static void fmuv6c_boot_optional_failure(
+  FAR struct fmuv6c_boot_report_s *report)
+{
+  report->optional_failures++;
+}
+
+static void fmuv6c_boot_summary(FAR const struct fmuv6c_boot_report_s *report)
+{
+  uint64_t uptime_us = fmuv6c_boot_now_us();
+  uint64_t bringup_us = uptime_us - report->start_us;
+  FAR const char *state;
+
+  if (report->required_failures != 0)
+    {
+      state = "FAILED";
+    }
+  else if (report->optional_failures != 0)
+    {
+      state = "DEGRADED";
+    }
+  else
+    {
+      state = "READY";
+    }
+
+  syslog(report->required_failures != 0 ? LOG_ERR :
+         report->optional_failures != 0 ? LOG_WARNING : LOG_INFO,
+         "[boot] %s uptime=%" PRIu64 "us bringup=%" PRIu64
+         "us core=%" PRIu32
+         " usb=%" PRIu32 " storage=%" PRIu32 " devices=%" PRIu32
+         " sensors=%" PRIu32 " services=%" PRIu32
+         " required_fail=%u optional_fail=%u\n",
+         state, uptime_us, bringup_us,
+         report->elapsed_us[BOOT_STAGE_CORE],
+         report->elapsed_us[BOOT_STAGE_USB],
+         report->elapsed_us[BOOT_STAGE_STORAGE],
+         report->elapsed_us[BOOT_STAGE_DEVICES],
+         report->elapsed_us[BOOT_STAGE_SENSORS],
+         report->elapsed_us[BOOT_STAGE_SERVICES],
+         report->required_failures, report->optional_failures);
+}
 
 /****************************************************************************
  * Name: stm32_capture_setup
@@ -280,7 +386,11 @@ static void stm32_i2ctool(void)
 
 int stm32_bringup(void)
 {
+  struct fmuv6c_boot_report_s boot = {0};
   int ret = OK;
+#if defined(CONFIG_SENSORS) && defined(CONFIG_SPI)
+  bool imu_time_ready = true;
+#endif
 #if defined(CONFIG_SPI) && defined(CONFIG_I2C)
   struct fmuv6c_sensor_probe_s sensor_probe;
 #endif
@@ -289,6 +399,9 @@ int stm32_bringup(void)
 #endif
 
   UNUSED(ret);
+
+  boot.start_us = fmuv6c_boot_now_us();
+  fmuv6c_boot_stage_begin(&boot);
 
 #if defined(CONFIG_I2C) && defined(CONFIG_SYSTEM_I2CTOOL)
   stm32_i2ctool();
@@ -302,6 +415,7 @@ int stm32_bringup(void)
     {
       syslog(LOG_ERR,
              "ERROR: Failed to mount the PROC filesystem: %d\n",  ret);
+      fmuv6c_boot_optional_failure(&boot);
     }
 #endif /* CONFIG_FS_PROCFS */
 
@@ -313,6 +427,7 @@ int stm32_bringup(void)
     {
       syslog(LOG_ERR, "ERROR: Failed to mount tmpfs at %s: %d\n",
              CONFIG_LIBC_TMPDIR, ret);
+      fmuv6c_boot_optional_failure(&boot);
     }
 #endif
 
@@ -324,6 +439,7 @@ int stm32_bringup(void)
     {
       syslog(LOG_ERR, "ERROR: Failed to mount romfs at %s: %d\n",
              CONFIG_STM32_ROMFS_MOUNTPOINT, ret);
+      fmuv6c_boot_optional_failure(&boot);
     }
 #endif
 
@@ -335,7 +451,7 @@ int stm32_bringup(void)
     {
       syslog(LOG_ERR,
              "ERROR: Failed to instantiate the RTC lower-half driver\n");
-      return -ENOMEM;
+      fmuv6c_boot_optional_failure(&boot);
     }
   else
     {
@@ -348,7 +464,7 @@ int stm32_bringup(void)
         {
           syslog(LOG_ERR,
                  "ERROR: Failed to bind/register the RTC driver: %d\n", ret);
-          return ret;
+          fmuv6c_boot_optional_failure(&boot);
         }
     }
 #endif
@@ -360,6 +476,7 @@ int stm32_bringup(void)
   if (ret < 0)
     {
       syslog(LOG_ERR, "ERROR: btn_lower_initialize() failed: %d\n", ret);
+      fmuv6c_boot_optional_failure(&boot);
     }
 #endif /* CONFIG_INPUT_BUTTONS */
 
@@ -375,6 +492,7 @@ int stm32_bringup(void)
       syslog(LOG_ERR,
              "ERROR: Failed to initialize USB host: %d\n",
              ret);
+      fmuv6c_boot_optional_failure(&boot);
     }
 #endif
 
@@ -387,6 +505,7 @@ int stm32_bringup(void)
       syslog(LOG_ERR,
              "ERROR: Failed to start USB monitor: %d\n",
              ret);
+      fmuv6c_boot_optional_failure(&boot);
     }
 #endif
 
@@ -397,6 +516,7 @@ int stm32_bringup(void)
   if (ret < 0)
     {
       syslog(LOG_ERR, "ERROR: stm32_adc_setup failed: %d\n", ret);
+      fmuv6c_boot_optional_failure(&boot);
     }
 #endif /* CONFIG_ADC */
 
@@ -407,7 +527,7 @@ int stm32_bringup(void)
   if (ret < 0)
     {
       syslog(LOG_ERR, "Failed to initialize GPIO Driver: %d\n", ret);
-      return ret;
+      fmuv6c_boot_optional_failure(&boot);
     }
 #endif
 
@@ -417,6 +537,7 @@ int stm32_bringup(void)
     {
       syslog(LOG_ERR, "ERROR: Failed to initialize LSM6DSL driver: %d\n",
              ret);
+      fmuv6c_boot_optional_failure(&boot);
     }
 #endif /* CONFIG_SENSORS_LSM6DSL */
 
@@ -426,6 +547,7 @@ int stm32_bringup(void)
     {
       syslog(LOG_ERR, "ERROR: Failed to initialize LSM9DS1 driver: %d\n",
              ret);
+      fmuv6c_boot_optional_failure(&boot);
     }
 #endif /* CONFIG_SENSORS_LSM6DSL */
 
@@ -435,6 +557,7 @@ int stm32_bringup(void)
     {
       syslog(LOG_ERR, "ERROR: Failed to initialize LSM303AGR driver: %d\n",
              ret);
+      fmuv6c_boot_optional_failure(&boot);
     }
 #endif /* CONFIG_SENSORS_LSM303AGR */
 
@@ -445,6 +568,7 @@ int stm32_bringup(void)
   if (ret < 0)
     {
       syslog(LOG_ERR, "ERROR: stm32_pca9635_initialize failed: %d\n", ret);
+      fmuv6c_boot_optional_failure(&boot);
     }
 #endif
 
@@ -454,8 +578,12 @@ int stm32_bringup(void)
     {
       syslog(LOG_ERR, "ERROR: Failed to initialize wireless driver: %d\n",
              ret);
+      fmuv6c_boot_optional_failure(&boot);
     }
 #endif /* CONFIG_WL_NRF24L01 */
+
+  fmuv6c_boot_stage_end(&boot, BOOT_STAGE_CORE);
+  fmuv6c_boot_stage_begin(&boot);
 
 #if defined(CONFIG_CDCACM) && !defined(CONFIG_CDCACM_CONSOLE) && \
     !defined(CONFIG_CDCACM_COMPOSITE)
@@ -467,6 +595,7 @@ int stm32_bringup(void)
   if (ret < 0)
     {
       syslog(LOG_ERR, "ERROR: cdcacm_initialize failed: %d\n", ret);
+      fmuv6c_boot_optional_failure(&boot);
     }
 #endif /* CONFIG_CDCACM & !CONFIG_CDCACM_CONSOLE */
 
@@ -481,6 +610,7 @@ int stm32_bringup(void)
   if (board_composite_connect(0, 0) == NULL)
     {
       syslog(LOG_ERR, "ERROR: Failed to connect USB device\n");
+      fmuv6c_boot_optional_failure(&boot);
     }
   else
     {
@@ -500,6 +630,9 @@ int stm32_bringup(void)
   usbdev_rndis_initialize(mac);
 #endif
 
+  fmuv6c_boot_stage_end(&boot, BOOT_STAGE_USB);
+  fmuv6c_boot_stage_begin(&boot);
+
 #ifdef CONFIG_MMCSD_SPI
   /* Initialize the MMC/SD SPI driver (SPI3 is used) */
 
@@ -508,6 +641,7 @@ int stm32_bringup(void)
     {
       syslog(LOG_ERR, "Failed to initialize SD slot %d: %d\n",
              CONFIG_NSH_MMCSDMINOR, ret);
+      fmuv6c_boot_optional_failure(&boot);
     }
 #endif
 
@@ -522,10 +656,12 @@ int stm32_bringup(void)
    * does exactly this.
    */
 
-  if (stm32_dma_alloc_init() < 0)
+  ret = stm32_dma_alloc_init();
+  if (ret < 0)
     {
       syslog(LOG_ERR, "ERROR: FAT DMA pool init failed - card writes will be "
                       "unreliable\n");
+      fmuv6c_boot_optional_failure(&boot);
     }
 #endif
 
@@ -539,6 +675,7 @@ int stm32_bringup(void)
   if (ret < 0)
     {
       syslog(LOG_ERR, "ERROR: microSD (SDMMC2) init failed: %d\n", ret);
+      fmuv6c_boot_optional_failure(&boot);
     }
   else
     {
@@ -548,6 +685,7 @@ int stm32_bringup(void)
         {
           syslog(LOG_ERR, "ERROR: Failed to mount %s: %d (card present?)\n",
                  FMUV6C_MICROSD_MOUNTPOINT, ret);
+          fmuv6c_boot_optional_failure(&boot);
         }
       else
         {
@@ -557,6 +695,9 @@ int stm32_bringup(void)
     }
 #endif
 
+  fmuv6c_boot_stage_end(&boot, BOOT_STAGE_STORAGE);
+  fmuv6c_boot_stage_begin(&boot);
+
 #ifdef CONFIG_PWM
   /* Initialize PWM and register the PWM device. */
 
@@ -564,6 +705,7 @@ int stm32_bringup(void)
   if (ret < 0)
     {
       syslog(LOG_ERR, "ERROR: stm32_pwm_setup() failed: %d\n", ret);
+      fmuv6c_boot_optional_failure(&boot);
     }
 #endif
 
@@ -574,6 +716,7 @@ int stm32_bringup(void)
   if (ret < 0)
     {
       syslog(LOG_ERR, "ERROR: stm32_capture_setup() failed: %d\\n", ret);
+      fmuv6c_boot_optional_failure(&boot);
     }
 #endif
 
@@ -583,6 +726,7 @@ int stm32_bringup(void)
   if (ret < 0)
     {
       syslog(LOG_ERR, "ERROR: Failed to initialize MTD progmem: %d\n", ret);
+      fmuv6c_boot_optional_failure(&boot);
     }
 #endif /* HAVE_PROGMEM_CHARDEV */
 #endif /* CONFIG_MTD */
@@ -608,31 +752,80 @@ int stm32_bringup(void)
   if (ret < 0)
     {
       syslog(LOG_ERR, "ERROR: IMU timebase initialization failed: %d\n", ret);
-      return ret;
+      imu_time_ready = false;
+      fmuv6c_boot_required_failure(&boot);
     }
 #endif
+
+  fmuv6c_boot_stage_end(&boot, BOOT_STAGE_DEVICES);
+  fmuv6c_boot_stage_begin(&boot);
 
 #if defined(CONFIG_SPI) && defined(CONFIG_I2C)
   /* Stage 2 - Task 1: synchronous sensor discovery (logs a PASS/FAIL table) */
 
-  fmuv6c_sensor_probe(&sensor_probe);
+  ret = fmuv6c_sensor_probe(&sensor_probe);
+  if (ret < 0)
+    {
+      unsigned primary_fail = sensor_probe.icm42688_id != 0x47 ? 1 : 0;
+      unsigned optional_fail = sensor_probe.failures - primary_fail;
+
+      if (primary_fail != 0)
+        {
+          fmuv6c_boot_required_failure(&boot);
+        }
+
+      boot.optional_failures += optional_fail;
+    }
 #endif
 
 #ifdef CONFIG_SENSORS
   /* Stage 2 - Task 2: register onboard sensors on the uorb framework */
 
-#if defined(CONFIG_SPI) && defined(CONFIG_I2C)
-  ret = fmuv6c_sensors_initialize(&sensor_probe);
-#else
-  ret = fmuv6c_sensors_initialize(NULL);
+#if defined(CONFIG_SPI)
+  if (!imu_time_ready)
+    {
+      syslog(LOG_ERR,
+             "[sensors] registration skipped: required IMU timebase failed\n");
+      ret = -ENODEV;
+    }
+  else
 #endif
+    {
+#if defined(CONFIG_SPI) && defined(CONFIG_I2C)
+      ret = fmuv6c_sensors_initialize(&sensor_probe);
+#else
+      ret = fmuv6c_sensors_initialize(NULL);
+#endif
+    }
+
   if (ret < 0)
     {
+      bool unclassified_required_failure = true;
+
       syslog(LOG_WARNING,
              "[sensors] registration completed in degraded state: %d\n",
              ret);
+
+      /* Probe failures were classified above. A registration failure after
+       * a clean probe means the runtime sensor set is not flight-ready.
+       */
+
+#if defined(CONFIG_SPI)
+      unclassified_required_failure = imu_time_ready;
+#endif
+#if defined(CONFIG_SPI) && defined(CONFIG_I2C)
+      unclassified_required_failure &= sensor_probe.failures == 0;
+#endif
+
+      if (unclassified_required_failure)
+        {
+          fmuv6c_boot_required_failure(&boot);
+        }
     }
 #endif
+
+  fmuv6c_boot_stage_end(&boot, BOOT_STAGE_SENSORS);
+  fmuv6c_boot_stage_begin(&boot);
 
   /* Everything below is parameter-driven, so it has to come after the microSD
    * mount above: that is where params.txt lives. With no card we fall back to
@@ -660,8 +853,9 @@ int stm32_bringup(void)
       ret = px4io_start((int)param_i32("PX4IO_RATE"));
       if (ret < 0)
         {
-          syslog(LOG_INFO, "[px4io] not started (%d) - no IO chip fitted?\n",
+          syslog(LOG_ERR, "[px4io] not started (%d) - no IO chip fitted?\n",
                  ret);
+          fmuv6c_boot_required_failure(&boot);
         }
       else
         {
@@ -674,10 +868,26 @@ int stm32_bringup(void)
            * so it has to be pushed every boot.
            */
 
-          if (px4io_open(&io) == OK)
+          ret = px4io_open(&io);
+          if (ret == OK)
             {
-              px4io_set_pwm_rate(&io, (uint16_t)param_i32("PX4IO_PWM_HZ"));
+              ret = px4io_set_pwm_rate(
+                &io, (uint16_t)param_i32("PX4IO_PWM_HZ"));
               px4io_close(&io);
+
+              if (ret < 0)
+                {
+                  syslog(LOG_ERR,
+                         "[px4io] failed to configure PWM rate: %d\n", ret);
+                  fmuv6c_boot_required_failure(&boot);
+                }
+            }
+          else
+            {
+              syslog(LOG_ERR,
+                     "[px4io] daemon started but verification failed: %d\n",
+                     ret);
+              fmuv6c_boot_required_failure(&boot);
             }
         }
     }
@@ -693,6 +903,7 @@ int stm32_bringup(void)
       if (logger_start() < 0)
         {
           syslog(LOG_ERR, "[log] boot start failed\n");
+          fmuv6c_boot_optional_failure(&boot);
         }
       else
         {
@@ -701,5 +912,7 @@ int stm32_bringup(void)
     }
 #endif
 
+  fmuv6c_boot_stage_end(&boot, BOOT_STAGE_SERVICES);
+  fmuv6c_boot_summary(&boot);
   return OK;
 }
