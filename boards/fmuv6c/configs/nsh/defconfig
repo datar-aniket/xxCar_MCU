@@ -143,6 +143,12 @@ CONFIG_STM32H7_OTGFS=y
 CONFIG_STM32H7_SPI1=y
 CONFIG_SYSLOG_CONSOLE=y
 CONFIG_SYSLOG_MAX_CHANNELS=2
+# Format each task-context syslog call into one buffer before writing it to the
+# console and RAMLOG channels. Without this, concurrent boot tasks emit one
+# character at a time and their lines can interleave. Interrupt-context logging
+# remains on the existing unbuffered path.
+CONFIG_SYSLOG_BUFFER=y
+CONFIG_SYSLOG_BUFSIZE=128
 CONFIG_SYSTEM_DMESG=y
 CONFIG_SYSTEM_I2CTOOL=y
 CONFIG_SYSTEM_NSH=y
