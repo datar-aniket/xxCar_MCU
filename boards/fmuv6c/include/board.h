@@ -609,9 +609,6 @@
 #define DMAMAP_SPI3_RX DMAMAP_DMA12_SPI3RX_0 /* DMA1 */
 #define DMAMAP_SPI3_TX DMAMAP_DMA12_SPI3TX_0 /* DMA1 */
 
-#define DMAMAP_USART6_RX DMAMAP_DMA12_USART6RX_1
-#define DMAMAP_USART6_TX DMAMAP_DMA12_USART6TX_0
-
 /* Reboot targets, passed as the `status` argument of boardctl(BOARDIOC_RESET).
  *
  * 0 is an ordinary reset (NuttX's own default). BOARD_REBOOT_TO_BOOTLOADER asks
