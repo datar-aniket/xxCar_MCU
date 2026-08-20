@@ -116,6 +116,11 @@ static void print_status(void)
          " NIS %.3f bias_limit %" PRIu32 "\n",
          core->gravity_accept_count, core->gravity_reject_count,
          (double)core->last_gravity_nis, core->bias_limit_count);
+  printf("  yaw gauge suppressed last %+.6f max %.6f deg count %" PRIu32
+         "\n",
+         (double)(core->last_gravity_yaw_suppressed * rad_to_deg),
+         (double)(core->max_gravity_yaw_suppressed * rad_to_deg),
+         core->gravity_yaw_projection_count);
   printf("  faults reject %" PRIu32 " stale %" PRIu32
          " uncal %" PRIu32 " clip %" PRIu32 " dup %" PRIu32
          " back %" PRIu32 " gap %" PRIu32 " source_reset %" PRIu32

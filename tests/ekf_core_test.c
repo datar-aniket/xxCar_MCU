@@ -255,6 +255,56 @@ static void test_low_dynamics_updates(void)
   assert(ekf.last_gravity_nis > 16.3f);
 }
 
+static void test_gravity_preserves_yaw_gauge(void)
+{
+  struct ekf_core_s ekf;
+  struct ekf_imu_sample_s sample;
+  const float zero_gyro[3] = {0.0f, 0.0f, 0.0f};
+  const float yaw = 0.70f;
+  float accel[3] = {0.20f, 0.0f, TEST_GRAVITY};
+  float euler[3];
+  float gyro_bias_z;
+  uint64_t timestamp = 8000000ull;
+  int index;
+
+  ekf_core_init(&ekf);
+  initialize_tilted(&ekf, &timestamp, 0.0f, 0.0f, zero_gyro);
+
+  ekf.quaternion[0] = cosf(0.5f * yaw);
+  ekf.quaternion[1] = 0.0f;
+  ekf.quaternion[2] = 0.0f;
+  ekf.quaternion[3] = sinf(0.5f * yaw);
+
+  /* Deliberately couple the unobservable yaw and Z gyro bias states to an
+   * observed accel-bias state. An unconstrained Kalman gain would use this
+   * correlation to alter both states during the gravity update.
+   */
+
+  ekf.covariance[EKF_P_INDEX(2, 12)] = 0.10f;
+  ekf.covariance[EKF_P_INDEX(12, 2)] = 0.10f;
+  ekf.covariance[EKF_P_INDEX(11, 12)] = 0.001f;
+  ekf.covariance[EKF_P_INDEX(12, 11)] = 0.001f;
+  assert_covariance_positive_definite(&ekf);
+  gyro_bias_z = ekf.gyro_bias[2];
+
+  for (index = 0; index < EKF_COVARIANCE_INTERVAL; index++)
+    {
+      timestamp += TEST_DT_US;
+      make_sample(&sample, timestamp, accel, zero_gyro);
+      assert(ekf_core_process(&ekf, &sample) == EKF_PROCESS_PREDICTED);
+    }
+
+  ekf_core_euler(&ekf, euler);
+  assert_near(euler[2], yaw, 2.0e-6f);
+  assert_near(ekf.gyro_bias[2], gyro_bias_z, 2.0e-8f);
+  assert(ekf.gravity_accept_count == 1);
+  assert(ekf.gravity_yaw_projection_count == 1);
+  assert(fabsf(ekf.last_gravity_yaw_suppressed) > 1.0e-3f);
+  assert(ekf.max_gravity_yaw_suppressed >=
+         fabsf(ekf.last_gravity_yaw_suppressed));
+  assert_covariance_positive_definite(&ekf);
+}
+
 static void test_fault_resets(void)
 {
   struct ekf_core_s ekf;
@@ -306,6 +356,7 @@ int main(void)
   test_initialization_and_static_prediction();
   test_yaw_prediction();
   test_low_dynamics_updates();
+  test_gravity_preserves_yaw_gauge();
   test_fault_resets();
   puts("ekf core tests: PASS");
   return 0;

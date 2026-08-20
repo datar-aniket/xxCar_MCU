@@ -885,7 +885,8 @@ static void constrain_biases(FAR struct ekf_core_s *ekf)
 static int measurement_update_3d(
   FAR struct ekf_core_s *ekf,
   FAR const float h[3][EKF_STATE_DIM],
-  FAR const float residual[3], float noise_variance, FAR float *nis)
+  FAR const float residual[3], float noise_variance, FAR float *nis,
+  FAR const float unobservable_axis[3], FAR float *suppressed_correction)
 {
   float pht[EKF_STATE_DIM][3];
   float innovation[3][3];
@@ -895,10 +896,17 @@ static int measurement_update_3d(
   float delta_quaternion[4];
   float next_quaternion[4];
   float local_nis = 0.0f;
+  float local_suppressed = 0.0f;
   int row;
   int column;
   int measurement;
   int inner;
+  int axis;
+
+  if (suppressed_correction != NULL)
+    {
+      *suppressed_correction = 0.0f;
+    }
 
   memset(pht, 0, sizeof(pht));
 
@@ -968,10 +976,85 @@ static int measurement_update_3d(
               gain[row][measurement] +=
                 pht[row][inner] * innovation_inverse[inner][measurement];
             }
+        }
+    }
 
+  /* A gravity observation has no information about rotation around gravity,
+   * nor about gyro bias along that axis. Cross-covariance can nevertheless
+   * create Kalman gain in those gauge directions. Project it out before both
+   * state and Joseph covariance updates so gravity cannot corrupt the stable
+   * gyro-propagated yaw path.
+   */
+
+  if (unobservable_axis != NULL)
+    {
+      for (measurement = 0; measurement < 3; measurement++)
+        {
+          float attitude_component = 0.0f;
+          float bias_component = 0.0f;
+
+          for (axis = 0; axis < 3; axis++)
+            {
+              attitude_component +=
+                unobservable_axis[axis] * gain[axis][measurement];
+              bias_component +=
+                unobservable_axis[axis] * gain[9 + axis][measurement];
+            }
+
+          local_suppressed += attitude_component * residual[measurement];
+
+          for (axis = 0; axis < 3; axis++)
+            {
+              gain[axis][measurement] -=
+                unobservable_axis[axis] * attitude_component;
+              gain[9 + axis][measurement] -=
+                unobservable_axis[axis] * bias_component;
+            }
+        }
+    }
+
+  /* Form the correction only after projecting the gain. This also guarantees
+   * the state injection and Joseph covariance update use exactly the same
+   * observable subspace.
+   */
+
+  for (row = 0; row < EKF_STATE_DIM; row++)
+    {
+      for (measurement = 0; measurement < 3; measurement++)
+        {
           correction[row] += gain[row][measurement] *
                              residual[measurement];
         }
+    }
+
+  /* Remove the last floating-point residue in the two gauge components from
+   * the correction itself. The gain projection above remains authoritative
+   * for the covariance update.
+   */
+
+  if (unobservable_axis != NULL)
+    {
+      float attitude_component = 0.0f;
+      float bias_component = 0.0f;
+
+      for (axis = 0; axis < 3; axis++)
+        {
+          attitude_component += unobservable_axis[axis] * correction[axis];
+          bias_component += unobservable_axis[axis] * correction[9 + axis];
+        }
+
+      for (axis = 0; axis < 3; axis++)
+        {
+          correction[axis] -=
+            unobservable_axis[axis] * attitude_component;
+          correction[9 + axis] -=
+            unobservable_axis[axis] * bias_component;
+        }
+    }
+
+  if (suppressed_correction != NULL)
+    {
+      *suppressed_correction = local_suppressed;
     }
 
   for (row = 0; row < EKF_STATE_DIM; row++)
@@ -1061,6 +1144,8 @@ static bool low_dynamics_updates(FAR struct ekf_core_s *ekf)
   float residual[3];
   float rotation[3][3];
   float gravity_body[3];
+  float gravity_axis[3];
+  float suppressed_correction = 0.0f;
   float dt = ekf->covariance_dt;
   int result;
   int axis;
@@ -1085,6 +1170,7 @@ static bool low_dynamics_updates(FAR struct ekf_core_s *ekf)
 
   for (axis = 0; axis < 3; axis++)
     {
+      gravity_axis[axis] = gravity_body[axis] / EKF_GRAVITY;
       h[axis][12 + axis] = 1.0f;
       residual[axis] = ekf->covariance_delta_velocity[axis] / dt -
                        gravity_body[axis] - ekf->accel_bias[axis];
@@ -1093,7 +1179,7 @@ static bool low_dynamics_updates(FAR struct ekf_core_s *ekf)
   result = measurement_update_3d(
     ekf, h, residual,
     EKF_GRAVITY_MEAS_NOISE * EKF_GRAVITY_MEAS_NOISE,
-    &ekf->last_gravity_nis);
+    &ekf->last_gravity_nis, gravity_axis, &suppressed_correction);
 
   if (result < 0)
     {
@@ -1105,7 +1191,16 @@ static bool low_dynamics_updates(FAR struct ekf_core_s *ekf)
     }
   else
     {
+      float magnitude = fabsf(suppressed_correction);
+
       ekf->gravity_accept_count++;
+      ekf->last_gravity_yaw_suppressed = suppressed_correction;
+      ekf->gravity_yaw_projection_count++;
+
+      if (magnitude > ekf->max_gravity_yaw_suppressed)
+        {
+          ekf->max_gravity_yaw_suppressed = magnitude;
+        }
     }
 
   return true;

@@ -105,8 +105,11 @@ struct ekf_core_s
   uint32_t low_dynamics_exit_count;
   uint32_t gravity_accept_count;
   uint32_t gravity_reject_count;
+  uint32_t gravity_yaw_projection_count;
   uint32_t bias_limit_count;
   float last_gravity_nis;
+  float last_gravity_yaw_suppressed;
+  float max_gravity_yaw_suppressed;
 };
 
 void ekf_core_init(FAR struct ekf_core_s *ekf);
