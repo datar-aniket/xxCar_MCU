@@ -1,0 +1,97 @@
+diff --git a/arch/arm/src/armv7-m/arm_vectors.c b/arch/arm/src/armv7-m/arm_vectors.c
+index 2a2df2e2..d5450d64 100644
+--- a/arch/arm/src/armv7-m/arm_vectors.c
++++ b/arch/arm/src/armv7-m/arm_vectors.c
+@@ -66,6 +66,81 @@ static void start(void)
+                 "b  __start\n\t");
+ }
+
++/* Temporary pre-scheduler HardFault capture.  The normal NuttX exception
++ * dispatcher cannot run this early because g_running_tasks is initialized
++ * later by nx_start().
++ */
++
++static void arm_early_puthex(uint32_t value)
++{
++  static const char hex[] = "0123456789abcdef";
++  int shift;
++
++  for (shift = 28; shift >= 0; shift -= 4)
++    {
++      arm_lowputc(hex[(value >> shift) & 0xf]);
++    }
++}
++
++void arm_early_hardfault_dump(uint32_t *frame, uint32_t exc_return)
++     noreturn_function noinline_function;
++
++void arm_early_hardfault_dump(uint32_t *frame, uint32_t exc_return)
++{
++  __asm__ volatile ("cpsid i" : : : "memory");
++
++  arm_lowputc('\r');
++  arm_lowputc('\n');
++  arm_lowputc('!');
++  arm_lowputc('C');
++  arm_early_puthex(getreg32(NVIC_CFAULTS));
++  arm_lowputc('H');
++  arm_early_puthex(getreg32(NVIC_HFAULTS));
++  arm_lowputc('D');
++  arm_early_puthex(getreg32(NVIC_DFAULTS));
++  arm_lowputc('A');
++  arm_early_puthex(getreg32(NVIC_AFAULTS));
++  arm_lowputc('B');
++  arm_early_puthex(getreg32(NVIC_BFAULT_ADDR));
++  arm_lowputc('M');
++  arm_early_puthex(getreg32(NVIC_MEMMANAGE_ADDR));
++  arm_lowputc('P');
++  arm_early_puthex(frame[6]);
++  arm_lowputc('L');
++  arm_early_puthex(frame[5]);
++  arm_lowputc('X');
++  arm_early_puthex(frame[7]);
++  arm_lowputc('S');
++  arm_early_puthex((uint32_t)(uintptr_t)frame);
++  arm_lowputc('E');
++  arm_early_puthex(exc_return);
++  arm_lowputc('\r');
++  arm_lowputc('\n');
++
++  for (; ; )
++    {
++      __asm__ volatile ("nop");
++    }
++}
++
++void arm_early_hardfault(void) naked_function;
++
++void arm_early_hardfault(void)
++{
++  __asm__ volatile
++    (
++      "tst lr, #4\n"
++      "ite eq\n"
++      "mrseq r0, msp\n"
++      "mrsne r0, psp\n"
++      "tst lr, #16\n"
++      "it eq\n"
++      "addeq r0, r0, #72\n"
++      "mov r1, lr\n"
++      "b arm_early_hardfault_dump\n"
++    );
++}
++
+ /****************************************************************************
+  * Public Functions
+  ****************************************************************************/
+@@ -101,7 +176,9 @@ const void * const _vectors[] locate_data(".vectors")
+
+   /* Vectors 2 - n point directly at the generic handler */
+
+-  [2 ... NVIC_IRQ_PENDSV] = &exception_common,
++  [2] = &exception_common,
++  [NVIC_IRQ_HARDFAULT] = &arm_early_hardfault,
++  [(NVIC_IRQ_HARDFAULT + 1) ... NVIC_IRQ_PENDSV] = &exception_common,
+   [(NVIC_IRQ_PENDSV + 1) ... (15 + ARMV7M_PERIPHERAL_INTERRUPTS)]
+                           = &exception_direct
+ };
