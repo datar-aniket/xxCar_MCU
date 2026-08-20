@@ -1,5 +1,5 @@
 diff --git a/arch/arm/src/armv7-m/arm_perf.c b/arch/arm/src/armv7-m/arm_perf.c
-index a8b58c5e..6cba3b17 100644
+index a8b58c5e..2a6ccc41 100644
 --- a/arch/arm/src/armv7-m/arm_perf.c
 +++ b/arch/arm/src/armv7-m/arm_perf.c
 @@ -29,7 +29,6 @@
@@ -10,24 +10,26 @@ index a8b58c5e..6cba3b17 100644
  #include "nvic.h"
 
  #ifdef CONFIG_ARCH_HAVE_PERF_EVENTS
-@@ -46,18 +45,40 @@ static unsigned long g_cpu_freq = ULONG_MAX;
- 
+@@ -46,18 +45,50 @@ static unsigned long g_cpu_freq = ULONG_MAX;
+
  void up_perf_init(void *arg)
  {
++  uint32_t ctrl;
++
 +#ifdef CONFIG_DEBUG_FEATURES
 +  arm_lowputc('F');
 +#endif
 +
    g_cpu_freq = (unsigned long)(uintptr_t)arg;
- 
+
 +#ifdef CONFIG_DEBUG_FEATURES
 +  arm_lowputc('G');
 +#endif
 +
    /* Enable ITM and DWT resources, if not left enabled by debugger. */
- 
+
    modifyreg32(NVIC_DEMCR, 0, NVIC_DEMCR_TRCENA);
- 
+
 +#ifdef CONFIG_DEBUG_FEATURES
 +  arm_lowputc('R');
 +#endif
@@ -35,8 +37,9 @@ index a8b58c5e..6cba3b17 100644
    /* Make sure the high speed cycle counter is running.  It will be started
     * automatically only if a debugger is connected.
     */
- 
+
 -  putreg32(0xc5acce55, ITM_LAR);
+-  modifyreg32(DWT_CTRL, 0, DWT_CTRL_CYCCNTENA_MASK);
 +  DWT_GRANT_ACCESS();
 +  putreg32(0, DWT_CYCCNT);
 +
@@ -44,11 +47,19 @@ index a8b58c5e..6cba3b17 100644
 +  arm_lowputc('I');
 +#endif
 +
-   modifyreg32(DWT_CTRL, 0, DWT_CTRL_CYCCNTENA_MASK);
++  ctrl = getreg32(DWT_CTRL);
++
++#ifdef CONFIG_DEBUG_FEATURES
++  arm_lowputc('Q');
++  arm_lowputc('q');
++#endif
++
++  putreg32(ctrl | DWT_CTRL_CYCCNTENA_MASK, DWT_CTRL);
 +
 +#ifdef CONFIG_DEBUG_FEATURES
 +  arm_lowputc('W');
++  arm_lowputc('w');
 +#endif
  }
- 
+
  unsigned long up_perf_getfreq(void)
