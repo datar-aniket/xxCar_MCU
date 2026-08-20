@@ -1,0 +1,9 @@
+############################################################################
+# apps/ekf3/Make.defs
+#
+# SPDX-License-Identifier: Apache-2.0
+############################################################################
+
+ifneq ($(CONFIG_XXCAR_EKF3),)
+CONFIGURED_APPS += $(APPDIR)/xxcar/ekf3
+endif

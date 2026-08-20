@@ -1,0 +1,29 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config XXCAR_EKF3
+	tristate "ekf3: 15-state inertial prediction"
+	default n
+	depends on UORB && XXCAR_IMU_DELTA
+	select XXCAR_UORB_MSGS
+	---help---
+		Runs 400 Hz nominal inertial state prediction from vehicle_imu and
+		100 Hz covariance prediction for a 15-state error-state EKF.
+
+if XXCAR_EKF3
+
+config XXCAR_EKF3_PROGNAME
+	string "Program name"
+	default "ekf3"
+
+config XXCAR_EKF3_PRIORITY
+	int "command priority"
+	default 100
+
+config XXCAR_EKF3_STACKSIZE
+	int "command stack size"
+	default 6144
+
+endif

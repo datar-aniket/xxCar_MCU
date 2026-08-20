@@ -56,6 +56,7 @@ ORB_NAME_FITS("distance_sensor");
 ORB_NAME_FITS("vehicle_accel");
 ORB_NAME_FITS("vehicle_gyro");
 ORB_NAME_FITS("vehicle_imu");
+ORB_NAME_FITS("estimator_state");
 
 static_assert(offsetof(struct optical_flow_s, timestamp)             ==  0, "layout");
 static_assert(offsetof(struct optical_flow_s, integration_time_us)   ==  8, "layout");
@@ -107,6 +108,22 @@ static_assert(offsetof(struct vehicle_imu_s, samples)           == 56, "layout")
 static_assert(offsetof(struct vehicle_imu_s, instance)          == 60, "layout");
 static_assert(sizeof(struct vehicle_imu_s)                      == 64, "layout");
 
+static_assert(offsetof(struct estimator_state_s, timestamp)          ==   0, "layout");
+static_assert(offsetof(struct estimator_state_s, timestamp_sample)   ==   8, "layout");
+static_assert(offsetof(struct estimator_state_s, quaternion)         ==  16, "layout");
+static_assert(offsetof(struct estimator_state_s, velocity)           ==  32, "layout");
+static_assert(offsetof(struct estimator_state_s, position)           ==  44, "layout");
+static_assert(offsetof(struct estimator_state_s, gyro_bias)          ==  56, "layout");
+static_assert(offsetof(struct estimator_state_s, accel_bias)         ==  68, "layout");
+static_assert(offsetof(struct estimator_state_s, angle_variance)     ==  80, "layout");
+static_assert(offsetof(struct estimator_state_s, velocity_variance)  ==  92, "layout");
+static_assert(offsetof(struct estimator_state_s, position_variance)  == 104, "layout");
+static_assert(offsetof(struct estimator_state_s, predict_count)      == 116, "layout");
+static_assert(offsetof(struct estimator_state_s, covariance_count)   == 120, "layout");
+static_assert(offsetof(struct estimator_state_s, reset_counter)      == 124, "layout");
+static_assert(offsetof(struct estimator_state_s, solution_status)    == 126, "layout");
+static_assert(sizeof(struct estimator_state_s)                       == 128, "layout");
+
 /****************************************************************************
  * Private Data
  ****************************************************************************/
@@ -148,6 +165,24 @@ static const char vehicle_imu_format[] =
   ",samples:%hu,reset_counter:%hu"
   ",instance:%hhu,clipping:%hhu"
   ",accel_calibrated:%hhu,gyro_calibrated:%hhu";
+
+static const char estimator_state_format[] =
+  "timestamp:%" PRIu64
+  ",timestamp_sample:%" PRIu64
+  ",quaternion[0]:%hf,quaternion[1]:%hf"
+  ",quaternion[2]:%hf,quaternion[3]:%hf"
+  ",velocity[0]:%hf,velocity[1]:%hf,velocity[2]:%hf"
+  ",position[0]:%hf,position[1]:%hf,position[2]:%hf"
+  ",gyro_bias[0]:%hf,gyro_bias[1]:%hf,gyro_bias[2]:%hf"
+  ",accel_bias[0]:%hf,accel_bias[1]:%hf,accel_bias[2]:%hf"
+  ",angle_variance[0]:%hf,angle_variance[1]:%hf"
+  ",angle_variance[2]:%hf"
+  ",velocity_variance[0]:%hf,velocity_variance[1]:%hf"
+  ",velocity_variance[2]:%hf"
+  ",position_variance[0]:%hf,position_variance[1]:%hf"
+  ",position_variance[2]:%hf"
+  ",predict_count:%" PRIu32 ",covariance_count:%" PRIu32
+  ",reset_counter:%hu,solution_status:%hhu,instance:%hhu";
 #endif
 
 /****************************************************************************
@@ -159,6 +194,8 @@ ORB_DEFINE(distance_sensor, struct distance_sensor_s, distance_sensor_format);
 ORB_DEFINE(vehicle_accel, struct vehicle_accel_s, vehicle_accel_format);
 ORB_DEFINE(vehicle_gyro, struct vehicle_gyro_s, vehicle_gyro_format);
 ORB_DEFINE(vehicle_imu, struct vehicle_imu_s, vehicle_imu_format);
+ORB_DEFINE(estimator_state, struct estimator_state_s,
+           estimator_state_format);
 
 /****************************************************************************
  * Public Functions
@@ -237,4 +274,19 @@ int vehicle_imu_publish(int fd, FAR const struct vehicle_imu_s *msg)
     }
 
   return orb_publish(ORB_ID(vehicle_imu), fd, msg);
+}
+
+int estimator_state_advertise(void)
+{
+  return orb_advertise(ORB_ID(estimator_state), NULL);
+}
+
+int estimator_state_publish(int fd, FAR const struct estimator_state_s *msg)
+{
+  if (fd < 0 || msg == NULL)
+    {
+      return -EINVAL;
+    }
+
+  return orb_publish(ORB_ID(estimator_state), fd, msg);
 }

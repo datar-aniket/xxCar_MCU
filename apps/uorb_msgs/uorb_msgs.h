@@ -13,6 +13,7 @@
  *   vehicle_accel    corrected, body-frame accelerometer
  *   vehicle_gyro     corrected, body-frame gyroscope
  *   vehicle_imu      unfiltered coning/sculling-corrected IMU deltas
+ *   estimator_state  current-time EKF nominal state and validity
  *
  * The publisher is whatever driver has the data (apps/mavlink for now); the
  * subscriber is the navigation/fusion code. Neither should have to link the
@@ -173,6 +174,36 @@ struct vehicle_imu_s
   uint8_t  gyro_calibrated;       /* 63 */
 };
 
+/* Current-time estimator output. The first EKF stage publishes attitude at
+ * IMU packet rate while deliberately leaving velocity and position invalid
+ * until an aiding source makes them observable. Variances are the diagonal of
+ * the full internal 15-state covariance, not separately filtered metrics.
+ */
+
+#define ESTIMATOR_ATTITUDE_VALID  (1u << 0)
+#define ESTIMATOR_YAW_RELATIVE    (1u << 1)
+#define ESTIMATOR_VELOCITY_VALID  (1u << 2)
+#define ESTIMATOR_POSITION_VALID  (1u << 3)
+
+struct estimator_state_s
+{
+  uint64_t timestamp;             /*   0: us, publication time */
+  uint64_t timestamp_sample;      /*   8: us, state prediction horizon */
+  float    quaternion[4];         /*  16: body to local NED, w/x/y/z */
+  float    velocity[3];           /*  32: NED m/s */
+  float    position[3];           /*  44: local NED m */
+  float    gyro_bias[3];          /*  56: body rad/s */
+  float    accel_bias[3];         /*  68: body m/s^2 */
+  float    angle_variance[3];     /*  80: rad^2 */
+  float    velocity_variance[3];  /*  92: (m/s)^2 */
+  float    position_variance[3];  /* 104: m^2 */
+  uint32_t predict_count;         /* 116: 400 Hz nominal predictions */
+  uint32_t covariance_count;      /* 120: 100 Hz covariance predictions */
+  uint16_t reset_counter;         /* 124: estimator reset generation */
+  uint8_t  solution_status;       /* 126: ESTIMATOR_* validity flags */
+  uint8_t  instance;              /* 127: EKF lane, currently zero */
+};
+
 /****************************************************************************
  * Public Data
  ****************************************************************************/
@@ -182,6 +213,7 @@ ORB_DECLARE(distance_sensor);
 ORB_DECLARE(vehicle_accel);
 ORB_DECLARE(vehicle_gyro);
 ORB_DECLARE(vehicle_imu);
+ORB_DECLARE(estimator_state);
 
 /****************************************************************************
  * Public Function Prototypes
@@ -201,5 +233,8 @@ int vehicle_gyro_publish(int fd, FAR const struct vehicle_gyro_s *msg);
 
 int vehicle_imu_advertise(void);
 int vehicle_imu_publish(int fd, FAR const struct vehicle_imu_s *msg);
+
+int estimator_state_advertise(void);
+int estimator_state_publish(int fd, FAR const struct estimator_state_s *msg);
 
 #endif /* __APPS_UORB_MSGS_UORB_MSGS_H */
