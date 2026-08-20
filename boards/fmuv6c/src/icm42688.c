@@ -190,6 +190,8 @@ struct icm42688_dev_s
   mutex_t                   lock;
   sem_t                     run;
   uint8_t                   fifobuf[ICM_FIFO_MAX_READ * ICM_FIFO_PACKET];
+  struct sensor_accel       accel_batch[ICM_FIFO_MAX_READ];
+  struct sensor_gyro        gyro_batch[ICM_FIFO_MAX_READ];
 };
 
 /****************************************************************************
@@ -521,12 +523,13 @@ static int32_t icm42688_reassemble20(uint8_t hi, uint8_t mid, uint8_t lo)
   return (int32_t)x;
 }
 
-/* Parse and publish one 20-byte hi-res FIFO packet. Returns false only on a
- * bad header (framing lost -> caller should flush and resync).
+/* Parse one 20-byte hi-res FIFO packet into its batch slots. Returns false
+ * only on a bad header (framing lost -> caller should flush and resync).
  */
 
-static bool icm42688_publish(FAR struct icm42688_dev_s *dev,
-                             FAR const uint8_t *p, uint64_t ts)
+static bool icm42688_decode(FAR struct icm42688_dev_s *dev,
+                            FAR const uint8_t *p, uint64_t ts,
+                            uint16_t index, bool accel_en, bool gyro_en)
 {
   uint8_t hdr = p[0];
   int32_t ax;
@@ -551,32 +554,58 @@ static bool icm42688_publish(FAR struct icm42688_dev_s *dev,
   temp = (float)(int16_t)((uint16_t)p[13] << 8 | p[14]) * ICM_TEMP_SCALE +
          ICM_TEMP_OFFSET;
 
-  if (dev->accel_en)
+  if (accel_en)
     {
-      struct sensor_accel a;
-      a.timestamp   = ts;
-      a.x = (float)ax * ICM_ACCEL_SCALE;
-      a.y = (float)ay * ICM_ACCEL_SCALE;
-      a.z = (float)az * ICM_ACCEL_SCALE;
-      a.temperature = temp;
-      dev->accel.lower.push_event(dev->accel.lower.priv, &a, sizeof(a));
+      FAR struct sensor_accel *a = &dev->accel_batch[index];
+
+      a->timestamp = ts;
+      a->x = (float)ax * ICM_ACCEL_SCALE;
+      a->y = (float)ay * ICM_ACCEL_SCALE;
+      a->z = (float)az * ICM_ACCEL_SCALE;
+      a->temperature = temp;
     }
 
-  if (dev->gyro_en)
+  if (gyro_en)
     {
-      struct sensor_gyro g;
-      g.timestamp   = ts;
-      g.x = (float)icm42688_reassemble20(p[7],  p[8],  p[17] & 0x0f) *
-            ICM_GYRO_SCALE;
-      g.y = (float)icm42688_reassemble20(p[9],  p[10], p[18] & 0x0f) *
-            ICM_GYRO_SCALE;
-      g.z = (float)icm42688_reassemble20(p[11], p[12], p[19] & 0x0f) *
-            ICM_GYRO_SCALE;
-      g.temperature = temp;
-      dev->gyro.lower.push_event(dev->gyro.lower.priv, &g, sizeof(g));
+      FAR struct sensor_gyro *g = &dev->gyro_batch[index];
+
+      g->timestamp = ts;
+      g->x = (float)icm42688_reassemble20(p[7], p[8], p[17] & 0x0f) *
+             ICM_GYRO_SCALE;
+      g->y = (float)icm42688_reassemble20(p[9], p[10], p[18] & 0x0f) *
+             ICM_GYRO_SCALE;
+      g->z = (float)icm42688_reassemble20(p[11], p[12], p[19] & 0x0f) *
+             ICM_GYRO_SCALE;
+      g->temperature = temp;
     }
 
   return true;
+}
+
+/* The NuttX sensor upper half accepts an array of complete events in one
+ * push. Keep every 2 kHz sample and timestamp, but amortize its lock, timing,
+ * poll and waiter notification work across the DMA chunk.
+ */
+
+static void icm42688_push_batch(FAR struct icm42688_dev_s *dev,
+                                uint16_t count, bool accel_en, bool gyro_en)
+{
+  if (count == 0)
+    {
+      return;
+    }
+
+  if (accel_en)
+    {
+      dev->accel.lower.push_event(dev->accel.lower.priv, dev->accel_batch,
+                                  (size_t)count * sizeof(dev->accel_batch[0]));
+    }
+
+  if (gyro_en)
+    {
+      dev->gyro.lower.push_event(dev->gyro.lower.priv, dev->gyro_batch,
+                                 (size_t)count * sizeof(dev->gyro_batch[0]));
+    }
 }
 
 /* Measure the primary IMU's actual FIFO period from watermark edges captured
@@ -765,6 +794,9 @@ static void icm42688_drain_fifo(FAR struct icm42688_dev_s *dev)
     {
       uint16_t n = remaining > ICM_FIFO_MAX_READ ? ICM_FIFO_MAX_READ :
                                                    remaining;
+      uint16_t decoded = 0;
+      bool accel_en = dev->accel_en;
+      bool gyro_en = dev->gyro_en;
       int i;
 
       icm42688_read_burst(dev, ICM_REG_FIFO_DATA, dev->fifobuf,
@@ -777,17 +809,24 @@ static void icm42688_drain_fifo(FAR struct icm42688_dev_s *dev)
             (ts_q5 + (1ull << (ICM_TIMESTAMP_FRAC_BITS - 1))) >>
             ICM_TIMESTAMP_FRAC_BITS;
 
-          if (!icm42688_publish(dev, dev->fifobuf + i * ICM_FIFO_PACKET, ts))
+          if (!icm42688_decode(dev,
+                               dev->fifobuf + i * ICM_FIFO_PACKET,
+                               ts, decoded, accel_en, gyro_en))
             {
-              /* Lost framing - flush and wait for the next watermark */
+              /* Preserve the valid prefix just as per-sample publication did,
+               * then flush and wait for the next watermark.
+               */
 
+              icm42688_push_batch(dev, decoded, accel_en, gyro_en);
               icm42688_fifo_flush(dev);
               return;
             }
 
+          decoded++;
           dev->last_timestamp_q5 = ts_q5;
         }
 
+      icm42688_push_batch(dev, decoded, accel_en, gyro_en);
       remaining -= n;
     }
 
