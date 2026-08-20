@@ -11,6 +11,6 @@ PRIORITY  = $(CONFIG_XXCAR_SENSOR_STATUS_PRIORITY)
 STACKSIZE = $(CONFIG_XXCAR_SENSOR_STATUS_STACKSIZE)
 MODULE    = $(CONFIG_XXCAR_SENSOR_STATUS)
 
-MAINSRC   = sensor_status_main.c
+MAINSRC   = sensor_status_main.c timing_stats.c
 
 include $(APPDIR)/Application.mk

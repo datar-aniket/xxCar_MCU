@@ -840,7 +840,7 @@ static int bmi055_set_interval(FAR struct sensor_lowerhalf_s *lower,
                                FAR struct file *filep,
                                FAR uint32_t *period_us)
 {
-  /* Both unfiltered FIFO streams have the documented 2 kHz output rate. */
+  /* Both filtered FIFO streams have the documented 2 kHz output rate. */
 
   *period_us = 500;
   return OK;

@@ -16,6 +16,7 @@
  *   sensor_status            measure over ~1 s and print once
  *   sensor_status -w         repeat until Ctrl-C
  *   sensor_status -t <ms>    measurement window (default 1000 ms)
+ *   sensor_status -T -t 5000 audit raw IMU sample timing
  ****************************************************************************/
 
 #include <nuttx/config.h>
@@ -25,11 +26,14 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <inttypes.h>
+#include <poll.h>
 
 #include <uORB/uORB.h>
 #include <nuttx/uorb.h>
 
 #include "../uorb_msgs/uorb_msgs.h"
+#include "timing_stats.h"
 
 /****************************************************************************
  * Private Types
@@ -89,6 +93,19 @@ static const struct sens_row_s g_rows[] =
 };
 
 #define NROWS ((int)(sizeof(g_rows) / sizeof(g_rows[0])))
+#define NIMU_ROWS 4
+
+struct icm_alignment_s
+{
+  uint64_t accel_timestamp;
+  uint64_t gyro_timestamp;
+  uint64_t exact_pairs;
+  uint64_t accel_only;
+  uint64_t gyro_only;
+  uint64_t max_mismatch_us;
+  bool     have_accel;
+  bool     have_gyro;
+};
 
 /****************************************************************************
  * Private Functions
@@ -242,6 +259,194 @@ static void sensor_status_run(int window_ms)
     }
 }
 
+static void sensor_timing_align(struct icm_alignment_s *align, int row,
+                                uint64_t timestamp)
+{
+  if (row == 0)
+    {
+      if (align->have_accel)
+        {
+          align->accel_only++;
+        }
+
+      align->accel_timestamp = timestamp;
+      align->have_accel = true;
+    }
+  else if (row == 1)
+    {
+      if (align->have_gyro)
+        {
+          align->gyro_only++;
+        }
+
+      align->gyro_timestamp = timestamp;
+      align->have_gyro = true;
+    }
+
+  while (align->have_accel && align->have_gyro)
+    {
+      uint64_t delta;
+
+      if (align->accel_timestamp == align->gyro_timestamp)
+        {
+          align->exact_pairs++;
+          align->have_accel = false;
+          align->have_gyro = false;
+          break;
+        }
+
+      if (align->accel_timestamp < align->gyro_timestamp)
+        {
+          delta = align->gyro_timestamp - align->accel_timestamp;
+          align->accel_only++;
+          align->have_accel = false;
+        }
+      else
+        {
+          delta = align->accel_timestamp - align->gyro_timestamp;
+          align->gyro_only++;
+          align->have_gyro = false;
+        }
+
+      if (delta > align->max_mismatch_us)
+        {
+          align->max_mismatch_us = delta;
+        }
+    }
+}
+
+static void sensor_timing_print(FAR const char *label,
+                                FAR const struct timing_stats_s *stats)
+{
+  if (stats->samples == 0)
+    {
+      printf("%-18s no samples\n", label);
+      return;
+    }
+
+  printf("%-18s n=%" PRIu64 " rate=%7.2fHz"
+         " dt=%7.3f+-%6.3fus [min=%" PRIu64 " max=%" PRIu64 "]\n",
+         label, stats->samples, timing_stats_rate_hz(stats),
+         stats->mean_dt_us, timing_stats_stddev_us(stats),
+         stats->min_dt_us == UINT64_MAX ? 0 : stats->min_dt_us,
+         stats->max_dt_us);
+  printf("  gaps=%" PRIu64 " duplicate=%" PRIu64 " backward=%" PRIu64
+         " age=[%" PRId64 "/%.1f/%" PRId64 "]us drift=%+.1fppm\n",
+         stats->gaps, stats->duplicates, stats->backwards,
+         stats->min_age_us == INT64_MAX ? 0 : stats->min_age_us,
+         stats->mean_age_us,
+         stats->max_age_us == INT64_MIN ? 0 : stats->max_age_us,
+         timing_stats_clock_drift_ppm(stats));
+}
+
+static void sensor_timing_run(int window_ms)
+{
+  FAR const struct orb_metadata *meta[NIMU_ROWS];
+  struct timing_stats_s stats[NIMU_ROWS];
+  struct pollfd pfd[NIMU_ROWS];
+  struct icm_alignment_s align;
+  uint64_t end_us;
+  int i;
+
+  memset(&align, 0, sizeof(align));
+
+  for (i = 0; i < NIMU_ROWS; i++)
+    {
+      meta[i] = orb_get_meta(g_rows[i].name);
+      pfd[i].fd = meta[i] != NULL ?
+                  orb_subscribe_multi(meta[i], g_rows[i].instance) : -1;
+      pfd[i].events = POLLIN;
+      pfd[i].revents = 0;
+      timing_stats_init(&stats[i], 500);
+    }
+
+  printf("IMU timing audit: %d ms, expected period 500 us\n", window_ms);
+  end_us = orb_absolute_time() + (uint64_t)window_ms * 1000ull;
+
+  while (orb_absolute_time() < end_us)
+    {
+      uint64_t now_us = orb_absolute_time();
+      uint64_t remain_us = end_us - now_us;
+      int timeout_ms = (int)((remain_us + 999ull) / 1000ull);
+      int ret;
+
+      ret = poll(pfd, NIMU_ROWS, timeout_ms);
+      if (ret < 0)
+        {
+          if (errno == EINTR)
+            {
+              continue;
+            }
+
+          printf("sensor timing poll failed: %d\n", errno);
+          break;
+        }
+
+      if (ret == 0)
+        {
+          break;
+        }
+
+      for (;;)
+        {
+          bool progress = false;
+
+          for (i = 0; i < NIMU_ROWS; i++)
+            {
+              union
+              {
+                struct sensor_accel accel;
+                struct sensor_gyro  gyro;
+              } sample;
+
+              if (pfd[i].fd >= 0 &&
+                  orb_copy(meta[i], pfd[i].fd, &sample) == 0)
+                {
+                  uint64_t arrival_us = orb_absolute_time();
+                  uint64_t sample_us = sample.accel.timestamp;
+
+                  timing_stats_add(&stats[i], sample_us, arrival_us);
+                  sensor_timing_align(&align, i, sample_us);
+                  progress = true;
+                }
+            }
+
+          if (!progress)
+            {
+              break;
+            }
+        }
+    }
+
+  if (align.have_accel)
+    {
+      align.accel_only++;
+    }
+
+  if (align.have_gyro)
+    {
+      align.gyro_only++;
+    }
+
+  for (i = 0; i < NIMU_ROWS; i++)
+    {
+      if (pfd[i].fd < 0)
+        {
+          printf("%-18s absent\n", g_rows[i].label);
+        }
+      else
+        {
+          sensor_timing_print(g_rows[i].label, &stats[i]);
+          orb_unsubscribe(pfd[i].fd);
+        }
+    }
+
+  printf("ICM accel/gyro: exact=%" PRIu64 " accel_only=%" PRIu64
+         " gyro_only=%" PRIu64 " max_mismatch=%" PRIu64 "us\n",
+         align.exact_pairs, align.accel_only, align.gyro_only,
+         align.max_mismatch_us);
+}
+
 /****************************************************************************
  * Public Functions
  ****************************************************************************/
@@ -250,6 +455,7 @@ int main(int argc, FAR char *argv[])
 {
   int window_ms = 1000;
   bool watch = false;
+  bool timing = false;
   int i;
 
   for (i = 1; i < argc; i++)
@@ -258,21 +464,34 @@ int main(int argc, FAR char *argv[])
         {
           watch = true;
         }
+      else if (strcmp(argv[i], "-T") == 0)
+        {
+          timing = true;
+        }
       else if (strcmp(argv[i], "-t") == 0 && i + 1 < argc)
         {
           window_ms = atoi(argv[++i]);
           if (window_ms < 100)
             {
-              window_ms = 100;   /* below this the count is too small to trust */
+              /* Below this the count is too small to trust. */
+
+              window_ms = 100;
             }
         }
       else
         {
-          printf("Usage: sensor_status [-w] [-t <ms>]\n"
+          printf("Usage: sensor_status [-w] [-T] [-t <ms>]\n"
                  "  -w        repeat until Ctrl-C\n"
+                 "  -T        audit raw IMU sample timestamps\n"
                  "  -t <ms>   measurement window (default 1000)\n");
           return 1;
         }
+    }
+
+  if (timing)
+    {
+      sensor_timing_run(window_ms);
+      return 0;
     }
 
   do

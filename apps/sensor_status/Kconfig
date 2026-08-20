@@ -10,7 +10,9 @@ config XXCAR_SENSOR_STATUS
 	select XXCAR_UORB_MSGS
 	---help---
 		One line per onboard sensor: whether it is streaming, the measured
-		rate (Hz), and its current reading.
+		rate (Hz), and its current reading. An optional raw IMU timing audit
+		reports sample interval, timestamp faults, delivery age, clock drift,
+		and primary accel/gyro timestamp alignment.
 
 		Answers "what rate is each sensor at?" without the uorb_listener
 		trade-off - listener prints nothing with CONFIG_DEBUG_UORB off and a
