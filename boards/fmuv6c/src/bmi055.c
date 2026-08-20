@@ -158,6 +158,17 @@
  * Private Types
  ****************************************************************************/
 
+union bmi055_event_u
+{
+  struct sensor_accel accel;
+  struct sensor_gyro  gyro;
+};
+
+_Static_assert(sizeof(union bmi055_event_u) == sizeof(struct sensor_accel),
+               "BMI055 accel batch stride");
+_Static_assert(sizeof(union bmi055_event_u) == sizeof(struct sensor_gyro),
+               "BMI055 gyro batch stride");
+
 struct bmi055_dev_s
 {
   struct sensor_lowerhalf_s lower;
@@ -177,6 +188,7 @@ struct bmi055_dev_s
   mutex_t                   lock;
   sem_t                     run;
   uint8_t                   fifobuf[BMI_FIFO_MAX_READ * BMI_FIFO_FRAME];
+  union bmi055_event_u      event_batch[BMI_FIFO_MAX_READ];
 };
 
 /****************************************************************************
@@ -402,8 +414,9 @@ static int bmi055_configure(FAR struct bmi055_dev_s *dev)
  * Private Functions - sampling
  ****************************************************************************/
 
-static void bmi055_publish(FAR struct bmi055_dev_s *dev,
-                           FAR const uint8_t *f, float temp, uint64_t ts)
+static void bmi055_decode(FAR struct bmi055_dev_s *dev,
+                          FAR const uint8_t *f, float temp, uint64_t ts,
+                          uint8_t index)
 {
   /* Both dies emit 6-byte little-endian XYZ frames. The accel is 12-bit,
    * left-justified in 16 bits, so it needs an arithmetic >> 4 to sign-extend.
@@ -415,25 +428,40 @@ static void bmi055_publish(FAR struct bmi055_dev_s *dev,
 
   if (dev->is_gyro)
     {
-      struct sensor_gyro g;
+      FAR struct sensor_gyro *g = &dev->event_batch[index].gyro;
 
-      g.timestamp   = ts;
-      g.x           = (float)x * BMI_GYRO_SCALE;
-      g.y           = (float)y * BMI_GYRO_SCALE;
-      g.z           = (float)z * BMI_GYRO_SCALE;
-      g.temperature = temp;
-      dev->lower.push_event(dev->lower.priv, &g, sizeof(g));
+      g->timestamp   = ts;
+      g->x           = (float)x * BMI_GYRO_SCALE;
+      g->y           = (float)y * BMI_GYRO_SCALE;
+      g->z           = (float)z * BMI_GYRO_SCALE;
+      g->temperature = temp;
     }
   else
     {
-      struct sensor_accel a;
+      FAR struct sensor_accel *a = &dev->event_batch[index].accel;
 
-      a.timestamp   = ts;
-      a.x           = (float)(x >> 4) * BMI_ACCEL_SCALE;
-      a.y           = (float)(y >> 4) * BMI_ACCEL_SCALE;
-      a.z           = (float)(z >> 4) * BMI_ACCEL_SCALE;
-      a.temperature = temp;
-      dev->lower.push_event(dev->lower.priv, &a, sizeof(a));
+      a->timestamp   = ts;
+      a->x           = (float)(x >> 4) * BMI_ACCEL_SCALE;
+      a->y           = (float)(y >> 4) * BMI_ACCEL_SCALE;
+      a->z           = (float)(z >> 4) * BMI_ACCEL_SCALE;
+      a->temperature = temp;
+    }
+}
+
+/* Publish one native array of complete events per DMA chunk. This preserves
+ * every sample while amortizing the sensor upper-half lock, timing, poll and
+ * waiter notification work across the FIFO batch.
+ */
+
+static void bmi055_push_batch(FAR struct bmi055_dev_s *dev, uint8_t count)
+{
+  size_t event_size = dev->is_gyro ? sizeof(struct sensor_gyro) :
+                                     sizeof(struct sensor_accel);
+
+  if (count != 0)
+    {
+      dev->lower.push_event(dev->lower.priv, dev->event_batch,
+                            (size_t)count * event_size);
     }
 }
 
@@ -684,13 +712,14 @@ static void bmi055_drain_fifo(FAR struct bmi055_dev_s *dev)
         {
           uint64_t ts_q5 = base_q5 + (uint64_t)idx * period_q5;
 
-          bmi055_publish(dev, dev->fifobuf + i * BMI_FIFO_FRAME, temp,
-                         (ts_q5 +
-                          (1ull << (BMI055_TIME_FRAC_BITS - 1))) >>
-                         BMI055_TIME_FRAC_BITS);
+          bmi055_decode(dev, dev->fifobuf + i * BMI_FIFO_FRAME, temp,
+                        (ts_q5 +
+                         (1ull << (BMI055_TIME_FRAC_BITS - 1))) >>
+                        BMI055_TIME_FRAC_BITS, (uint8_t)i);
           dev->last_timestamp_q5 = ts_q5;
         }
 
+      bmi055_push_batch(dev, n);
       remaining -= n;
     }
 
