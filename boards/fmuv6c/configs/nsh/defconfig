@@ -247,13 +247,11 @@ CONFIG_USART6_RXFIFO_THRES=1
 # handles a 1 kHz tick trivially (PX4 runs the same).
 CONFIG_USEC_PER_TICK=1000
 
-# Exact CPU runtime accounting. The Cortex-M7 DWT cycle counter runs at the
-# 480 MHz core clock and NuttX snapshots it at every context switch. This is
-# elapsed execution time, unlike SYSCLK cpuload's 1 kHz active-task sampling.
-# Thresholds remain disabled: CRITMONITOR is used only as a runtime accumulator.
+# DWT-only boot diagnostic: initialize and exercise the Cortex-M7 hardware
+# cycle counter without enabling scheduler critical-monitor accounting. This
+# isolates ARCH_PERF_EVENTS from the TCB/layout changes made by CRITMONITOR.
 CONFIG_ARCH_PERF_EVENTS=y
-CONFIG_SCHED_CRITMONITOR=y
-CONFIG_SCHED_CRITMONITOR_MAXTIME_THREAD=0
+# CONFIG_SCHED_CRITMONITOR is not set
 CONFIG_SCHED_CPULOAD_NONE=y
 
 CONFIG_CDCACM=y
@@ -328,7 +326,7 @@ CONFIG_STM32H7_USART_INVERT=y
 CONFIG_XXCAR_RC=y
 CONFIG_XXCAR_UORB_MSGS=y
 CONFIG_XXCAR_SENSOR_STATUS=y
-CONFIG_XXCAR_CPU_STATUS=y
+# CONFIG_XXCAR_CPU_STATUS is not set
 CONFIG_XXCAR_SENSORS=y
 CONFIG_XXCAR_LOGGER=y
 CONFIG_XXCAR_REBOOT=y
