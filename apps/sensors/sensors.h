@@ -43,6 +43,19 @@ struct sensors_status_s
   float    accel_off[3];
   float    accel_scl[3];
   float    gyro_off[3];
+  float    accel_filter_rate_hz;
+  float    gyro_filter_rate_hz;
+  float    accel_lpf_hz;
+  float    gyro_lpf_hz;
+  float    gyro_notch_hz;
+  float    gyro_notch_bw_hz;
+  float    accel_raw_rms[3]; /* Latest stationary-sized AC RMS window */
+  float    accel_filt_rms[3];
+  float    gyro_raw_rms[3];
+  float    gyro_filt_rms[3];
+  uint32_t filter_resets;
+  uint32_t filter_timestamp_errors;
+  uint32_t filter_invalid;
 };
 
 int  sensors_start(void);

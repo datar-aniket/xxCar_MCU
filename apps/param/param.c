@@ -174,6 +174,20 @@ static const struct param_def_s g_params[] =
     "IMU feeding the corrected topics (0 = ICM-42688, 1 = BMI055)",
     PARAM_RANGE_ENUM },
 
+  /* Native-rate software filters for the corrected/controller signal.  These
+   * never alter sensor_accel/sensor_gyro, which remain the estimator/logger
+   * source.  A zero cutoff/centre disables the corresponding filter.
+   */
+
+  { "SENS_ACC_LPF", PARAM_TYPE_FLOAT, F32(100.0f), F32(0.0f), F32(800.0f),
+    "Corrected accel 2-pole low-pass cutoff (Hz, 0=off)" },
+  { "SENS_GYR_LPF", PARAM_TYPE_FLOAT, F32(0.0f), F32(0.0f), F32(800.0f),
+    "Corrected gyro 2-pole low-pass cutoff (Hz, 0=off)" },
+  { "SENS_GYR_NF_FRQ", PARAM_TYPE_FLOAT, F32(0.0f), F32(0.0f), F32(800.0f),
+    "Corrected gyro notch centre (Hz, 0=off)" },
+  { "SENS_GYR_NF_BW", PARAM_TYPE_FLOAT, F32(20.0f), F32(1.0f), F32(400.0f),
+    "Corrected gyro notch bandwidth (Hz)" },
+
   /* ---- Logging (on request only; these choose WHAT gets logged) ---------- */
 
   { "LOG_ENABLE", PARAM_TYPE_INT32, I32(0), I32(0), I32(1),

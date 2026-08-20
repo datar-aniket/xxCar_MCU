@@ -25,6 +25,12 @@ config XXCAR_SENSORS
 		with SENS_BOARD_ROT (board relative to the vehicle), numbered as PX4's
 		enum Rotation.
 
+		SENS_ACC_LPF and SENS_GYR_LPF configure native-rate second-order
+		Butterworth filters on the corrected/controller topics. A fixed gyro
+		notch is available through SENS_GYR_NF_FRQ and SENS_GYR_NF_BW and is
+		disabled by default. Raw IMU topics and the future EKF delta path are
+		unchanged.
+
 if XXCAR_SENSORS
 
 config XXCAR_SENSORS_PROGNAME

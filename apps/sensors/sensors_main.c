@@ -32,7 +32,9 @@ static void usage(void)
          "\n"
          "  Which IMU:  SENS_IMU_SEL       0 = ICM-42688, 1 = BMI055\n"
          "  Orientation: SENS_IMU0_ROT / SENS_IMU1_ROT (sensor to board)\n"
-         "               SENS_BOARD_ROT               (board to vehicle)\n");
+         "               SENS_BOARD_ROT               (board to vehicle)\n"
+         "  Filters: SENS_ACC_LPF / SENS_GYR_LPF (Hz, 0 disables)\n"
+         "           SENS_GYR_NF_FRQ / SENS_GYR_NF_BW (Hz)\n");
 }
 
 static void print_status(void)
@@ -81,6 +83,23 @@ static void print_status(void)
   printf("  published  accel %" PRIu32 " (%" PRIu32 " skipped)"
          "  gyro %" PRIu32 " (%" PRIu32 " skipped)\n",
          s.accel_out, s.accel_skipped, s.gyro_out, s.gyro_skipped);
+
+  printf("  filters accel %.1fHz LPF %.1fHz  gyro %.1fHz notch "
+         "%.1f/%.1fHz LPF %.1fHz\n",
+         (double)s.accel_filter_rate_hz, (double)s.accel_lpf_hz,
+         (double)s.gyro_filter_rate_hz, (double)s.gyro_notch_hz,
+         (double)s.gyro_notch_bw_hz, (double)s.gyro_lpf_hz);
+  printf("  accel AC RMS raw  %.4f %.4f %.4f  filtered %.4f %.4f %.4f\n",
+         (double)s.accel_raw_rms[0], (double)s.accel_raw_rms[1],
+         (double)s.accel_raw_rms[2], (double)s.accel_filt_rms[0],
+         (double)s.accel_filt_rms[1], (double)s.accel_filt_rms[2]);
+  printf("  gyro  AC RMS raw  %.5f %.5f %.5f  filtered %.5f %.5f %.5f\n",
+         (double)s.gyro_raw_rms[0], (double)s.gyro_raw_rms[1],
+         (double)s.gyro_raw_rms[2], (double)s.gyro_filt_rms[0],
+         (double)s.gyro_filt_rms[1], (double)s.gyro_filt_rms[2]);
+  printf("  filter resets %" PRIu32 " timestamp errors %" PRIu32
+         " invalid %" PRIu32 "\n",
+         s.filter_resets, s.filter_timestamp_errors, s.filter_invalid);
 }
 
 /****************************************************************************

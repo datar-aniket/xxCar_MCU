@@ -12,8 +12,9 @@ STACKSIZE = $(CONFIG_XXCAR_SENSORS_STACKSIZE)
 MODULE    = $(CONFIG_XXCAR_SENSORS)
 
 # sensors.c is the daemon; rotation.c is the shared rotation table;
+# dsp_filter.c is the native-rate three-axis FPU biquad;
 # sensors_main.c is the `sensors` command.
-CSRCS    += sensors.c rotation.c
+CSRCS    += sensors.c rotation.c dsp_filter.c
 MAINSRC   = sensors_main.c
 
 include $(APPDIR)/Application.mk
