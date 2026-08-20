@@ -53,6 +53,14 @@
 
 void stm32_boardinitialize(void)
 {
+#ifdef CONFIG_DEBUG_FEATURES
+  /* Temporary early-boot boundary markers. These use the already configured
+   * low-level UART because syslog and the serial driver do not exist yet.
+   */
+
+  arm_lowputc('T');
+#endif
+
   /* Turn on the peripheral 5V rails as early as possible, so anything hanging
    * off a TELEM or GPS connector (a GPS, an RC receiver, the MTF-02) has power
    * before it is probed. Both enables are active-low and the GPIOs are defined
@@ -63,9 +71,21 @@ void stm32_boardinitialize(void)
    */
 
   stm32_configgpio(GPIO_VDD_5V_PERIPH_nEN);
+#ifdef CONFIG_DEBUG_FEATURES
+  arm_lowputc('1');
+#endif
   stm32_configgpio(GPIO_VDD_5V_PERIPH_nOC);
+#ifdef CONFIG_DEBUG_FEATURES
+  arm_lowputc('2');
+#endif
   stm32_configgpio(GPIO_VDD_5V_HIPOWER_nEN);
+#ifdef CONFIG_DEBUG_FEATURES
+  arm_lowputc('3');
+#endif
   stm32_configgpio(GPIO_VDD_5V_HIPOWER_nOC);
+#ifdef CONFIG_DEBUG_FEATURES
+  arm_lowputc('4');
+#endif
 
 #ifdef CONFIG_ARCH_LEDS
   /* Configure on-board LEDs if LED support has been selected. */
@@ -77,12 +97,18 @@ void stm32_boardinitialize(void)
   /* Initialize USB */
 
   stm32_usbinitialize();
+#ifdef CONFIG_DEBUG_FEATURES
+  arm_lowputc('U');
+#endif
 #endif
 
 #ifdef CONFIG_STM32H7_SPI
   /* Configure SPI chip selects */
 
   stm32_spidev_initialize();
+#ifdef CONFIG_DEBUG_FEATURES
+  arm_lowputc('S');
+#endif
 #endif
 }
 
