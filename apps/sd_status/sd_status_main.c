@@ -29,6 +29,7 @@
 #define SDMMC_WIDBUS_MASK  (3u << SDMMC_WIDBUS_SHIFT)
 #define SDMMC_NEGEDGE      (1u << 16)
 #define SDMMC_IDMAEN       (1u << 0)
+#define SDMMC_DPSMACT      (1u << 12)
 
 static const char *sd_status_width(uint32_t clkcr)
 {
@@ -123,8 +124,9 @@ int main(int argc, char *argv[])
          status.clkcr, sd_status_width(status.clkcr), clock_hz, divider,
          (status.clkcr & SDMMC_NEGEDGE) ? "falling" : "rising",
          (status.clkcr & SDMMC_PWRSAV) ? "on" : "off");
-  printf("IDMA: configured=yes active=%s status=%08" PRIx32 "\n",
-         (status.idmactrl & SDMMC_IDMAEN) ? "yes" : "idle",
+  printf("IDMA: enabled=%s data_path_active=%s status=%08" PRIx32 "\n",
+         (status.idmactrl & SDMMC_IDMAEN) ? "yes" : "no",
+         (status.status & SDMMC_DPSMACT) ? "yes" : "no",
          status.status);
   sd_status_geometry();
   printf("transfers: read=%" PRIu32 " (%" PRIu64 " bytes)"
