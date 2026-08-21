@@ -494,6 +494,49 @@ def test_solve_isolates_one_bad_sensor():
     assert got["imu0"]["enum"] == 0
 
 
+def test_end_to_end_through_the_runner():
+    """The whole pipeline, from board-shaped streams to four rotations.
+
+    Covers align_run.build_session, which the solver tests never touch: it is
+    where the sensor-frame streams are assembled, the accelerometer is lifted
+    into the vehicle frame for the dip test, and optical flow's integrated
+    angle is turned back into a rate. A shape or scale mistake there produces a
+    plausible wrong rotation, which is exactly the failure this whole procedure
+    exists to prevent.
+    """
+    import align_run
+
+    imu0, imu1, mag, flow = (ROTATIONS[0], ROTATIONS[2], ROTATIONS[8],
+                             ROTATIONS[4])
+    hz = 100.0
+    gyro, dt = _sweep(count=1200, dt=1.0 / hz)
+    mag_s, accel_s, _att = _mag_for(mag, gyro, dt)
+
+    positions = {"imu0": _positions_for(imu0), "imu1": _positions_for(imu1)}
+    rows = {
+        "sensor_gyro0": (imu0.T @ gyro.T).T,
+        "sensor_gyro1": (imu1.T @ gyro.T).T,
+        "sensor_accel0": (imu0.T @ accel_s.T).T,
+        "sensor_mag0": mag_s,
+    }
+
+    n = len(gyro)
+    flow_rows = np.zeros((n, 7))
+    flow_rows[:, 0] = 1e6 / hz                     # integration window, us
+    flow_rows[:, 4:7] = (flow.T @ gyro.T).T / hz   # angle over that window
+    rows["flow"] = flow_rows
+
+    got = solve_alignment(
+        align_run.build_session(positions, rows, hz, imu0))
+
+    assert got["imu0"]["enum"] == 0, got["imu0"]
+    assert got["imu1"]["enum"] == 2, got["imu1"]
+    assert got["mag"]["enum"] == 8, got["mag"]
+    assert got["flow"]["enum"] == 4, got["flow"]
+    assert got["imu0"]["cross_check"] is True
+    assert got["imu1"]["cross_check"] is True
+
+
 def main():
     test_table_matches_c()
     test_table_is_proper_signed_permutations()
@@ -526,6 +569,7 @@ def main():
     test_solve_reports_every_sensor()
     test_solve_flags_a_gyro_cross_check_disagreement()
     test_solve_isolates_one_bad_sensor()
+    test_end_to_end_through_the_runner()
     print("align_solve: rotations, gravity columns, magnetometer dip "
           "and every refusal path verified - OK")
 
