@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * Barometric height fusion: the pressure-to-height conversion, the reference
- * captured at alignment, the NED sign convention, and the gating.
+ * captured at alignment, the z-UP sign convention, and the gating.
  ****************************************************************************/
 
 #include <assert.h>
@@ -84,14 +84,17 @@ static void test_first_sample_sets_reference(void)
   assert(CLOSE(g_core.position[2], 0.0f, 1.0e-3f));
 }
 
-/* NED position[2] is down-positive; barometric height is up-positive. A
- * measured RISE must drive position[2] NEGATIVE.
+/* The navigation frame's z is UP, so a measured RISE must drive position[2]
+ * POSITIVE.
  *
- * This is the single most likely mistake in the whole change, and getting it
- * backwards would look like a working filter that drives into the ground.
+ * This is the single most likely mistake in the whole change, and a
+ * stationary bench test cannot catch it: with the vehicle still, both signs
+ * leave the innovation at zero and the barometer looks equally healthy
+ * either way. Only a deliberate height change discriminates, so it is
+ * pinned here.
  */
 
-static void test_rise_drives_position_down_negative(void)
+static void test_rise_drives_position_up_positive(void)
 {
   align_core();
 
@@ -100,9 +103,26 @@ static void test_rise_drives_position_down_negative(void)
   /* About 8.4 m up. */
 
   assert(ekf_core_fuse_baro(&g_core, 1012.25f, 2.0f, 5.0f) == 1);
-  assert(g_core.position[2] < 0.0f);
+  assert(g_core.position[2] > 0.0f);
   assert(g_core.baro_accept_count == 1);
   assert(g_core.last_baro_height > 0.0f);
+}
+
+/* And a descent drives it the other way. Deliberately a SEPARATE alignment
+ * rather than a reversal of the test above: the first accepted update
+ * collapses P[8][8] from 100 to about 4, so an immediate 17 m reversal is
+ * legitimately outside a 5-sigma gate and would fail for a reason that has
+ * nothing to do with the sign.
+ */
+
+static void test_descent_drives_position_up_negative(void)
+{
+  align_core();
+
+  assert(ekf_core_fuse_baro(&g_core, 1013.25f, 2.0f, 5.0f) == -2);
+  assert(ekf_core_fuse_baro(&g_core, 1014.25f, 2.0f, 5.0f) == 1);
+  assert(g_core.position[2] < 0.0f);
+  assert(g_core.last_baro_height < 0.0f);
 }
 
 /* Pressure outside the physical range is refused before it reaches the
@@ -275,7 +295,8 @@ int main(void)
   test_height_at_reference_is_zero();
   test_height_sign_and_scale();
   test_first_sample_sets_reference();
-  test_rise_drives_position_down_negative();
+  test_rise_drives_position_up_positive();
+  test_descent_drives_position_up_negative();
   test_insane_pressure_refused();
   test_gate_rejects_and_counts();
   test_accept_clears_run();

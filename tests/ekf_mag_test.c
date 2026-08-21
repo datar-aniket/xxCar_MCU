@@ -59,7 +59,7 @@ static void level_field(float yaw, FAR float out[3])
 
   out[0] = h * cosf(yaw);
   out[1] = -h * sinf(yaw);
-  out[2] = d;
+  out[2] = -d;   /* northern hemisphere: the field dips DOWN, and z is UP */
 }
 
 static void quaternion_from_euler_test(float roll, float pitch, float yaw,

@@ -152,6 +152,26 @@ bool mag_frame_apply(FAR const struct mag_frame_s *frame,
 
   cal_mag_apply(&frame->fit, raw, out);
 
+  /* IST8310 (+x fwd, +y RIGHT, +z up) -> vehicle convention
+   * (+x fwd, +y LEFT, +z up). Negating y is the whole conversion.
+   *
+   * It cannot be a SENS_MAG0_ROT value. The part's triad is left handed
+   * against ours, and no rotation changes handedness - only a reflection
+   * does. The enum in rotation.h contains proper rotations only, and
+   * deliberately so.
+   *
+   * It happens HERE, after cal_mag_apply, and not in the driver: a
+   * calibration is fitted against the raw stream, so a flip applied before
+   * the fit would invalidate every stored CAL_MAG0_* value. Applied after,
+   * the frame can be changed freely without recalibrating.
+   *
+   * Left uncorrected this is invisible in five of six axes. Heading is
+   * atan2(-y, x), so a flipped y flips the heading - while roll and pitch
+   * stay perfect, because neither of them ever touches mag y.
+   */
+
+  out[1] = -out[1];
+
   /* Sensor axes -> board axes -> vehicle axes. Both rotations were validated
    * at load, so a failure here cannot happen; treat it as one anyway rather
    * than publishing a field in the wrong frame.

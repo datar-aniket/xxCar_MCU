@@ -139,6 +139,26 @@ static const struct param_def_s g_params[] =
    * clamping rotation 17 to 16 would not be "nearly right", it would silently
    * mount the sensor on a different face.
    *
+   * THE VEHICLE CONVENTION IS +x FORWARD, +y LEFT, +z UP.
+   *
+   * Not PX4's FRD. It is what the parts themselves report: PX4's own drivers
+   * describe both the ICM-42688-P and the BMI055 as "+x forward, +y left, +z
+   * up" and then flip y and z to reach ITS board frame. This project does not
+   * make that flip, so with SENS_IMU0_ROT=0 the vehicle frame IS the ICM's
+   * own frame, and everything else is brought to match it.
+   *
+   * The estimator agrees, which is worth checking rather than assuming: at
+   * rest a level FLU accelerometer reads +g on z, and ekf_core.c removes
+   * gravity as `nav_delta_velocity[2] -= EKF_GRAVITY * dt`. Those cancel only
+   * if the navigation frame's z is UP too. It is NWU - north, west, up - and
+   * yaw is positive counter-clockwise seen from above, zero at north.
+   *
+   * A consequence worth knowing before comparing anything against PX4 or
+   * ArduPilot: roll and yaw run in the opposite sense to FRD, because a
+   * roll-180 conjugation negates both. That is also why SENS_IMU1_ROT is yaw
+   * 90 here where PX4's fmu-v6c uses yaw 270 for the same physical parts -
+   * the two are the same relationship expressed in mirrored frames.
+   *
    * Body frame = SENS_BOARD_ROT applied after SENS_IMUn_ROT. Splitting them is
    * what stops a change of vehicle mounting from having to be re-derived for
    * each IMU separately:
@@ -163,26 +183,16 @@ static const struct param_def_s g_params[] =
   { "SENS_IMU1_ROT",  PARAM_TYPE_INT32, I32(2), I32(0), I32(37),
     "IMU1 (BMI055) rotation relative to the board (2 = yaw 90, measured)",
     PARAM_RANGE_ENUM },
-  /* ROLL_180, not NONE, and the difference is worth writing down.
+  /* NONE, matching PX4 and ArduPilot, which both declare the 6C's internal
+   * IST8310 as ROTATION_NONE. The part IS mounted square with the board.
    *
-   * PX4 and ArduPilot both declare the 6C's internal IST8310 as
-   * ROTATION_NONE - but relative to THEIR board frame, which their drivers
-   * reach by negating axes first: the ICM-42688-P reports +x forward, +y
-   * LEFT, +z up and they flip y and z; the IST8310 reports +y RIGHT and they
-   * flip z.
-   *
-   * Our drivers publish the chip axes as they come, so with SENS_IMU0_ROT=0
-   * the body frame is the ICM's own FLU frame. The magnetometer, once its z
-   * is made right handed in the driver, is FRD. FRD to FLU is roll 180.
-   *
-   * Left at NONE the magnetometer's y pointed opposite the body's, and since
-   * heading is atan2(-y, x) the heading ran BACKWARDS - while roll and pitch
-   * stayed perfect, because neither uses mag y.
+   * Its left-handedness against our +x fwd, +y left, +z up convention is a
+   * separate matter and is handled in apps/sensors/mag_frame.c, because a
+   * reflection is not a rotation and cannot be spelled with this enum.
    */
 
-  { "SENS_MAG0_ROT",  PARAM_TYPE_INT32, I32(8), I32(0), I32(37),
-    "IST8310 rotation relative to the board (8 = roll 180)",
-    PARAM_RANGE_ENUM },
+  { "SENS_MAG0_ROT",  PARAM_TYPE_INT32, I32(0), I32(0), I32(37),
+    "IST8310 rotation relative to the board", PARAM_RANGE_ENUM },
 
   /* Sensor extrinsics in the body frame. The existing enum supplies the exact
    * coarse mounting rotation; calibration later supplies a small arbitrary

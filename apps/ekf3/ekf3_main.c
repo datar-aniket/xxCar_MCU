@@ -194,12 +194,12 @@ static void print_status(void)
   printf("  quaternion %+.6f %+.6f %+.6f %+.6f\n",
          (double)core->quaternion[0], (double)core->quaternion[1],
          (double)core->quaternion[2], (double)core->quaternion[3]);
-  printf("  velocity NED %+.4f %+.4f %+.4f m/s [%s]\n",
+  printf("  velocity NWU %+.4f %+.4f %+.4f m/s [%s]\n",
          (double)core->velocity[0], (double)core->velocity[1],
          (double)core->velocity[2],
          (ekf_core_solution_status(core) & EKF_SOLUTION_VELOCITY_VERT) ?
            "VERT ONLY" : "INVALID");
-  printf("  position NED %+.4f %+.4f %+.4f m [%s]\n",
+  printf("  position NWU %+.4f %+.4f %+.4f m [%s]\n",
          (double)core->position[0], (double)core->position[1],
          (double)core->position[2],
          (ekf_core_solution_status(core) & EKF_SOLUTION_POSITION_VERT) ?

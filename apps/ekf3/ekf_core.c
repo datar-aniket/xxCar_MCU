@@ -628,7 +628,10 @@ static bool covariance_predict(FAR struct ekf_core_s *ekf)
 
   quaternion_to_rotation(ekf->quaternion, rotation);
 
-  /* -R_nb * skew(f_b), coupling attitude error into NED velocity. */
+  /* -R_nb * skew(f_b), coupling attitude error into navigation-frame
+   * velocity. The frame is NWU - north, west, up - not NED; see
+   * uorb_msgs.h.
+   */
 
   for (row = 0; row < 3; row++)
     {
@@ -1824,9 +1827,9 @@ int ekf_core_fuse_mag(FAR struct ekf_core_s *ekf,
   ekf_core_euler(ekf, euler);
   residual = wrap_pi(heading - euler[2]);
 
-  /* A yaw error is a rotation about the NED down axis. The error state is a
+  /* A yaw error is a rotation about the navigation UP axis. The state is a
    * BODY-frame rotation vector, so the observation is that axis expressed in
-   * body - the third row of the body-to-NED rotation, which is exactly the
+   * body - the third row of the body-to-nav rotation, which is exactly the
    * gauge direction the gravity update projects OUT.
    */
 
@@ -1860,7 +1863,7 @@ int ekf_core_fuse_mag(FAR struct ekf_core_s *ekf,
  *
  * Taken relative to the reference captured at alignment rather than to a
  * sea-level constant, which is what makes this a height above the alignment
- * point and consistent with the filter's local-NED origin.
+ * point and consistent with the filter's local NWU origin.
  */
 
 float ekf_baro_height(float pressure_hpa, float reference_hpa)
@@ -1907,11 +1910,23 @@ int ekf_core_fuse_baro(FAR struct ekf_core_s *ekf, float pressure_hpa,
   height = ekf_baro_height(pressure_hpa, ekf->baro_reference_hpa);
   ekf->last_baro_height = height;
 
-  /* NED is down-positive and the measurement is up-positive. */
+  /* Both are UP-positive, so the residual is a plain difference.
+   *
+   * The navigation frame's z is UP, not down. At rest a level +x fwd, +y
+   * left, +z up accelerometer reads +g on z, and nominal_predict removes
+   * gravity as `nav_delta_velocity[2] -= EKF_GRAVITY * dt`; those cancel to
+   * zero only in a z-up frame. The gravity update agrees - it predicts the
+   * specific force as +g along the nav z axis expressed in body.
+   *
+   * An earlier version of this negated the height, on the strength of the
+   * word "NED" in a comment rather than the arithmetic above. A stationary
+   * bench test cannot tell the two apart, because both leave the innovation
+   * at zero.
+   */
 
   memset(h, 0, sizeof(h));
   h[8] = 1.0f;
-  residual = -height - ekf->position[2];
+  residual = height - ekf->position[2];
 
   result = measurement_update_1d(ekf, h, residual, noise * noise,
                                  gate_sigma, &ekf->last_baro_nis);

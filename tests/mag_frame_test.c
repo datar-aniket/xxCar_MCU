@@ -33,7 +33,16 @@ static void identity_frame(FAR struct mag_frame_s *frame)
   frame->valid = true;
 }
 
-static void test_identity_changes_nothing(void)
+/* With no calibration and no mounting rotation, the ONE thing that still
+ * happens is the handedness conversion: the IST8310 reports +y RIGHT and the
+ * vehicle convention is +y LEFT.
+ *
+ * This is the correction that fixed a heading which ran backwards while roll
+ * and pitch stayed perfect - heading is atan2(-y, x), and nothing else in
+ * the solution touches mag y.
+ */
+
+static void test_identity_still_flips_handedness(void)
 {
   struct mag_frame_s frame;
   float raw[3] = {0.20f, -0.10f, 0.40f};
@@ -43,8 +52,27 @@ static void test_identity_changes_nothing(void)
 
   assert(mag_frame_apply(&frame, raw, out));
   assert(CLOSE(out[0], 0.20f));
-  assert(CLOSE(out[1], -0.10f));
+  assert(CLOSE(out[1], 0.10f));    /* negated: FRU -> FLU */
   assert(CLOSE(out[2], 0.40f));
+}
+
+/* The flip happens AFTER the calibration, which is what lets the frame be
+ * corrected without refitting the sensor. With an offset of 1.0 on y, the
+ * input 3.0 must give -(3.0 - 1.0) = -2.0. Flipping first would subtract the
+ * offset from an already-negated axis and give -3.0 - 1.0 = -4.0.
+ */
+
+static void test_calibration_precedes_handedness(void)
+{
+  struct mag_frame_s frame;
+  float raw[3] = {0.0f, 3.0f, 0.0f};
+  float out[3];
+
+  identity_frame(&frame);
+  frame.fit.offset[1] = 1.0f;
+
+  assert(mag_frame_apply(&frame, raw, out));
+  assert(CLOSE(out[1], -2.0f));
 }
 
 /* THE test this file exists for.
@@ -252,7 +280,8 @@ static void test_load_rejects_insane_fit(void)
 
 int main(void)
 {
-  test_identity_changes_nothing();
+  test_identity_still_flips_handedness();
+  test_calibration_precedes_handedness();
   test_calibration_precedes_rotation();
   test_rotations_compose();
   test_fine_rotation_is_exact();

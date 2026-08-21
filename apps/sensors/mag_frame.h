@@ -6,24 +6,30 @@
  * Gets a calibrated magnetometer reading into the vehicle's frame.
  *
  *     corrected = cal_mag_apply(fit, raw)          apps/cal/cal_mag.c
- *     body      = BOARD_ROT( FINE_ROT( MAG_ROT( corrected ) ) )
+ *     handed    = (x, -y, z)                       IST8310 FRU -> FLU
+ *     body      = BOARD_ROT( FINE_ROT( MAG_ROT( handed ) ) )
  *
- * The calibration mathematics is NOT repeated here. cal_mag_apply() already
- * does the hard-iron subtraction and the 3x3 soft-iron multiply, and it is
- * host- and UBSan-tested through tools/test-cal-mag.sh. This file adds only
- * the two things that did not exist: loading the stored CAL_MAG0_*
- * parameters into a fit, and rotating the result into the body frame.
+ * The vehicle convention is +x FORWARD, +y LEFT, +z UP, which is what the
+ * ICM-42688-P and BMI055 already report - PX4's own drivers describe both
+ * parts as "+x forward, +y left, +z up" before flipping them into its FRD
+ * board frame, a flip this project does not make.
  *
- * Rotation is the gap that mattered. ist8310.c publishes in raw sensor axes
- * and defers framing to "the fusion stage", but no fusion stage existed, so
- * SENS_MAG0_ROT and CAL_MAG0_RV* had never been applied by anything. Heading
- * comes from the HORIZONTAL components of the field, so an unrotated field
- * yields a heading in the sensor's frame rather than the vehicle's - a fixed
- * error on any board where the magnetometer is not mounted square.
+ * The IST8310 is the odd one out: PX4 describes it as "+x forward, +y RIGHT,
+ * +z up", a LEFT-handed triad against ours. Negating y is the whole
+ * conversion, and it cannot be a SENS_MAG0_ROT value, because no rotation
+ * changes handedness - only a reflection does, and rotation.h contains
+ * proper rotations only.
  *
- * The order is the same argument sensors.h makes for the IMU: calibration is
- * measured in the SENSOR's own axes, so it must be applied before any
- * rotation. A soft-iron matrix means nothing once the axes have been mixed.
+ * ORDER. Calibration is fitted against the driver's RAW stream, so it must
+ * be applied first and nothing before it may touch the axes. Everything
+ * after - handedness, mounting, board - can then be changed freely without
+ * recalibrating the sensor. That is the reason the flip lives here and not
+ * in ist8310.c, and the reason a soft-iron matrix means nothing once the
+ * axes have been mixed.
+ *
+ * The calibration mathematics itself is NOT repeated here. cal_mag_apply()
+ * already does the hard-iron subtraction and the 3x3 soft-iron multiply, and
+ * is host- and UBSan-tested through tools/test-cal-mag.sh.
  ****************************************************************************/
 
 #ifndef __APPS_SENSORS_MAG_FRAME_H
