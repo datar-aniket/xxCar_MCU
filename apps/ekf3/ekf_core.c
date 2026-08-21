@@ -1138,6 +1138,147 @@ static int measurement_update_3d(
   return 1;
 }
 
+/* Scalar form of measurement_update_3d(). Same expanded Joseph covariance
+ * form, same numerical guards, same post-update attitude covariance reset and
+ * bias constraint - so the two cannot develop different ideas about what a
+ * safe update is.
+ *
+ * Returns one for an accepted update, zero for a gated innovation, and minus
+ * one for a numerical failure. On a gated innovation NOTHING is modified: a
+ * partially applied correction would be worse than either outcome, because it
+ * is neither the old estimate nor the new one.
+ */
+
+static int measurement_update_1d(FAR struct ekf_core_s *ekf,
+                                 FAR const float h[EKF_STATE_DIM],
+                                 float residual, float noise_variance,
+                                 float gate_sigma, FAR float *nis)
+{
+  float pht[EKF_STATE_DIM];
+  float gain[EKF_STATE_DIM];
+  float correction[EKF_STATE_DIM];
+  float delta_quaternion[4];
+  float next_quaternion[4];
+  float innovation = noise_variance;
+  float local_nis;
+  int row;
+  int column;
+  int inner;
+
+  if (ekf == NULL || h == NULL || !isfinite(residual) ||
+      !isfinite(noise_variance) || noise_variance <= 0.0f)
+    {
+      return -1;
+    }
+
+  for (row = 0; row < EKF_STATE_DIM; row++)
+    {
+      pht[row] = 0.0f;
+
+      for (inner = 0; inner < EKF_STATE_DIM; inner++)
+        {
+          pht[row] += ekf->covariance[EKF_P_INDEX(row, inner)] * h[inner];
+        }
+    }
+
+  for (inner = 0; inner < EKF_STATE_DIM; inner++)
+    {
+      innovation += h[inner] * pht[inner];
+    }
+
+  if (!isfinite(innovation) || innovation <= 0.0f)
+    {
+      return -1;
+    }
+
+  local_nis = residual * residual / innovation;
+
+  if (nis != NULL)
+    {
+      *nis = local_nis;
+    }
+
+  if (!isfinite(local_nis))
+    {
+      return -1;
+    }
+
+  if (local_nis > gate_sigma * gate_sigma)
+    {
+      return 0;
+    }
+
+  for (row = 0; row < EKF_STATE_DIM; row++)
+    {
+      gain[row] = pht[row] / innovation;
+      correction[row] = gain[row] * residual;
+    }
+
+  /* P - KHP - PH'K' + K(HPH' + R)K', evaluated on the upper triangle from
+   * the unchanged P/PHt workspaces and mirrored exactly.
+   */
+
+  for (row = 0; row < EKF_STATE_DIM; row++)
+    {
+      for (column = row; column < EKF_STATE_DIM; column++)
+        {
+          float value = ekf->covariance[EKF_P_INDEX(row, column)] -
+                        gain[row] * pht[column] -
+                        pht[row] * gain[column] +
+                        gain[row] * innovation * gain[column];
+
+          if (!isfinite(value))
+            {
+              return -1;
+            }
+
+          ekf->covariance[EKF_P_INDEX(row, column)] = value;
+          ekf->covariance[EKF_P_INDEX(column, row)] = value;
+        }
+    }
+
+  rotation_vector_quaternion(correction, delta_quaternion);
+  quaternion_multiply(ekf->quaternion, delta_quaternion, next_quaternion);
+  memcpy(ekf->quaternion, next_quaternion, sizeof(ekf->quaternion));
+
+  if (!quaternion_normalize(ekf->quaternion))
+    {
+      return -1;
+    }
+
+  for (row = 0; row < 3; row++)
+    {
+      ekf->velocity[row] += correction[3 + row];
+      ekf->position[row] += correction[6 + row];
+      ekf->gyro_bias[row] += correction[9 + row];
+      ekf->accel_bias[row] += correction[12 + row];
+    }
+
+  if (!covariance_reset_attitude(ekf, correction))
+    {
+      return -1;
+    }
+
+  constrain_biases(ekf);
+
+  for (row = 0; row < EKF_STATE_DIM; row++)
+    {
+      FAR float *diagonal = &ekf->covariance[EKF_P_INDEX(row, row)];
+
+      if (!isfinite(*diagonal))
+        {
+          return -1;
+        }
+
+      if (*diagonal < EKF_MIN_VARIANCE)
+        {
+          *diagonal = EKF_MIN_VARIANCE;
+        }
+    }
+
+  return 1;
+}
+
 static bool low_dynamics_updates(FAR struct ekf_core_s *ekf)
 {
   float h[3][EKF_STATE_DIM];
@@ -1477,3 +1618,25 @@ void ekf_core_output_predict(FAR const struct ekf_core_s *ekf,
       out->samples_replayed++;
     }
 }
+
+#ifdef EKF_CORE_HOST_TEST
+
+int ekf_core_test_update_1d(FAR struct ekf_core_s *ekf,
+                            FAR const float h[EKF_STATE_DIM],
+                            float residual, float noise_variance,
+                            float gate_sigma, FAR float *nis)
+{
+  return measurement_update_1d(ekf, h, residual, noise_variance,
+                               gate_sigma, nis);
+}
+
+int ekf_core_test_update_3d(FAR struct ekf_core_s *ekf,
+                            FAR const float h[3][EKF_STATE_DIM],
+                            FAR const float residual[3],
+                            float noise_variance, FAR float *nis)
+{
+  return measurement_update_3d(ekf, h, residual, noise_variance, nis,
+                               NULL, NULL);
+}
+
+#endif

@@ -151,4 +151,21 @@ int ekf_core_process(FAR struct ekf_core_s *ekf,
 uint8_t ekf_core_solution_status(FAR const struct ekf_core_s *ekf);
 void ekf_core_euler(FAR const struct ekf_core_s *ekf, FAR float euler[3]);
 
+#ifdef EKF_CORE_HOST_TEST
+
+/* Test access to the static measurement updates. Compiled only for the host
+ * test - the firmware never sees these. The alternative, making the updates
+ * non-static, would widen the interface permanently for a test-only need.
+ */
+
+int ekf_core_test_update_1d(FAR struct ekf_core_s *ekf,
+                            FAR const float h[EKF_STATE_DIM],
+                            float residual, float noise_variance,
+                            float gate_sigma, FAR float *nis);
+int ekf_core_test_update_3d(FAR struct ekf_core_s *ekf,
+                            FAR const float h[3][EKF_STATE_DIM],
+                            FAR const float residual[3],
+                            float noise_variance, FAR float *nis);
+#endif
+
 #endif /* __APPS_EKF3_EKF_CORE_H */

@@ -351,6 +351,116 @@ static void test_fault_resets(void)
   assert(ekf.uncalibrated_count == 1);
 }
 
+/* The scalar update must agree exactly with the 3-D update on a measurement
+ * that observes only one state.
+ *
+ * Rows 1 and 2 of H are all zero, so PH' has zero columns there and the gain
+ * in those directions is zero: the 3-D update reduces algebraically to the
+ * scalar one on row 0. Two independently written Kalman updates that disagree
+ * is the kind of bug that shows up as a filter subtly wrong for months, so
+ * pin them against each other rather than trusting the derivation.
+ */
+
+static void test_update_1d_matches_3d(void)
+{
+  const float zero_gyro[3] = {0.0f, 0.0f, 0.0f};
+  struct ekf_core_s scalar;
+  struct ekf_core_s vector;
+  uint64_t timestamp = 1000000ull;
+  float h1[EKF_STATE_DIM];
+  float h3[3][EKF_STATE_DIM];
+  float residual3[3];
+  float nis1 = 0.0f;
+  float nis3 = 0.0f;
+  int i;
+
+  ekf_core_init(&scalar);
+  initialize_tilted(&scalar, &timestamp, 0.0f, 0.0f, zero_gyro);
+  vector = scalar;
+
+  memset(h1, 0, sizeof(h1));
+  h1[8] = 1.0f;                 /* observe position down only */
+
+  memset(h3, 0, sizeof(h3));
+  memset(residual3, 0, sizeof(residual3));
+  h3[0][8] = 1.0f;
+  residual3[0] = 1.5f;
+
+  /* Gate generously on the scalar side: the 3-D update uses the fixed
+   * EKF_MEASUREMENT_NIS_GATE, so the comparison must not be decided by a
+   * difference in gating.
+   */
+
+  assert(ekf_core_test_update_1d(&scalar, h1, 1.5f, 4.0f, 1000.0f,
+                                 &nis1) == 1);
+  assert(ekf_core_test_update_3d(&vector, h3, residual3, 4.0f, &nis3) == 1);
+
+  assert_near(nis1, nis3, 1.0e-4f);
+  assert_near(scalar.position[2], vector.position[2], 1.0e-5f);
+  assert_near(scalar.velocity[2], vector.velocity[2], 1.0e-5f);
+  assert_near(scalar.accel_bias[2], vector.accel_bias[2], 1.0e-6f);
+
+  for (i = 0; i < EKF_STATE_DIM; i++)
+    {
+      assert_near(scalar.covariance[EKF_P_INDEX(i, i)],
+                  vector.covariance[EKF_P_INDEX(i, i)], 1.0e-5f);
+    }
+}
+
+/* An innovation beyond the gate must leave the state completely untouched. A
+ * partially applied correction would be worse than either accepting or
+ * rejecting, because it is neither the old estimate nor the new one.
+ */
+
+static void test_update_1d_gate_rejects_cleanly(void)
+{
+  const float zero_gyro[3] = {0.0f, 0.0f, 0.0f};
+  struct ekf_core_s before;
+  struct ekf_core_s ekf;
+  uint64_t timestamp = 1000000ull;
+  float h[EKF_STATE_DIM];
+  float nis = 0.0f;
+
+  ekf_core_init(&ekf);
+  initialize_tilted(&ekf, &timestamp, 0.0f, 0.0f, zero_gyro);
+  before = ekf;
+
+  memset(h, 0, sizeof(h));
+  h[8] = 1.0f;
+
+  /* 1000 m against a metre-scale variance is outside any sane gate. */
+
+  assert(ekf_core_test_update_1d(&ekf, h, 1000.0f, 4.0f, 5.0f, &nis) == 0);
+  assert(nis > 25.0f);
+  assert(memcmp(&before, &ekf, sizeof(before)) == 0);
+}
+
+/* A correction must reduce the variance of the state it observed, without
+ * driving it to zero or negative.
+ */
+
+static void test_update_1d_reduces_variance(void)
+{
+  const float zero_gyro[3] = {0.0f, 0.0f, 0.0f};
+  struct ekf_core_s ekf;
+  uint64_t timestamp = 1000000ull;
+  float h[EKF_STATE_DIM];
+  float before;
+  float nis = 0.0f;
+
+  ekf_core_init(&ekf);
+  initialize_tilted(&ekf, &timestamp, 0.0f, 0.0f, zero_gyro);
+  before = ekf.covariance[EKF_P_INDEX(8, 8)];
+
+  memset(h, 0, sizeof(h));
+  h[8] = 1.0f;
+
+  assert(ekf_core_test_update_1d(&ekf, h, 0.5f, 4.0f, 1000.0f, &nis) == 1);
+  assert(ekf.covariance[EKF_P_INDEX(8, 8)] < before);
+  assert(ekf.covariance[EKF_P_INDEX(8, 8)] > 0.0f);
+  assert_covariance_positive_definite(&ekf);
+}
+
 int main(void)
 {
   test_initialization_and_static_prediction();
@@ -358,6 +468,9 @@ int main(void)
   test_low_dynamics_updates();
   test_gravity_preserves_yaw_gauge();
   test_fault_resets();
+  test_update_1d_matches_3d();
+  test_update_1d_gate_rejects_cleanly();
+  test_update_1d_reduces_variance();
   puts("ekf core tests: PASS");
   return 0;
 }
