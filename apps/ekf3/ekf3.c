@@ -7,6 +7,7 @@
 #include <nuttx/config.h>
 
 #include <errno.h>
+#include <inttypes.h>
 #include <poll.h>
 #include <pthread.h>
 #include <sched.h>
@@ -21,6 +22,7 @@
 #include <uORB/uORB.h>
 
 #include "ekf3.h"
+#include "../param/param.h"
 #include "../uorb_msgs/uorb_msgs.h"
 
 #define EKF3_PRIORITY          (SCHED_PRIORITY_DEFAULT + 22)
@@ -28,10 +30,24 @@
 #define EKF3_DRAIN_MAX           32
 #define EKF3_MAX_INPUT_AGE_US  50000ull
 
+/* How stale an aiding measurement may be at the horizon before it is dropped
+ * rather than fused. Beyond this the filter has propagated far enough past
+ * the sample that the correction would land somewhere else on the trajectory.
+ */
+
+#define EKF3_BARO_MAX_AGE_US  500000ull
+#define EKF3_MAG_MAX_AGE_US   500000ull
+
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static volatile bool g_running;
 static volatile bool g_should_stop;
 static struct ekf3_status_s g_status;
+
+/* ~3 kB. A file-scope static, not a member of g_status and not on the stack:
+ * ekf3 runs on 6144 bytes and g_status is copied wholesale under a mutex.
+ */
+
+static struct ekf_delay_s g_delay;
 
 static uint64_t now_us(void)
 {
@@ -69,7 +85,15 @@ static void fill_core_sample(FAR const struct vehicle_imu_s *message,
   sample->gyro_calibrated = message->gyro_calibrated != 0;
 }
 
+/* The kinematic state comes from the PREDICTED output - the filter state
+ * replayed forward to the present. Everything else comes from the filter
+ * itself: the covariance belongs to the state at the horizon and there is no
+ * meaningful way to forward-propagate it here, which is precisely why the two
+ * are kept separate.
+ */
+
 static void fill_output(FAR const struct ekf_core_s *core,
+                        FAR const struct ekf_output_s *predicted,
                         uint64_t publication_time,
                         FAR struct estimator_state_s *output)
 {
@@ -77,11 +101,11 @@ static void fill_output(FAR const struct ekf_core_s *core,
 
   memset(output, 0, sizeof(*output));
   output->timestamp = publication_time;
-  output->timestamp_sample = core->last_timestamp_sample;
-  memcpy(output->quaternion, core->quaternion,
+  output->timestamp_sample = predicted->timestamp_sample;
+  memcpy(output->quaternion, predicted->quaternion,
          sizeof(output->quaternion));
-  memcpy(output->velocity, core->velocity, sizeof(output->velocity));
-  memcpy(output->position, core->position, sizeof(output->position));
+  memcpy(output->velocity, predicted->velocity, sizeof(output->velocity));
+  memcpy(output->position, predicted->position, sizeof(output->position));
   memcpy(output->gyro_bias, core->gyro_bias, sizeof(output->gyro_bias));
   memcpy(output->accel_bias, core->accel_bias, sizeof(output->accel_bias));
 
@@ -102,12 +126,135 @@ static void fill_output(FAR const struct ekf_core_s *core,
   output->instance = 0;
 }
 
+static void drain_imu(int sub, FAR struct ekf3_status_s *status)
+{
+  int drained = 0;
+
+  while (drained++ < EKF3_DRAIN_MAX)
+    {
+      struct vehicle_imu_s message;
+      struct ekf_imu_sample_s sample;
+      uint64_t now;
+
+      if (orb_copy(ORB_ID(vehicle_imu), sub, &message) < 0)
+        {
+          return;
+        }
+
+      now = now_us();
+
+      if (now > message.timestamp_sample &&
+          now - message.timestamp_sample > EKF3_MAX_INPUT_AGE_US)
+        {
+          status->stale_count++;
+          continue;
+        }
+
+      fill_core_sample(&message, &sample);
+      ekf_delay_push_imu(&g_delay, &sample);
+    }
+}
+
+static void drain_mag(int sub, FAR struct ekf3_status_s *status)
+{
+  int drained = 0;
+
+  if (sub < 0)
+    {
+      return;
+    }
+
+  while (drained++ < EKF3_DRAIN_MAX)
+    {
+      struct vehicle_mag_s message;
+      struct ekf_mag_sample_s sample;
+
+      if (orb_copy(ORB_ID(vehicle_mag), sub, &message) < 0)
+        {
+          return;
+        }
+
+      memset(&sample, 0, sizeof(sample));
+      sample.timestamp_sample = message.timestamp_sample;
+      memcpy(sample.field, message.field, sizeof(sample.field));
+      sample.calibrated = message.calibrated != 0;
+
+      ekf_delay_push_mag(&g_delay, &sample);
+      status->mag_in++;
+    }
+}
+
+static void drain_baro(int sub, FAR struct ekf3_status_s *status)
+{
+  int drained = 0;
+
+  if (sub < 0)
+    {
+      return;
+    }
+
+  while (drained++ < EKF3_DRAIN_MAX)
+    {
+      struct vehicle_baro_s message;
+      struct ekf_baro_sample_s sample;
+
+      if (orb_copy(ORB_ID(vehicle_baro), sub, &message) < 0)
+        {
+          return;
+        }
+
+      memset(&sample, 0, sizeof(sample));
+      sample.timestamp_sample = message.timestamp_sample;
+      sample.pressure = message.pressure;
+      sample.temperature = message.temperature;
+
+      ekf_delay_push_baro(&g_delay, &sample);
+      status->baro_in++;
+    }
+}
+
+static void publish_output(int publisher, FAR struct ekf3_status_s *status,
+                           uint64_t now)
+{
+  FAR const struct ekf_imu_sample_s *replay[EKF_IMU_RING_SIZE];
+  struct ekf_output_s output;
+  struct estimator_state_s message;
+  uint16_t count = ekf_delay_output_count(&g_delay);
+  uint16_t i;
+
+  for (i = 0; i < count; i++)
+    {
+      replay[i] = ekf_delay_output_at(&g_delay, i);
+    }
+
+  ekf_core_output_predict(&status->core, replay, count, &output);
+  status->output_replay = output.samples_replayed;
+
+  fill_output(&status->core, &output, now, &message);
+
+  if (estimator_state_publish(publisher, &message) < 0)
+    {
+      status->publish_errors++;
+    }
+
+  if (status->publish_count == 0)
+    {
+      status->first_output_us = output.timestamp_sample;
+    }
+
+  status->publish_count++;
+  status->last_output_us = output.timestamp_sample;
+}
+
 static int ekf3_daemon(int argc, FAR char *argv[])
 {
   struct ekf3_status_s status;
-  struct pollfd pollfd;
+  struct pollfd fds[3];
   char source_error[80];
+  int nfds = 0;
   int subscriber = -1;
+  int mag_sub = -1;
+  int baro_sub = -1;
   int publisher = -1;
   int result = EXIT_FAILURE;
 
@@ -133,81 +280,112 @@ static int ekf3_daemon(int argc, FAR char *argv[])
       goto out;
     }
 
-  pollfd.fd = subscriber;
-  pollfd.events = POLLIN;
+  /* The aiding topics are optional. Their absence means no aiding, not a
+   * failure to start: attitude from the IMU alone is still a useful output,
+   * and it is what this estimator produced before there was any aiding.
+   */
+
+  mag_sub = orb_subscribe(ORB_ID(vehicle_mag));
+  baro_sub = orb_subscribe(ORB_ID(vehicle_baro));
+  status.mag_available = mag_sub >= 0;
+  status.baro_available = baro_sub >= 0;
+
+  if (mag_sub < 0 || baro_sub < 0)
+    {
+      syslog(LOG_WARNING,
+             "[ekf3] %s%s%s unavailable; run `sensors aux start` for aiding\n",
+             mag_sub < 0 ? "vehicle_mag" : "",
+             mag_sub < 0 && baro_sub < 0 ? " and " : "",
+             baro_sub < 0 ? "vehicle_baro" : "");
+    }
+
+  status.horizon_ms = (uint32_t)param_i32("EK3_DELAY_MS");
+  status.alt_noise = param_f32("EK3_ALT_M_NSE");
+  status.alt_gate = param_f32("EK3_ALT_I_GATE");
+  ekf_delay_init(&g_delay, status.horizon_ms);
+
+  fds[nfds].fd = subscriber;
+  fds[nfds].events = POLLIN;
+  nfds++;
+
+  if (mag_sub >= 0)
+    {
+      fds[nfds].fd = mag_sub;
+      fds[nfds].events = POLLIN;
+      nfds++;
+    }
+
+  if (baro_sub >= 0)
+    {
+      fds[nfds].fd = baro_sub;
+      fds[nfds].events = POLLIN;
+      nfds++;
+    }
+
   g_running = true;
   status.running = true;
   status_publish(&status);
 
   syslog(LOG_INFO,
-         "[ekf3] 15-state prediction 400 Hz, covariance 100 Hz, sources %u\n",
-         status.sources.active_set + 1u);
+         "[ekf3] 15-state, horizon %" PRIu32 " ms, sources %u\n",
+         status.horizon_ms, status.sources.active_set + 1u);
 
   while (!g_should_stop)
     {
-      int ready = poll(&pollfd, 1, 100);
+      struct ekf_imu_sample_s sample;
+      uint64_t now;
+      uint64_t horizon;
+      bool advanced = false;
+      int ready = poll(fds, nfds, 100);
 
       if (ready < 0 && errno != EINTR)
         {
           break;
         }
 
-      if ((pollfd.revents & POLLIN) != 0)
+      drain_imu(subscriber, &status);
+      drain_mag(mag_sub, &status);
+      drain_baro(baro_sub, &status);
+
+      now = now_us();
+      horizon = ekf_delay_horizon_time(&g_delay, now);
+
+      /* Advance the filter to the horizon. Aiding measurements are fused at
+       * the point on the trajectory where they were actually taken, which is
+       * the whole reason the horizon exists.
+       */
+
+      while (ekf_delay_next_imu(&g_delay, horizon, &sample))
         {
-          int drained = 0;
+          struct ekf_mag_sample_s mag;
 
-          while (drained++ < EKF3_DRAIN_MAX)
+          if (ekf_core_process(&status.core, &sample) ==
+              EKF_PROCESS_REJECTED)
             {
-              struct vehicle_imu_s message;
-              struct ekf_imu_sample_s sample;
-              struct estimator_state_s output;
-              uint64_t publication_time;
-              int process_result;
+              continue;
+            }
 
-              if (orb_copy(ORB_ID(vehicle_imu), subscriber, &message) < 0)
-                {
-                  break;
-                }
+          advanced = true;
 
-              publication_time = now_us();
+          /* Flash B fuses the magnetometer. Drained here so the queue does
+           * not fill and report a misleading overflow.
+           */
 
-              if (publication_time > message.timestamp_sample &&
-                  publication_time - message.timestamp_sample >
-                  EKF3_MAX_INPUT_AGE_US)
-                {
-                  status.stale_count++;
-                  continue;
-                }
-
-              fill_core_sample(&message, &sample);
-              process_result = ekf_core_process(&status.core, &sample);
-
-              if (process_result == EKF_PROCESS_REJECTED)
-                {
-                  continue;
-                }
-
-              fill_output(&status.core, publication_time, &output);
-
-              if (estimator_state_publish(publisher, &output) < 0)
-                {
-                  status.publish_errors++;
-                }
-
-              if (status.publish_count == 0)
-                {
-                  status.first_output_us = message.timestamp_sample;
-                }
-
-              status.publish_count++;
-              status.last_output_us = message.timestamp_sample;
-
-              if ((status.publish_count & 15u) == 0)
-                {
-                  status_publish(&status);
-                }
+          while (ekf_delay_next_mag(&g_delay, sample.timestamp_sample,
+                                    EKF3_MAG_MAX_AGE_US, &mag))
+            {
             }
         }
+
+      if (advanced)
+        {
+          publish_output(publisher, &status, now);
+        }
+
+      status.imu_overflow = g_delay.imu_overflow_count;
+      status.mag_overflow = g_delay.mag_overflow_count;
+      status.baro_overflow = g_delay.baro_overflow_count;
+      status_publish(&status);
     }
 
   result = EXIT_SUCCESS;
@@ -219,6 +397,16 @@ out:
   if (subscriber >= 0)
     {
       orb_unsubscribe(subscriber);
+    }
+
+  if (mag_sub >= 0)
+    {
+      orb_unsubscribe(mag_sub);
+    }
+
+  if (baro_sub >= 0)
+    {
+      orb_unsubscribe(baro_sub);
     }
 
   if (publisher >= 0)
