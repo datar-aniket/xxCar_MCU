@@ -15,9 +15,11 @@ not exist.
 
 import importlib.util
 import json
+import math
 import struct
 import sys
 import tkinter as tk
+from types import SimpleNamespace
 
 REPO = __file__.rsplit("/tests/", 1)[0]
 
@@ -174,33 +176,37 @@ def main():
 
     # ---- full magnetometer ellipsoid ------------------------------------
     app.mag_active = True
-    app._on_json({"evt": "mag", "what": "progress", "samples": 90,
-                  "seen": 410, "need": 120, "capacity": 320})
+    app.mag_phase = "collect"
+    app.active = 2
+    app.plot.set_series(["x", "y", "z", "|B|"])
+    app._on_batch((2, 1, 0, 20000, [[0.3, 0.4, 0.0]] * 100))
+    check(len(app.mag_samples) == 100,
+          "mag samples were not retained by the host")
     check(app.mag_fit_btn.instate(["disabled"]),
           "mag Fit enabled before minimum sample count")
-    app._on_json({"evt": "mag", "what": "progress", "samples": 130,
-                  "seen": 650, "need": 120, "capacity": 320})
-    check(not app.mag_fit_btn.instate(["disabled"]),
-          "mag Fit disabled after enough samples")
-    app._on_json({"evt": "error", "what": "mag fit",
-                  "msg": "poor 3D coverage", "samples": 130,
-                  "octants": 0x7f})
-    check("poor 3D coverage" in app.mag_hint.cget("text"),
-          "mag coverage rejection not explained")
+
+    app.mag_fit = SimpleNamespace(field=0.463)
+    app.mag_phase = "staging"
+    app._on_json({"evt": "ok", "what": "mag stage", "field": 0.463})
+    check(app.mag_phase == "validate", "staged candidate not previewed")
     check(app.mag_save_btn.instate(["disabled"]),
-          "mag Save enabled after rejected fit")
-    app._on_json({"evt": "ok", "what": "mag fit", "field": 0.463,
-                  "rms": 0.0081, "max": 0.021, "condition": 1.34,
-                  "used": 150, "rejected": 3})
-    check("0.0081" in app.mag_hint.cget("text"),
-          "mag fit quality not displayed")
+          "Commit enabled before fresh preview validation")
+    # Uniform directions with exactly the staged field make a clean preview.
+    golden = (1 + 5 ** 0.5) / 2
+    corrected = []
+    for k in range(500):
+        z = 1 - 2 * (k + 0.5) / 500
+        a = 2 * math.pi * k / golden
+        r = (1 - z*z) ** 0.5
+        corrected.append([0.463*r*math.cos(a), 0.463*r*math.sin(a), 0.463*z])
+    app._on_batch((2, 2, 0, 20000, corrected))
+    check(app.mag_phase == "ready", "fresh corrected preview did not pass")
     check(not app.mag_save_btn.instate(["disabled"]),
-          "mag Save disabled after accepted fit")
-    app._on_json({"evt": "ok", "what": "mag save", "field": 0.463,
-                  "rms": 0.0081})
-    check(app.mag_active is False, "mag session remains active after save")
+          "Commit disabled after accepted preview")
+    app._on_json({"evt": "ok", "what": "mag commit", "field": 0.463})
+    check(app.mag_active is False, "mag session remains active after commit")
     check(app.cal_on.get() is True,
-          "calibrated preview not enabled after mag save")
+          "calibrated preview not enabled after mag commit")
 
     # The fourth, GUI-derived trace is the useful verification: corrected
     # X/Y/Z change while rotating, but |B| should remain nearly flat.

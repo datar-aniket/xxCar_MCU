@@ -37,10 +37,11 @@
 /* Protocol version, reported in `hello` so a mismatched GUI can say so instead
  * of misbehaving. 2 added batched, integer-encoded sample frames; 3 added the
  * `gyro <sensor>` bias command and the CAL_GYROn_OK flag that goes with it.
- * Version 4 adds full 3D magnetometer ellipsoid calibration.
+ * Version 4 added full 3D magnetometer ellipsoid calibration. Version 5 moves
+ * fitting to the host and adds safe stage/preview/commit semantics.
  */
 
-#define CAL_PROTO_VERSION 4
+#define CAL_PROTO_VERSION 5
 
 /* Binary sample frame.
  *

@@ -7,22 +7,34 @@ pipe and are told apart by the first byte of each message:
     '{'   an ASCII JSON line, terminated by '\\n'  - control and replies
     0xA5  a binary sample frame                   - see Link._emit
 
-Only stdlib plus pyserial: tkinter draws the plot on a Canvas rather than
-pulling in matplotlib, which keeps the install to one package and lets the
-renderer decimate exactly how a dense time series needs.
+NumPy performs the full ellipsoid fit on the host. tkinter draws both plots on
+Canvas widgets, avoiding a heavyweight plotting dependency.
 
 Run:  python3 tools/cal_gui.py
 """
 
 import json
 import math
+import os
 import queue
 import struct
+import sys
 import threading
 import time
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk
+
+try:
+    import numpy as np
+except ImportError:
+    raise SystemExit("numpy missing:  pip install numpy")
+
+sys_path = os.path.dirname(os.path.abspath(__file__))
+if sys_path not in sys.path:
+    sys.path.insert(0, sys_path)
+from mag_cal import (FitError, MAX_SAMPLES, MIN_SAMPLES, apply_calibration,
+                     fit_ellipsoid, validate_corrected)
 
 try:
     import serial
@@ -31,7 +43,7 @@ except ImportError:
     raise SystemExit("pyserial missing:  pip install pyserial")
 
 SYNC = 0xA5
-PROTO = 4
+PROTO = 5
 ENC_I16, ENC_F32 = 0, 1
 
 # sync | len(u16) | id | seq | t0_us(u32) | dt_us(u16) | count | nvals | enc
@@ -339,6 +351,98 @@ class Strip(tk.Canvas):
                              text=f"{self.labels[i]}  {self.v[i][-1]: .5g}")
 
 
+class MagSphere(tk.Canvas):
+    """Interactive orthographic view of tumble coverage and fit residuals."""
+
+    def __init__(self, master, **kw):
+        super().__init__(master, bg=PLOT_BG, highlightthickness=0, **kw)
+        self.points = np.empty((0, 3), dtype=np.float64)
+        self.accepted = None
+        self.error = None
+        self.coverage = 0.0
+        self.yaw, self.pitch = -0.65, 0.45
+        self.drag = None
+        self.bind("<Configure>", lambda _e: self.redraw())
+        self.bind("<ButtonPress-1>", self._press)
+        self.bind("<B1-Motion>", self._motion)
+
+    def clear(self):
+        self.points = np.empty((0, 3), dtype=np.float64)
+        self.accepted = self.error = None
+        self.coverage = 0.0
+        self.redraw()
+
+    def set_points(self, points, coverage=0.0, accepted=None, error=None):
+        p = np.asarray(points, dtype=np.float64)
+        self.points = p if p.ndim == 2 and p.shape[1] == 3 else \
+            np.empty((0, 3), dtype=np.float64)
+        self.coverage = float(coverage)
+        self.accepted = None if accepted is None else np.asarray(accepted)
+        self.error = None if error is None else np.asarray(error)
+        self.redraw()
+
+    def _press(self, event):
+        self.drag = (event.x, event.y, self.yaw, self.pitch)
+
+    def _motion(self, event):
+        if self.drag:
+            x, y, yaw, pitch = self.drag
+            self.yaw = yaw + (event.x - x) * 0.012
+            self.pitch = max(-1.45, min(1.45,
+                             pitch + (event.y - y) * 0.012))
+            self.redraw()
+
+    def redraw(self):
+        self.delete("all")
+        w, h = self.winfo_width(), self.winfo_height()
+        radius = max(10, min(w, h) * 0.39)
+        cx, cy = w * 0.5, h * 0.52
+        self.create_oval(cx-radius, cy-radius, cx+radius, cy+radius,
+                         outline=GRID_HI, width=2)
+        self.create_oval(cx-radius, cy-radius*0.28, cx+radius, cy+radius*0.28,
+                         outline=GRID)
+        self.create_line(cx-radius, cy, cx+radius, cy, fill=GRID)
+        self.create_line(cx, cy-radius, cx, cy+radius, fill=GRID)
+        self.create_text(10, 10, anchor="nw", fill=MUTED,
+                         font=("TkFixedFont", 9),
+                         text=f"3D coverage {self.coverage*100:.1f}%\n"
+                              "drag to rotate")
+        if not len(self.points):
+            self.create_text(cx, cy, fill=MUTED, text="start a mag tumble")
+            return
+
+        p = self.points.copy()
+        # Before fitting, estimate the ellipsoid centre from extrema and show
+        # directions. After fitting the points are already centred/corrected.
+        if self.accepted is None:
+            p -= (np.min(p, axis=0) + np.max(p, axis=0)) * 0.5
+        norm = np.linalg.norm(p, axis=1)
+        good = np.isfinite(norm) & (norm > 1e-9)
+        p[good] /= norm[good, None]
+        p = p[good]
+        accepted = None if self.accepted is None else self.accepted[good]
+        error = None if self.error is None else np.abs(self.error[good])
+
+        cyaw, syaw = math.cos(self.yaw), math.sin(self.yaw)
+        cp, sp = math.cos(self.pitch), math.sin(self.pitch)
+        rz = np.array(((cyaw, -syaw, 0), (syaw, cyaw, 0), (0, 0, 1)))
+        rx = np.array(((1, 0, 0), (0, cp, -sp), (0, sp, cp)))
+        p = p @ (rx @ rz).T
+        for k in np.argsort(p[:, 2]):
+            if accepted is not None and not accepted[k]:
+                colour = "#ff5d73"
+            elif error is not None:
+                ratio = min(1.0, error[k] / 0.03)
+                colour = "#3ddc84" if ratio < 0.33 else \
+                         ("#ffb74d" if ratio < 0.75 else "#ff6b81")
+            else:
+                colour = "#57a6ff"
+            size = 1.2 + 1.2 * (p[k, 2] + 1.0)
+            x, y = cx + radius*p[k, 0], cy - radius*p[k, 1]
+            self.create_rectangle(x-size, y-size, x+size, y+size,
+                                  fill=colour, outline="")
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -460,8 +564,13 @@ class App(tk.Tk):
         self._controls(right)
         wrap = ttk.Frame(right, style="Card.TFrame", padding=6)
         wrap.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
+        wrap.rowconfigure(0, weight=1)
+        wrap.columnconfigure(0, weight=2)
+        wrap.columnconfigure(1, weight=1)
         self.plot = Strip(wrap)
-        self.plot.pack(fill="both", expand=True)
+        self.plot.grid(row=0, column=0, sticky="nsew")
+        self.mag_sphere = MagSphere(wrap, width=360)
+        self.mag_sphere.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
         self.pane.add(right, weight=1)
 
         logf = ttk.Frame(self, style="Card.TFrame", padding=(8, 6))
@@ -548,7 +657,7 @@ class App(tk.Tk):
         self.mag_btn = ttk.Button(mb, text="Start tumble",
                                   command=self._mag_start)
         self.mag_btn.pack(fill="x")
-        self.mag_progress = ttk.Progressbar(mb, maximum=320, value=0)
+        self.mag_progress = ttk.Progressbar(mb, maximum=MAX_SAMPLES, value=0)
         self.mag_progress.pack(fill="x", pady=(6, 3))
         self.mag_hint = ttk.Label(
             mb, text="select mag0", style="Muted.TLabel", wraplength=190,
@@ -560,12 +669,17 @@ class App(tk.Tk):
                                       state="disabled")
         self.mag_fit_btn.pack(side="left", expand=True, fill="x",
                               padx=(0, 3))
-        self.mag_save_btn = ttk.Button(row, text="Save",
+        self.mag_save_btn = ttk.Button(row, text="Commit",
                                        command=self._mag_save,
                                        state="disabled")
         self.mag_save_btn.pack(side="left", expand=True, fill="x",
                                padx=(3, 0))
         self.mag_active = False
+        self.mag_phase = "idle"
+        self.mag_samples = []
+        self.mag_validation = []
+        self.mag_fit = None
+        self.mag_ignore_abort_ack = False
 
         # ---- Allan-variance recording
         rb = ttk.Labelframe(p, text=" record to SD ", padding=6)
@@ -904,28 +1018,72 @@ class App(tk.Tk):
             self.mag_hint.config(text="select mag0 in the sensor list.")
             return
         if self.mag_active:
+            self.mag_phase = "aborting"
             self.link.send("mag abort")
             return
         self.mag_active = True
+        self.mag_phase = "collect"
+        self.mag_samples = []
+        self.mag_validation = []
+        self.mag_fit = None
+        self.mag_sphere.clear()
         self.mag_progress["value"] = 0
+        self.mag_progress["maximum"] = MAX_SAMPLES
         self.mag_btn.config(text="Abort")
         self.mag_fit_btn.config(state="disabled")
         self.mag_save_btn.config(state="disabled")
         self.mag_hint.config(
-            text="Slowly rotate the complete vehicle through every "
-                 "orientation. Include all six faces and the corners.")
-        self.link.send(f"mag start {s['name']}")
+            text=f"Collecting 0/{MIN_SAMPLES}: slowly rotate the complete "
+                 "vehicle through every face, edge, and corner.")
+        # Fitting requires raw samples even if calibrated preview was selected.
+        self.cal_on.set(False)
+        self.mag_ignore_abort_ack = True
+        self.link.send("mag abort")
+        self.link.send("calib off")
 
     def _mag_fit(self):
-        if self.link and self.mag_active:
-            self.mag_hint.config(text="fitting full 3D ellipsoid…")
-            self.mag_fit_btn.config(state="disabled")
-            self.link.send("mag fit")
+        if not self.link or self.mag_phase != "collect":
+            return
+        self.mag_hint.config(text="fitting full 3D ellipsoid on host…")
+        self.mag_fit_btn.config(state="disabled")
+        try:
+            self.mag_fit = fit_ellipsoid(np.asarray(self.mag_samples))
+        except FitError as exc:
+            self.mag_hint.config(text=f"✗ {exc.reason}. Continue tumbling; "
+                                      "nothing was staged or saved.")
+            self.mag_fit_btn.config(state="normal")
+            return
+
+        fit = self.mag_fit
+        self.mag_sphere.set_points(fit.corrected, fit.coverage,
+                                   fit.accepted, fit.radial_error)
+        self.mag_phase = "staging"
+        self.mag_validation = []
+        values = " ".join(f"{v:.9g}" for v in fit.stage_values())
+        self.mag_hint.config(
+            text=f"fit: {fit.coverage*100:.1f}% coverage, {fit.used} used, "
+                 f"{fit.rejected} rejected, RMS {fit.rms:.4f} G. "
+                 "Board is checking the candidate…")
+        self.link.send("mag stage " + values)
 
     def _mag_save(self):
-        if self.link:
+        if self.link and self.mag_phase == "ready":
             self.mag_save_btn.config(state="disabled")
-            self.link.send("mag save")
+            self.link.send("mag commit")
+
+    @staticmethod
+    def _mag_coverage(samples):
+        if len(samples) < 8:
+            return 0.0
+        p = np.asarray(samples, dtype=np.float64)
+        p -= (np.min(p, axis=0) + np.max(p, axis=0)) * 0.5
+        norm = np.linalg.norm(p, axis=1)
+        good = norm > 1e-9
+        p = p[good] / norm[good, None]
+        az = np.clip(np.floor((np.arctan2(p[:, 1], p[:, 0]) + np.pi) *
+                             24 / (2*np.pi)).astype(int), 0, 23)
+        zb = np.clip(np.floor((p[:, 2] + 1.0) * 6).astype(int), 0, 11)
+        return len(np.unique(zb * 24 + az)) / (24 * 12)
 
     def _rec_estimate(self):
         """Say up front what the run will cost, and when FAT32 stops it.
@@ -990,9 +1148,6 @@ class App(tk.Tk):
         if evt == "cal6":
             self._cal_progress(msg)
             return
-        if evt == "mag":
-            self._mag_progress(msg)
-            return
         if evt == "record":
             self._rec_status(msg)
             return
@@ -1023,39 +1178,37 @@ class App(tk.Tk):
                 self.cal_on.set(True)
                 self._cal_toggle()
                 return
-            if what == "mag start":
-                self.mag_active = True
-                self.mag_btn.config(text="Abort")
+            if what == "mag stage":
+                self.mag_phase = "validate"
+                self.mag_validation = []
+                self.mag_progress["maximum"] = 500
+                self.mag_progress["value"] = 0
                 self.mag_hint.config(
-                    text="Collecting raw field samples — rotate slowly "
-                         "through faces, edges, and corners.")
-                return
-            if what == "mag fit":
-                self.mag_active = True
-                self.mag_fit_btn.config(state="normal")
-                self.mag_save_btn.config(state="normal")
-                self.mag_hint.config(
-                    text=f"fit ready: field {msg.get('field', 0):.3f} G, "
-                         f"RMS {msg.get('rms', 0):.4f} G, max "
-                         f"{msg.get('max', 0):.4f} G, condition "
-                         f"{msg.get('condition', 0):.2f}. Review, then Save.")
+                    text="Candidate passed the board safety checks. Rotate "
+                         "again while 500 fresh corrected samples are "
+                         "validated; Commit stays locked until they pass.")
                 self._say(f"< {json.dumps(msg)}")
                 return
-            if what == "mag save":
+            if what == "mag commit":
                 self.mag_active = False
+                self.mag_phase = "idle"
                 self.mag_btn.config(text="Start tumble")
                 self.mag_fit_btn.config(state="disabled")
                 self.mag_save_btn.config(state="disabled")
                 self.mag_hint.config(
-                    text=f"saved. field {msg.get('field', 0):.3f} G, "
-                         f"RMS {msg.get('rms', 0):.4f} G. Enable calibrated "
-                         "preview and rotate again to verify the magnitude.")
+                    text=f"committed. field {msg.get('field', 0):.3f} G; "
+                         "the validated correction is now persistent.")
                 self.cal_on.set(True)
-                self._cal_toggle()
                 self._say(f"< {json.dumps(msg)}")
                 return
             if what == "mag abort":
+                # Starting a new host collection sends a defensive board abort
+                # first; do not let its acknowledgement cancel that collection.
+                if self.mag_ignore_abort_ack:
+                    self.mag_ignore_abort_ack = False
+                    return
                 self.mag_active = False
+                self.mag_phase = "idle"
                 self.mag_btn.config(text="Start tumble")
                 self.mag_fit_btn.config(state="disabled")
                 self.mag_save_btn.config(state="disabled")
@@ -1072,24 +1225,15 @@ class App(tk.Tk):
                     text=f"stopped. {msg.get('samples',0)} samples, "
                          f"{msg.get('bytes',0)/1e6:.1f} MB, "
                          f"dropped {msg.get('dropped',0)}")
-        if evt == "error" and msg.get("what") == "mag fit":
-            self.mag_fit_btn.config(state="normal")
-            self.mag_save_btn.config(state="disabled")
-            self.mag_hint.config(
-                text=f"✗ {msg.get('msg', 'fit failed')} — "
-                     f"{msg.get('samples', 0)} samples, octant mask "
-                     f"0x{msg.get('octants', 0):02x}. Keep rotating and Fit "
-                     "again; nothing was saved.")
-            self._say(f"< {json.dumps(msg)}")
-            return
         if evt == "error" and self.mag_active:
             self.mag_hint.config(
                 text=f"✗ {msg.get('msg', 'mag calibration failed')} — "
                      "nothing was saved.")
-            self.mag_fit_btn.config(state="normal")
-            self.mag_save_btn.config(state="normal"
-                                      if "save" in msg.get("what", "")
-                                      else "disabled")
+            self.mag_phase = "collect" if self.mag_samples else "idle"
+            self.mag_fit_btn.config(state="normal"
+                                    if len(self.mag_samples) >= MIN_SAMPLES
+                                    else "disabled")
+            self.mag_save_btn.config(state="disabled")
             self._say(f"< {json.dumps(msg)}")
             return
         if evt == "error" and self.gyro_busy:
@@ -1155,21 +1299,6 @@ class App(tk.Tk):
             self.save_btn.config(state="normal")
         self._say(f"< cal6 pos {pos} a={[round(v,3) for v in msg['a']]}")
 
-    def _mag_progress(self, msg):
-        samples = int(msg.get("samples", 0))
-        need = int(msg.get("need", 120))
-        capacity = int(msg.get("capacity", 320))
-        self.mag_progress["maximum"] = capacity
-        self.mag_progress["value"] = samples
-        self.mag_fit_btn.config(state="normal" if samples >= need
-                                else "disabled")
-        self.mag_hint.config(
-            text=f"{samples}/{capacity} distinct samples retained "
-                 f"({msg.get('seen', 0)} measured). "
-                 + ("Continue through missing orientations, then Fit."
-                    if samples >= need else
-                    "Keep rotating through all faces, edges, and corners."))
-
     def _rec_status(self, msg):
         self.recording = bool(msg.get("running"))
         self.rec_btn.config(text="Stop" if self.recording else "Start")
@@ -1187,6 +1316,49 @@ class App(tk.Tk):
             return False
         sensor = self.sensors.get(sid)
         if sensor and sensor["name"].startswith("mag"):
+            xyz = [list(row[:3]) for row in rows]
+            if self.mag_phase == "collect":
+                room = MAX_SAMPLES - len(self.mag_samples)
+                if room > 0:
+                    self.mag_samples.extend(xyz[:room])
+                count = len(self.mag_samples)
+                self.mag_progress["value"] = count
+                self.mag_fit_btn.config(
+                    state="normal" if count >= MIN_SAMPLES else "disabled")
+                if count == MAX_SAMPLES or count % 250 < len(rows):
+                    coverage = self._mag_coverage(self.mag_samples)
+                    self.mag_sphere.set_points(self.mag_samples, coverage)
+                    self.mag_hint.config(
+                        text=f"{count}/{MIN_SAMPLES} samples "
+                             f"({coverage*100:.1f}% spherical coverage). "
+                             + ("Fit is available; keep moving toward 6000 "
+                                "if the sphere still has holes."
+                                if count >= MIN_SAMPLES else
+                                "Cover every face, edge, and corner."))
+            elif self.mag_phase == "validate" and self.mag_fit is not None:
+                room = 500 - len(self.mag_validation)
+                if room > 0:
+                    self.mag_validation.extend(xyz[:room])
+                    self.mag_progress["value"] = len(self.mag_validation)
+                if len(self.mag_validation) == 500:
+                    quality = validate_corrected(self.mag_validation,
+                                                 self.mag_fit.field)
+                    limit = min(0.030, 0.07 * self.mag_fit.field)
+                    passed = (quality["rms"] <= limit and
+                              quality["maximum"] <= 0.100)
+                    self.mag_phase = "ready" if passed else "failed"
+                    self.mag_save_btn.config(state="normal" if passed
+                                              else "disabled")
+                    self.mag_hint.config(
+                        text=("Preview passed" if passed else
+                              "✗ Preview failed") +
+                             f": fresh RMS {quality['rms']:.4f} G "
+                             f"(limit {limit:.4f}), max "
+                             f"{quality['maximum']:.4f} G (limit 0.1000). " +
+                             ("Review the sphere, then Commit."
+                              if passed else
+                              "Abort and recollect away from magnetic "
+                              "interference; nothing was saved."))
             rows = [list(row) + [math.sqrt(sum(v * v for v in row[:3]))]
                     for row in rows]
         prev = self.last_seq.get(sid)

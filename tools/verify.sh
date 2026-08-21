@@ -66,7 +66,7 @@ echo "=== symbols ==="
 NM="$(mktemp)"
 arm-none-eabi-nm deps/nuttx/nuttx >"$NM" 2>/dev/null || true
 for sym in cal_session cal_main param_init serial_manager_start \
-           cal_mag_solve \
+           cal_mag_validate \
            sensors_start rotation_apply g_orb_vehicle_accel \
            imu_integrator_add g_orb_vehicle_imu ekf_core_process \
            g_orb_estimator_state; do
