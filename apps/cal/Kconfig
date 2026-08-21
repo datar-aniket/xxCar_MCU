@@ -33,6 +33,6 @@ config XXCAR_CAL_PRIORITY
 
 config XXCAR_CAL_STACKSIZE
 	int "cal stack size"
-	default 4096
+	default 8192
 
 endif

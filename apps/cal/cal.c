@@ -28,6 +28,7 @@
 #include "cal.h"
 #include "cal_accel.h"
 #include "cal_gyro.h"
+#include "cal_mag.h"
 #include "../param/param.h"
 #include "../serial/serial.h"
 #include "../uorb_msgs/uorb_msgs.h"
@@ -185,7 +186,7 @@ static int cal_write(int fd, FAR const void *buf, size_t len)
 
 static int cal_emit(int fd, FAR const char *fmt, ...)
 {
-  char buf[224];
+  char buf[512];
   va_list ap;
   int n;
 
@@ -389,12 +390,14 @@ struct cal_apply_s
 {
   float off[3];
   float scl[3];
+  float matrix[3][3];
   bool  on;
+  bool  full_matrix;
 };
 
 static const char *const g_cal_prefix[] =
 {
-  "CAL_ACC0", "CAL_GYRO0", "CAL_ACC1", "CAL_GYRO1"
+  "CAL_ACC0", "CAL_GYRO0", "CAL_ACC1", "CAL_GYRO1", "CAL_MAG0"
 };
 
 /* Load the stored calibration for a streaming sensor, if it has one and the
@@ -407,18 +410,23 @@ static void cal_load_apply(int i, bool want, FAR struct cal_apply_s *a)
   char name[PARAM_NAME_MAX + 1];
   FAR const char *pfx = NULL;
   bool is_accel;
+  bool is_mag;
   int k;
 
   memset(a, 0, sizeof(*a));
   a->scl[0] = a->scl[1] = a->scl[2] = 1.0f;
+  a->matrix[0][0] = 1.0f;
+  a->matrix[1][1] = 1.0f;
+  a->matrix[2][2] = 1.0f;
 
-  if (!want || i > 3)
+  if (!want || i < 0 || i > 4)
     {
-      return;                    /* g_sensors 0..3 are the IMU axes */
+      return;
     }
 
   pfx      = g_cal_prefix[i];
   is_accel = (g_sensors[i].kind == CAL_KIND_ACCEL);
+  is_mag   = (g_sensors[i].kind == CAL_KIND_MAG);
 
   /* Both kinds carry a validity flag now. The gyro used to have none, so its
    * stored offsets were applied whether or not anything had ever measured
@@ -444,6 +452,17 @@ static void cal_load_apply(int i, bool want, FAR struct cal_apply_s *a)
           snprintf(name, sizeof(name), "%s_%cSCL", pfx, axis[k]);
           a->scl[k] = param_f32(name);
         }
+    }
+
+  if (is_mag)
+    {
+      a->matrix[0][0] = param_f32("CAL_MAG0_XX");
+      a->matrix[1][1] = param_f32("CAL_MAG0_YY");
+      a->matrix[2][2] = param_f32("CAL_MAG0_ZZ");
+      a->matrix[0][1] = a->matrix[1][0] = param_f32("CAL_MAG0_XY");
+      a->matrix[0][2] = a->matrix[2][0] = param_f32("CAL_MAG0_XZ");
+      a->matrix[1][2] = a->matrix[2][1] = param_f32("CAL_MAG0_YZ");
+      a->full_matrix = true;
     }
 
   a->on = true;
@@ -601,7 +620,18 @@ int cal_session(void)
   int  cal6_idx = -1;                /* which sensor is being calibrated */
   bool want_cal = false;
 
+  /* The sample set lives in BSS, not on this command's stack. A full tumble
+   * retains enough spatially distinct points for robust outlier rejection.
+   */
+
+  static struct cal_mag_s mag_cal;
+  static struct cal_mag_fit_s mag_fit;
+  int  mag_idx = -1;
+  bool mag_collecting = false;
+  bool mag_fit_valid = false;
+
   cal_accel_reset(&cal6);
+  cal_mag_reset(&mag_cal);
   cal_load_apply(-1, false, &apply);
 
   if (param_i32("SER_USB_FUNC") != SER_FUNC_CAL)
@@ -684,13 +714,42 @@ int cal_session(void)
                   break;             /* nothing more queued */
                 }
 
+              if (mag_collecting && st_idx == mag_idx &&
+                  cal_mag_add(&mag_cal, slot) &&
+                  (mag_cal.count == 1 || mag_cal.count % 10 == 0 ||
+                   mag_cal.count == CAL_MAG_MIN_SAMPLES))
+                {
+                  cal_emit(fd,
+                           "{\"evt\":\"mag\",\"what\":\"progress\","
+                           "\"samples\":%u,\"seen\":%u,\"need\":%u,"
+                           "\"capacity\":%u}\n",
+                           mag_cal.count, mag_cal.seen,
+                           CAL_MAG_MIN_SAMPLES, CAL_MAG_MAX_SAMPLES);
+                }
+
               if (apply.on)
                 {
                   int k;
 
-                  for (k = 0; k < 3; k++)
+                  if (apply.full_matrix)
                     {
-                      slot[k] = (slot[k] - apply.off[k]) * apply.scl[k];
+                      float raw[3] = {slot[0], slot[1], slot[2]};
+
+                      for (k = 0; k < 3; k++)
+                        {
+                          slot[k] =
+                            apply.matrix[k][0] * (raw[0] - apply.off[0]) +
+                            apply.matrix[k][1] * (raw[1] - apply.off[1]) +
+                            apply.matrix[k][2] * (raw[2] - apply.off[2]);
+                        }
+                    }
+                  else
+                    {
+                      for (k = 0; k < 3; k++)
+                        {
+                          slot[k] =
+                            (slot[k] - apply.off[k]) * apply.scl[k];
+                        }
                     }
                 }
 
@@ -1233,6 +1292,193 @@ int cal_session(void)
               cal_accel_reset(&cal6);
               cal6_idx = -1;
               cal_emit(fd, "{\"evt\":\"ok\",\"what\":\"cal6 abort\"}\n");
+            }
+        }
+      else if (strncmp(line, "mag", 3) == 0)
+        {
+          FAR const char *what = line[3] == ' ' ? line + 4 : "";
+
+          if (strncmp(what, "start ", 6) == 0)
+            {
+              int i;
+
+              for (i = 0; i < CAL_NSENSORS; i++)
+                {
+                  if (strcmp(what + 6, g_sensors[i].name) == 0 &&
+                      g_sensors[i].kind == CAL_KIND_MAG)
+                    {
+                      break;
+                    }
+                }
+
+              if (i == CAL_NSENSORS)
+                {
+                  cal_emit(fd, "{\"evt\":\"error\","
+                               "\"msg\":\"not a magnetometer\"}\n");
+                  continue;
+                }
+
+              if (st_idx != i || st_sub < 0)
+                {
+                  cal_emit(fd, "{\"evt\":\"error\","
+                               "\"msg\":\"stream magnetometer first\"}\n");
+                  continue;
+                }
+
+              cal_mag_reset(&mag_cal);
+              memset(&mag_fit, 0, sizeof(mag_fit));
+              mag_idx = i;
+              mag_collecting = true;
+              mag_fit_valid = false;
+              cal_emit(fd,
+                       "{\"evt\":\"ok\",\"what\":\"mag start\","
+                       "\"name\":\"%s\",\"need\":%u,"
+                       "\"capacity\":%u}\n",
+                       g_sensors[i].name, CAL_MAG_MIN_SAMPLES,
+                       CAL_MAG_MAX_SAMPLES);
+            }
+          else if (strcmp(what, "fit") == 0)
+            {
+              enum cal_mag_result_e result;
+
+              if (mag_idx < 0)
+                {
+                  cal_emit(fd, "{\"evt\":\"error\","
+                               "\"msg\":\"mag calibration not started\"}\n");
+                  continue;
+                }
+
+              result = cal_mag_solve(&mag_cal, &mag_fit);
+              mag_fit_valid = result == CAL_MAG_OK;
+
+              if (!mag_fit_valid)
+                {
+                  cal_emit(fd,
+                           "{\"evt\":\"error\",\"what\":\"mag fit\","
+                           "\"msg\":\"%s\",\"code\":%d,"
+                           "\"samples\":%u,\"octants\":%u}\n",
+                           cal_mag_result_string(result), result,
+                           mag_cal.count, mag_fit.octants);
+                  continue;
+                }
+
+              mag_collecting = false;
+              cal_emit(fd,
+                       "{\"evt\":\"ok\",\"what\":\"mag fit\","
+                       "\"off\":[%.6f,%.6f,%.6f],"
+                       "\"diag\":[%.6f,%.6f,%.6f],"
+                       "\"offdiag\":[%.6f,%.6f,%.6f],"
+                       "\"field\":%.6f,\"rms\":%.6f,\"max\":%.6f,"
+                       "\"condition\":%.3f,\"used\":%u,"
+                       "\"rejected\":%u}\n",
+                       (double)mag_fit.offset[0],
+                       (double)mag_fit.offset[1],
+                       (double)mag_fit.offset[2],
+                       (double)mag_fit.matrix[0][0],
+                       (double)mag_fit.matrix[1][1],
+                       (double)mag_fit.matrix[2][2],
+                       (double)mag_fit.matrix[0][1],
+                       (double)mag_fit.matrix[0][2],
+                       (double)mag_fit.matrix[1][2],
+                       (double)mag_fit.field, (double)mag_fit.rms,
+                       (double)mag_fit.maximum_error,
+                       (double)mag_fit.condition, mag_fit.used,
+                       mag_fit.rejected);
+            }
+          else if (strcmp(what, "save") == 0)
+            {
+              static const char *const off_name[3] =
+              {
+                "CAL_MAG0_XOFF", "CAL_MAG0_YOFF", "CAL_MAG0_ZOFF"
+              };
+              static const char *const matrix_name[6] =
+              {
+                "CAL_MAG0_XX", "CAL_MAG0_YY", "CAL_MAG0_ZZ",
+                "CAL_MAG0_XY", "CAL_MAG0_XZ", "CAL_MAG0_YZ"
+              };
+              float matrix_value[6];
+              bool failed = false;
+              int k;
+
+              if (!mag_fit_valid || mag_idx < 0)
+                {
+                  cal_emit(fd, "{\"evt\":\"error\","
+                               "\"msg\":\"fit magnetometer first\"}\n");
+                  continue;
+                }
+
+              matrix_value[0] = mag_fit.matrix[0][0];
+              matrix_value[1] = mag_fit.matrix[1][1];
+              matrix_value[2] = mag_fit.matrix[2][2];
+              matrix_value[3] = mag_fit.matrix[0][1];
+              matrix_value[4] = mag_fit.matrix[0][2];
+              matrix_value[5] = mag_fit.matrix[1][2];
+
+              if (param_set_i32("CAL_MAG0_OK", 0) < 0)
+                {
+                  failed = true;
+                }
+
+              for (k = 0; k < 3 && !failed; k++)
+                {
+                  if (param_set_f32(off_name[k], mag_fit.offset[k]) < 0)
+                    {
+                      failed = true;
+                    }
+                }
+
+              for (k = 0; k < 6 && !failed; k++)
+                {
+                  if (param_set_f32(matrix_name[k], matrix_value[k]) < 0)
+                    {
+                      failed = true;
+                    }
+                }
+
+              if (!failed &&
+                  param_set_f32("CAL_MAG0_FIELD", mag_fit.field) < 0)
+                {
+                  failed = true;
+                }
+
+              if (!failed && param_set_i32("CAL_MAG0_OK", 1) < 0)
+                {
+                  failed = true;
+                }
+
+              if (failed)
+                {
+                  cal_emit(fd, "{\"evt\":\"error\","
+                               "\"msg\":\"mag parameter out of range\"}\n");
+                  continue;
+                }
+
+              if (param_save() < 0)
+                {
+                  cal_emit(fd, "{\"evt\":\"error\","
+                               "\"msg\":\"param save failed\"}\n");
+                  continue;
+                }
+
+              if (st_idx == mag_idx)
+                {
+                  cal_load_apply(st_idx, want_cal, &apply);
+                }
+
+              cal_emit(fd,
+                       "{\"evt\":\"ok\",\"what\":\"mag save\","
+                       "\"field\":%.6f,\"rms\":%.6f}\n",
+                       (double)mag_fit.field, (double)mag_fit.rms);
+            }
+          else
+            {
+              cal_mag_reset(&mag_cal);
+              memset(&mag_fit, 0, sizeof(mag_fit));
+              mag_idx = -1;
+              mag_collecting = false;
+              mag_fit_valid = false;
+              cal_emit(fd,
+                       "{\"evt\":\"ok\",\"what\":\"mag abort\"}\n");
             }
         }
       else if (strncmp(line, "gyro ", 5) == 0)

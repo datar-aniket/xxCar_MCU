@@ -30,7 +30,7 @@ except ImportError:
     raise SystemExit("pyserial missing:  pip install pyserial")
 
 SYNC = 0xA5
-PROTO = 3
+PROTO = 4
 ENC_I16, ENC_F32 = 0, 1
 
 # sync | len(u16) | id | seq | t0_us(u32) | dt_us(u16) | count | nvals | enc
@@ -541,6 +541,31 @@ class App(tk.Tk):
         # average, so the message alone cannot say which panel it belongs to.
         self.gyro_busy = False
 
+        # ---- full 3D magnetometer ellipsoid
+        mb = ttk.Labelframe(p, text=" 3D magnetometer ", padding=6)
+        mb.pack(fill="x", pady=(10, 0))
+        self.mag_btn = ttk.Button(mb, text="Start tumble",
+                                  command=self._mag_start)
+        self.mag_btn.pack(fill="x")
+        self.mag_progress = ttk.Progressbar(mb, maximum=320, value=0)
+        self.mag_progress.pack(fill="x", pady=(6, 3))
+        self.mag_hint = ttk.Label(
+            mb, text="select mag0", style="Muted.TLabel", wraplength=190,
+            justify="left")
+        self.mag_hint.pack(anchor="w")
+        row = ttk.Frame(mb, style="Card.TFrame")
+        row.pack(fill="x", pady=(6, 0))
+        self.mag_fit_btn = ttk.Button(row, text="Fit", command=self._mag_fit,
+                                      state="disabled")
+        self.mag_fit_btn.pack(side="left", expand=True, fill="x",
+                              padx=(0, 3))
+        self.mag_save_btn = ttk.Button(row, text="Save",
+                                       command=self._mag_save,
+                                       state="disabled")
+        self.mag_save_btn.pack(side="left", expand=True, fill="x",
+                               padx=(3, 0))
+        self.mag_active = False
+
         # ---- Allan-variance recording
         rb = ttk.Labelframe(p, text=" record to SD ", padding=6)
         rb.pack(fill="x", pady=(10, 0))
@@ -866,6 +891,38 @@ class App(tk.Tk):
         # the board blocks for the whole averaging window
         self.after(6000, lambda: self.gyro_btn.config(state="normal"))
 
+    def _mag_start(self):
+        if not self.link or self.active is None:
+            return
+        s = self.sensors[self.active]
+        if not s["name"].startswith("mag"):
+            self._say("! pick a magnetometer first", "err")
+            self.mag_hint.config(text="select mag0 in the sensor list.")
+            return
+        if self.mag_active:
+            self.link.send("mag abort")
+            return
+        self.mag_active = True
+        self.mag_progress["value"] = 0
+        self.mag_btn.config(text="Abort")
+        self.mag_fit_btn.config(state="disabled")
+        self.mag_save_btn.config(state="disabled")
+        self.mag_hint.config(
+            text="Slowly rotate the complete vehicle through every "
+                 "orientation. Include all six faces and the corners.")
+        self.link.send(f"mag start {s['name']}")
+
+    def _mag_fit(self):
+        if self.link and self.mag_active:
+            self.mag_hint.config(text="fitting full 3D ellipsoid…")
+            self.mag_fit_btn.config(state="disabled")
+            self.link.send("mag fit")
+
+    def _mag_save(self):
+        if self.link:
+            self.mag_save_btn.config(state="disabled")
+            self.link.send("mag save")
+
     def _rec_estimate(self):
         """Say up front what the run will cost, and when FAT32 stops it.
 
@@ -929,6 +986,9 @@ class App(tk.Tk):
         if evt == "cal6":
             self._cal_progress(msg)
             return
+        if evt == "mag":
+            self._mag_progress(msg)
+            return
         if evt == "record":
             self._rec_status(msg)
             return
@@ -959,6 +1019,44 @@ class App(tk.Tk):
                 self.cal_on.set(True)
                 self._cal_toggle()
                 return
+            if what == "mag start":
+                self.mag_active = True
+                self.mag_btn.config(text="Abort")
+                self.mag_hint.config(
+                    text="Collecting raw field samples — rotate slowly "
+                         "through faces, edges, and corners.")
+                return
+            if what == "mag fit":
+                self.mag_active = True
+                self.mag_fit_btn.config(state="normal")
+                self.mag_save_btn.config(state="normal")
+                self.mag_hint.config(
+                    text=f"fit ready: field {msg.get('field', 0):.3f} G, "
+                         f"RMS {msg.get('rms', 0):.4f} G, max "
+                         f"{msg.get('max', 0):.4f} G, condition "
+                         f"{msg.get('condition', 0):.2f}. Review, then Save.")
+                self._say(f"< {json.dumps(msg)}")
+                return
+            if what == "mag save":
+                self.mag_active = False
+                self.mag_btn.config(text="Start tumble")
+                self.mag_fit_btn.config(state="disabled")
+                self.mag_save_btn.config(state="disabled")
+                self.mag_hint.config(
+                    text=f"saved. field {msg.get('field', 0):.3f} G, "
+                         f"RMS {msg.get('rms', 0):.4f} G. Enable calibrated "
+                         "preview and rotate again to verify the magnitude.")
+                self.cal_on.set(True)
+                self._cal_toggle()
+                self._say(f"< {json.dumps(msg)}")
+                return
+            if what == "mag abort":
+                self.mag_active = False
+                self.mag_btn.config(text="Start tumble")
+                self.mag_fit_btn.config(state="disabled")
+                self.mag_save_btn.config(state="disabled")
+                self.mag_hint.config(text="calibration aborted; nothing saved.")
+                return
             if what == "record":
                 self.recording = True
                 self.rec_btn.config(text="Stop")
@@ -970,6 +1068,26 @@ class App(tk.Tk):
                     text=f"stopped. {msg.get('samples',0)} samples, "
                          f"{msg.get('bytes',0)/1e6:.1f} MB, "
                          f"dropped {msg.get('dropped',0)}")
+        if evt == "error" and msg.get("what") == "mag fit":
+            self.mag_fit_btn.config(state="normal")
+            self.mag_save_btn.config(state="disabled")
+            self.mag_hint.config(
+                text=f"✗ {msg.get('msg', 'fit failed')} — "
+                     f"{msg.get('samples', 0)} samples, octant mask "
+                     f"0x{msg.get('octants', 0):02x}. Keep rotating and Fit "
+                     "again; nothing was saved.")
+            self._say(f"< {json.dumps(msg)}")
+            return
+        if evt == "error" and self.mag_active:
+            self.mag_hint.config(
+                text=f"✗ {msg.get('msg', 'mag calibration failed')} — "
+                     "nothing was saved.")
+            self.mag_fit_btn.config(state="normal")
+            self.mag_save_btn.config(state="normal"
+                                      if "save" in msg.get("what", "")
+                                      else "disabled")
+            self._say(f"< {json.dumps(msg)}")
+            return
         if evt == "error" and self.gyro_busy:
             m = msg.get("msg", "")
             self.gyro_busy = False
@@ -1032,6 +1150,21 @@ class App(tk.Tk):
         if not left:
             self.save_btn.config(state="normal")
         self._say(f"< cal6 pos {pos} a={[round(v,3) for v in msg['a']]}")
+
+    def _mag_progress(self, msg):
+        samples = int(msg.get("samples", 0))
+        need = int(msg.get("need", 120))
+        capacity = int(msg.get("capacity", 320))
+        self.mag_progress["maximum"] = capacity
+        self.mag_progress["value"] = samples
+        self.mag_fit_btn.config(state="normal" if samples >= need
+                                else "disabled")
+        self.mag_hint.config(
+            text=f"{samples}/{capacity} distinct samples retained "
+                 f"({msg.get('seen', 0)} measured). "
+                 + ("Continue through missing orientations, then Fit."
+                    if samples >= need else
+                    "Keep rotating through all faces, edges, and corners."))
 
     def _rec_status(self, msg):
         self.recording = bool(msg.get("running"))

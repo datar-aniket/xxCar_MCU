@@ -163,6 +163,8 @@ static const struct param_def_s g_params[] =
   { "SENS_IMU1_ROT",  PARAM_TYPE_INT32, I32(2), I32(0), I32(37),
     "IMU1 (BMI055) rotation relative to the board (2 = yaw 90, measured)",
     PARAM_RANGE_ENUM },
+  { "SENS_MAG0_ROT",  PARAM_TYPE_INT32, I32(0), I32(0), I32(37),
+    "IST8310 rotation relative to the board", PARAM_RANGE_ENUM },
 
   /* Which IMU feeds vehicle_acceleration / vehicle_angular_velocity. There is
    * no voting: with two sensors a disagreement cannot be resolved by majority,
@@ -334,6 +336,22 @@ static const struct param_def_s g_params[] =
     "Mag 0 Y offset (Gauss)" },
   { "CAL_MAG0_ZOFF",  PARAM_TYPE_FLOAT, F32(0.0f), F32(-2.0f), F32(2.0f),
     "Mag 0 Z offset (Gauss)" },
+  { "CAL_MAG0_XX", PARAM_TYPE_FLOAT, F32(1.0f), F32(0.25f), F32(4.0f),
+    "Mag 0 soft-iron matrix XX" },
+  { "CAL_MAG0_YY", PARAM_TYPE_FLOAT, F32(1.0f), F32(0.25f), F32(4.0f),
+    "Mag 0 soft-iron matrix YY" },
+  { "CAL_MAG0_ZZ", PARAM_TYPE_FLOAT, F32(1.0f), F32(0.25f), F32(4.0f),
+    "Mag 0 soft-iron matrix ZZ" },
+  { "CAL_MAG0_XY", PARAM_TYPE_FLOAT, F32(0.0f), F32(-2.0f), F32(2.0f),
+    "Mag 0 soft-iron matrix XY" },
+  { "CAL_MAG0_XZ", PARAM_TYPE_FLOAT, F32(0.0f), F32(-2.0f), F32(2.0f),
+    "Mag 0 soft-iron matrix XZ" },
+  { "CAL_MAG0_YZ", PARAM_TYPE_FLOAT, F32(0.0f), F32(-2.0f), F32(2.0f),
+    "Mag 0 soft-iron matrix YZ" },
+  { "CAL_MAG0_FIELD", PARAM_TYPE_FLOAT, F32(0.45f), F32(0.15f), F32(0.8f),
+    "Mag 0 calibrated field strength (Gauss)" },
+  { "CAL_MAG0_OK", PARAM_TYPE_INT32, I32(0), I32(0), I32(1),
+    "Mag 0 full ellipsoid calibrated" },
 };
 
 #define PARAM_COUNT ((int)(sizeof(g_params) / sizeof(g_params[0])))

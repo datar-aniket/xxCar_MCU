@@ -65,14 +65,15 @@ def main():
             print(f"FAIL {what}")
 
     # ---- sensor list -----------------------------------------------------
-    for i, nm in enumerate(("accel0", "gyro0")):
+    for i, nm in enumerate(("accel0", "gyro0", "mag0")):
         app._on_json({"evt": "sensor", "id": i, "name": nm, "n": 3, "enc": 0,
                       "scale": 0.00478, "labels": ["x", "y", "z"],
                       "unit": "m/s^2", "present": True, "rate": 2000})
     app._on_json({"evt": "sensor", "id": 5, "name": "baro0", "n": 2, "enc": 1,
                   "scale": 0.0, "labels": ["pressure", "temperature"],
                   "unit": "hPa", "present": False, "rate": 0})
-    check(set(app.tree.get_children()) == {"0", "1", "5"}, "three rows listed")
+    check(set(app.tree.get_children()) == {"0", "1", "2", "5"},
+          "four rows listed")
     check("absent" in app.tree.item("5", "text"), "absent sensor marked")
 
     # ---- six-position wizard --------------------------------------------
@@ -170,6 +171,36 @@ def main():
     check("0.00312" in app.gyro_hint.cget("text"), "measured bias not shown")
     check("7940" in app.gyro_hint.cget("text"), "sample count not shown")
     check(app.gyro_busy is False, "gyro_busy stuck after a completed save")
+
+    # ---- full magnetometer ellipsoid ------------------------------------
+    app.mag_active = True
+    app._on_json({"evt": "mag", "what": "progress", "samples": 90,
+                  "seen": 410, "need": 120, "capacity": 320})
+    check(app.mag_fit_btn.instate(["disabled"]),
+          "mag Fit enabled before minimum sample count")
+    app._on_json({"evt": "mag", "what": "progress", "samples": 130,
+                  "seen": 650, "need": 120, "capacity": 320})
+    check(not app.mag_fit_btn.instate(["disabled"]),
+          "mag Fit disabled after enough samples")
+    app._on_json({"evt": "error", "what": "mag fit",
+                  "msg": "poor 3D coverage", "samples": 130,
+                  "octants": 0x7f})
+    check("poor 3D coverage" in app.mag_hint.cget("text"),
+          "mag coverage rejection not explained")
+    check(app.mag_save_btn.instate(["disabled"]),
+          "mag Save enabled after rejected fit")
+    app._on_json({"evt": "ok", "what": "mag fit", "field": 0.463,
+                  "rms": 0.0081, "max": 0.021, "condition": 1.34,
+                  "used": 150, "rejected": 3})
+    check("0.0081" in app.mag_hint.cget("text"),
+          "mag fit quality not displayed")
+    check(not app.mag_save_btn.instate(["disabled"]),
+          "mag Save disabled after accepted fit")
+    app._on_json({"evt": "ok", "what": "mag save", "field": 0.463,
+                  "rms": 0.0081})
+    check(app.mag_active is False, "mag session remains active after save")
+    check(app.cal_on.get() is True,
+          "calibrated preview not enabled after mag save")
 
     # ---- recording -------------------------------------------------------
     app._on_json({"evt": "ok", "what": "record",
