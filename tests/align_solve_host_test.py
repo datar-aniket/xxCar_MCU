@@ -498,33 +498,31 @@ def test_end_to_end_through_the_runner():
     """The whole pipeline, from board-shaped streams to four rotations.
 
     Covers align_run.build_session, which the solver tests never touch: it is
-    where the sensor-frame streams are assembled, the accelerometer is lifted
-    into the vehicle frame for the dip test, and optical flow's integrated
-    angle is turned back into a rate. A shape or scale mistake there produces a
-    plausible wrong rotation, which is exactly the failure this whole procedure
-    exists to prevent.
+    where the sensor-frame streams are assembled and the accelerometer is
+    lifted into the vehicle frame for the dip test. A shape mistake there
+    produces a plausible wrong rotation, which is exactly the failure this
+    whole procedure exists to prevent.
+
+    Keyed by the cal protocol's SHORT sensor names. Using the uORB topic names
+    instead is what made the first hardware run fail with "no such sensor",
+    so the names are part of what this pins.
     """
     import align_run
 
-    imu0, imu1, mag, flow = (ROTATIONS[0], ROTATIONS[2], ROTATIONS[8],
-                             ROTATIONS[4])
+    imu0, imu1, mag = ROTATIONS[0], ROTATIONS[2], ROTATIONS[8]
     hz = 100.0
     gyro, dt = _sweep(count=1200, dt=1.0 / hz)
     mag_s, accel_s, _att = _mag_for(mag, gyro, dt)
 
     positions = {"imu0": _positions_for(imu0), "imu1": _positions_for(imu1)}
+    # Keyed by the CAL PROTOCOL's short names, which is what the board
+    # answers to - "accel0", not the uORB topic "sensor_accel0".
     rows = {
-        "sensor_gyro0": (imu0.T @ gyro.T).T,
-        "sensor_gyro1": (imu1.T @ gyro.T).T,
-        "sensor_accel0": (imu0.T @ accel_s.T).T,
-        "sensor_mag0": mag_s,
+        "gyro0": (imu0.T @ gyro.T).T,
+        "gyro1": (imu1.T @ gyro.T).T,
+        "accel0": (imu0.T @ accel_s.T).T,
+        "mag0": mag_s,
     }
-
-    n = len(gyro)
-    flow_rows = np.zeros((n, 7))
-    flow_rows[:, 0] = 1e6 / hz                     # integration window, us
-    flow_rows[:, 4:7] = (flow.T @ gyro.T).T / hz   # angle over that window
-    rows["flow"] = flow_rows
 
     got = solve_alignment(
         align_run.build_session(positions, rows, hz, imu0))
@@ -532,7 +530,6 @@ def test_end_to_end_through_the_runner():
     assert got["imu0"]["enum"] == 0, got["imu0"]
     assert got["imu1"]["enum"] == 2, got["imu1"]
     assert got["mag"]["enum"] == 8, got["mag"]
-    assert got["flow"]["enum"] == 4, got["flow"]
     assert got["imu0"]["cross_check"] is True
     assert got["imu1"]["cross_check"] is True
 

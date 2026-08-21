@@ -2,9 +2,9 @@
 """Run the guided sensor alignment against a board.
 
 Six static positions read each IMU's rotation straight out of gravity, then one
-rotation sweep solves the magnetometer and optical flow against them. Every
-solve is align_solve's; this file is only the session - prompting, capturing,
-and refusing to go on when a capture is not good enough.
+rotation sweep solves the magnetometer against them. Every solve is
+align_solve's; this file is only the session - prompting, capturing, and
+refusing to go on when a capture is not good enough.
 
 Terminal driven rather than graphical, deliberately: it needs no display, so it
 runs over ssh on the bench next to the vehicle, and every decision it makes is
@@ -46,8 +46,19 @@ PROMPTS = {
 ORDER = ("level", "inverted", "nose_up", "nose_down",
          "left_down", "right_down")
 
-IMUS = {"imu0": ("sensor_accel0", "sensor_gyro0"),
-        "imu1": ("sensor_accel1", "sensor_gyro1")}
+# The cal protocol names sensors SHORT - "accel0", not "sensor_accel0". The
+# uORB topic name is a separate field in the table and is not what commands
+# take.
+IMUS = {"imu0": ("accel0", "gyro0"),
+        "imu1": ("accel1", "gyro1")}
+
+# Optical flow is NOT solved here. The cal stream exposes it as int_x, int_y,
+# distance and quality - the integrated_*gyro channels the rotation solve needs
+# are not among them, and widening CAL_MAX_VALUES from 4 to 7 to carry them
+# would grow every stream buffer in the app by 75% for a result no parameter
+# reads. align_solve.rate_rotation is ready for it whenever flow fusion makes
+# it worth storing.
+SWEEP_SENSORS = ("gyro0", "gyro1", "accel0", "mag0")
 
 SWEEP_SECONDS = 25.0
 
@@ -67,10 +78,13 @@ class Session:
         self.link = Link(port, baud, self.q)
         self.link.start()
         self.sensors = {}
+        self.present = set()
         self.link.send("hello")
         self.link.send("list")
-        time.sleep(0.5)
-        self._drain_json()
+
+        # Wait for the terminator rather than sleeping a guessed interval:
+        # `list` subscribes, waits 200 ms to measure rates, then emits.
+        self.wait_json("ok", timeout=6.0)
 
     def close(self):
         self.link.send("align stop")
@@ -92,6 +106,9 @@ class Session:
 
                 if payload.get("evt") == "sensor":
                     self.sensors[payload.get("name")] = payload.get("id")
+
+                    if payload.get("present"):
+                        self.present.add(payload.get("name"))
             elif kind == "error":
                 print(f"  link: {payload}")
 
@@ -106,6 +123,14 @@ class Session:
                 continue
 
             if kind != "json":
+                continue
+
+            if payload.get("evt") == "sensor":
+                self.sensors[payload.get("name")] = payload.get("id")
+
+                if payload.get("present"):
+                    self.present.add(payload.get("name"))
+
                 continue
 
             if payload.get("evt") == "error":
@@ -128,7 +153,12 @@ class Session:
 
         for name in names:
             if name not in self.sensors:
-                raise AlignError(f"board does not publish {name}")
+                raise AlignError(f"board has no sensor called {name!r}")
+
+            if name not in self.present:
+                raise AlignError(
+                    f"{name} is not publishing - `sensor_status -t 1000` will "
+                    "say whether the driver is up at all")
 
             by_id[self.sensors[name]] = name
 
@@ -165,7 +195,7 @@ class Session:
         return {k: np.array(v, dtype=float) for k, v in rows.items()}
 
     def _report_progress(self, rows, remaining, hz):
-        gyro = rows.get("sensor_gyro0")
+        gyro = rows.get("gyro0")
 
         if not gyro or len(gyro) < 20:
             print(f"\r  collecting... {remaining:4.1f}s left", end="", flush=True)
@@ -224,10 +254,7 @@ def capture_positions(session):
 
 def capture_sweep(session, hz=100):
     """One rotation sweep, repeated until all three axes are exercised."""
-    names = ["sensor_gyro0", "sensor_gyro1", "sensor_accel0", "sensor_mag0"]
-
-    if "flow" in session.sensors:
-        names.append("flow")
+    names = list(SWEEP_SENSORS)
 
     while True:
         print(f"\nRotate the whole vehicle through ALL THREE axes for "
@@ -239,7 +266,7 @@ def capture_sweep(session, hz=100):
         rows = session.sweep(names, hz, SWEEP_SECONDS)
         print()
 
-        gyro = rows.get("sensor_gyro0")
+        gyro = rows.get("gyro0")
 
         if gyro is None or len(gyro) < 100:
             print("  rejected: almost no gyro data arrived")
@@ -262,25 +289,18 @@ def capture_sweep(session, hz=100):
 def build_session(positions, rows, hz, imu0_matrix):
     """Assemble what solve_alignment wants from what was captured."""
     n = min(len(v) for v in rows.values() if len(v))
-    gyro0 = rows["sensor_gyro0"][:n, :3]
+    gyro0 = rows["gyro0"][:n, :3]
 
     # The magnetometer's dip test needs UP in the sweep's earth frame, which
     # means the accelerometer expressed in the VEHICLE frame - so it has to be
     # rotated by the IMU result the static positions just produced.
-    accel = (imu0_matrix @ rows["sensor_accel0"][:n, :3].T).T
+    accel = (imu0_matrix @ rows["accel0"][:n, :3].T).T
 
     sweep = {"dt": 1.0 / hz, "accel": accel,
-             "gyro": {"imu0": gyro0}, "mag": rows["sensor_mag0"][:n, :3]}
+             "gyro": {"imu0": gyro0}, "mag": rows["mag0"][:n, :3]}
 
-    if len(rows.get("sensor_gyro1", [])) >= n:
-        sweep["gyro"]["imu1"] = rows["sensor_gyro1"][:n, :3]
-
-    if len(rows.get("flow", [])) >= n:
-        # Flow reports integrated angle over its window; rate is that over the
-        # integration time. Columns 4..6 are the gyro channels.
-        flow = rows["flow"][:n]
-        window = np.maximum(flow[:, 0:1], 1.0) * 1e-6
-        sweep["gyro"]["flow"] = flow[:, 4:7] / window
+    if len(rows.get("gyro1", [])) >= n:
+        sweep["gyro"]["imu1"] = rows["gyro1"][:n, :3]
 
     return {"positions": positions, "sweep": sweep}
 
@@ -340,7 +360,6 @@ def commit(session, writable):
         print(f"  {line}")
 
     print("  set SENS_BOARD_ROT 0")
-    print("\n(flow is solved but not written - no parameter reads it yet)")
 
     if input("\nCommit these? [y/N] ").strip().lower() != "y":
         print("Not written.")
