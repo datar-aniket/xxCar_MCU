@@ -10,6 +10,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <string.h>
 
 #include "ekf3.h"
@@ -44,6 +45,12 @@ static void print_solution(uint8_t status)
          (status & EKF_SOLUTION_VELOCITY_VERT) ? "VELZ " : "",
          (status & EKF_SOLUTION_POSITION_HORIZ) ? "POSXY " : "",
          (status & EKF_SOLUTION_POSITION_VERT) ? "POSZ" : "");
+}
+
+static bool source_yaw_is_compass(FAR const struct ekf3_status_s *status)
+{
+  return status->sources.set[status->sources.active_set].yaw ==
+         EKF_SOURCE_BARO_OR_COMPASS;
 }
 
 static void print_status(void)
@@ -124,6 +131,38 @@ static void print_status(void)
   printf("  aiding in  mag %" PRIu32 " (%s)  baro %" PRIu32 " (%s)\n",
          status.mag_in, status.mag_available ? "subscribed" : "ABSENT",
          status.baro_in, status.baro_available ? "subscribed" : "ABSENT");
+
+  if (core->yaw_absolute)
+    {
+      printf("  mag heading %+.2f deg  |B| %.4f expected %.4f"
+             "  decl %+.2f deg\n",
+             (double)(core->last_mag_heading * rad_to_deg),
+             (double)core->last_mag_field, (double)status.mag_expected,
+             (double)(status.declination * rad_to_deg));
+      printf("  mag accept %" PRIu32 " reject %" PRIu32 " (run %" PRIu32
+             ") unhealthy %" PRIu32 " NIS %.3f\n",
+             core->mag_accept_count, core->mag_reject_count,
+             core->mag_consecutive_rejects, core->mag_unhealthy_count,
+             (double)core->last_mag_nis);
+    }
+  else
+    {
+      /* Say WHY the heading has no datum. "relative" alone cost nothing to
+       * print and everything to diagnose: an uncalibrated compass, a
+       * deselected source and an aux daemon that was never started all look
+       * identical from the outside.
+       */
+
+      printf("  mag heading NONE - %s\n",
+             !status.mag_available ?
+               "vehicle_mag absent; run `sensors aux start`" :
+             source_yaw_is_compass(&status) ?
+               (status.mag_align_used == 0 ?
+                  "no calibrated field reached alignment "
+                  "(CAL_MAG0_OK? aux started before ekf3?)" :
+                  "field rejected at alignment") :
+               "EK3_SRCn_YAW does not select the compass");
+    }
 
   if (core->baro_have_reference)
     {

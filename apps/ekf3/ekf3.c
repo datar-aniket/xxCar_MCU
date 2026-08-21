@@ -336,6 +336,15 @@ static int ekf3_daemon(int argc, FAR char *argv[])
   status.horizon_ms = (uint32_t)param_i32("EK3_DELAY_MS");
   status.alt_noise = param_f32("EK3_ALT_M_NSE");
   status.alt_gate = param_f32("EK3_ALT_I_GATE");
+  status.declination = param_f32("EK3_MAG_DEC") * 0.017453292519943295f;
+  status.yaw_noise = param_f32("EK3_YAW_M_NSE");
+  status.yaw_gate = param_f32("EK3_YAW_I_GATE");
+  status.mag_expected = param_f32("CAL_MAG0_FIELD");
+
+  /* The core reads no parameters itself, so hand it what alignment needs. */
+
+  ekf_core_set_mag_config(&status.core, status.declination,
+                          status.yaw_noise * status.yaw_noise);
   ekf_delay_init(&g_delay, status.horizon_ms);
 
   fds[nfds].fd = subscriber;
@@ -432,11 +441,32 @@ static int ekf3_daemon(int argc, FAR char *argv[])
                 }
             }
 
-          /* Flash B fuses the magnetometer. */
-
           while (ekf_delay_next_mag(&g_delay, sample.timestamp_sample,
                                     EKF3_MAG_MAX_AGE_US, &mag))
             {
+              if (!mag.calibrated ||
+                  source->yaw != EKF_SOURCE_BARO_OR_COMPASS)
+                {
+                  continue;
+                }
+
+              /* Before alignment completes the field feeds the heading
+               * initialisation; afterwards it corrects it. The core decides
+               * which, so this cannot get the order wrong.
+               */
+
+              if (!status.core.initialized)
+                {
+                  ekf_core_add_align_mag(&status.core, mag.field);
+                  status.mag_align_used++;
+                }
+              else
+                {
+                  ekf_core_fuse_mag(&status.core, mag.field,
+                                    status.declination,
+                                    status.mag_expected,
+                                    status.yaw_noise, status.yaw_gate);
+                }
             }
         }
 

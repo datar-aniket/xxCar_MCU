@@ -30,6 +30,11 @@ struct ekf3_status_s
   uint32_t horizon_ms;        /* EK3_DELAY_MS as read at start */
   float    alt_noise;         /* EK3_ALT_M_NSE as read at start */
   float    alt_gate;          /* EK3_ALT_I_GATE as read at start */
+  float    declination;       /* EK3_MAG_DEC, radians */
+  float    yaw_noise;         /* EK3_YAW_M_NSE as read at start */
+  float    yaw_gate;          /* EK3_YAW_I_GATE as read at start */
+  float    mag_expected;      /* CAL_MAG0_FIELD, Gauss */
+  uint32_t mag_align_used;    /* fields handed to alignment */
   uint32_t mag_in;            /* vehicle_mag messages queued */
   uint32_t baro_in;           /* vehicle_baro messages queued */
   uint32_t imu_overflow;      /* mirrored from the ring */
