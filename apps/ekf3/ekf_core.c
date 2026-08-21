@@ -1650,8 +1650,35 @@ int ekf_core_fuse_baro(FAR struct ekf_core_s *ekf, float pressure_hpa,
 
 uint8_t ekf_core_solution_status(FAR const struct ekf_core_s *ekf)
 {
-  return ekf != NULL && ekf->initialized ?
-         EKF_SOLUTION_ATTITUDE | EKF_SOLUTION_YAW_RELATIVE : 0;
+  uint8_t status;
+
+  if (ekf == NULL || !ekf->initialized)
+    {
+      return 0;
+    }
+
+  /* Roll and pitch come from gravity, which is always available. Heading is
+   * relative until a magnetometer makes it absolute - Flash B.
+   */
+
+  status = EKF_SOLUTION_ATTITUDE | EKF_SOLUTION_YAW_RELATIVE;
+
+  /* Vertical validity is a claim about the barometer actually correcting,
+   * not about it being selected. A sustained rejection run withdraws it
+   * while leaving attitude alone.
+   */
+
+  if (ekf->baro_have_reference && ekf->baro_accept_count > 0 &&
+      ekf->baro_consecutive_rejects < EKF_BARO_REJECT_RUN_MAX)
+    {
+      status |= EKF_SOLUTION_POSITION_VERT | EKF_SOLUTION_VELOCITY_VERT;
+    }
+
+  /* Nothing in this stage makes horizontal position or velocity observable.
+   * Claiming them would be worse than claiming nothing.
+   */
+
+  return status;
 }
 
 void ekf_core_output_predict(FAR const struct ekf_core_s *ekf,

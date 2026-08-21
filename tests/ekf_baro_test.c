@@ -226,6 +226,50 @@ static void test_uninitialised_refuses(void)
   assert(!fresh.baro_have_reference);
 }
 
+/* Vertical validity appears only once the barometer is actually correcting,
+ * and disappears on a sustained rejection run. Horizontal validity never
+ * appears: nothing in this stage makes it observable, and claiming it would
+ * be worse than claiming nothing.
+ */
+
+static void test_solution_status_vertical(void)
+{
+  uint8_t status;
+  int i;
+
+  align_core();
+
+  status = ekf_core_solution_status(&g_core);
+  assert((status & EKF_SOLUTION_ATTITUDE) != 0);
+  assert((status & EKF_SOLUTION_YAW_RELATIVE) != 0);
+  assert((status & EKF_SOLUTION_YAW_ABSOLUTE) == 0);
+  assert((status & EKF_SOLUTION_POSITION_VERT) == 0);
+
+  assert(ekf_core_fuse_baro(&g_core, 1013.25f, 2.0f, 5.0f) == -2);
+
+  for (i = 0; i < 10; i++)
+    {
+      assert(ekf_core_fuse_baro(&g_core, 1013.25f, 2.0f, 5.0f) == 1);
+    }
+
+  status = ekf_core_solution_status(&g_core);
+  assert((status & EKF_SOLUTION_POSITION_VERT) != 0);
+  assert((status & EKF_SOLUTION_VELOCITY_VERT) != 0);
+  assert((status & EKF_SOLUTION_POSITION_HORIZ) == 0);
+  assert((status & EKF_SOLUTION_VELOCITY_HORIZ) == 0);
+
+  /* A sustained rejection run withdraws the claim, and attitude survives it. */
+
+  for (i = 0; i < (int)EKF_BARO_REJECT_RUN_MAX + 1; i++)
+    {
+      ekf_core_fuse_baro(&g_core, 913.25f, 2.0f, 5.0f);
+    }
+
+  status = ekf_core_solution_status(&g_core);
+  assert((status & EKF_SOLUTION_POSITION_VERT) == 0);
+  assert((status & EKF_SOLUTION_ATTITUDE) != 0);
+}
+
 int main(void)
 {
   test_height_at_reference_is_zero();
@@ -238,6 +282,7 @@ int main(void)
   test_reduces_vertical_velocity_variance();
   test_realignment_discards_reference();
   test_uninitialised_refuses();
+  test_solution_status_vertical();
 
   puts("ekf_baro: height sign, reference capture and gating verified - OK");
   return 0;

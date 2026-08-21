@@ -17,8 +17,15 @@
 #define EKF_STATE_DIM             15
 #define EKF_COVARIANCE_INTERVAL    4
 
-#define EKF_SOLUTION_ATTITUDE     (1u << 0)
-#define EKF_SOLUTION_YAW_RELATIVE (1u << 1)
+/* Mirrors the ESTIMATOR_* bits in uorb_msgs.h. */
+
+#define EKF_SOLUTION_ATTITUDE       (1u << 0)
+#define EKF_SOLUTION_YAW_RELATIVE   (1u << 1)
+#define EKF_SOLUTION_YAW_ABSOLUTE   (1u << 2)
+#define EKF_SOLUTION_VELOCITY_HORIZ (1u << 3)
+#define EKF_SOLUTION_VELOCITY_VERT  (1u << 4)
+#define EKF_SOLUTION_POSITION_HORIZ (1u << 5)
+#define EKF_SOLUTION_POSITION_VERT  (1u << 6)
 
 #define EKF_P_INDEX(row, column) \
   ((row) * EKF_STATE_DIM + (column))

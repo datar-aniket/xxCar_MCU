@@ -215,10 +215,22 @@ struct vehicle_imu_s
  * the full internal 15-state covariance, not separately filtered metrics.
  */
 
-#define ESTIMATOR_ATTITUDE_VALID  (1u << 0)
-#define ESTIMATOR_YAW_RELATIVE    (1u << 1)
-#define ESTIMATOR_VELOCITY_VALID  (1u << 2)
-#define ESTIMATOR_POSITION_VALID  (1u << 3)
+/* Granular output validity. Bits 0 and 1 keep the values and meanings they
+ * have always had.
+ *
+ * Bits 2 and 3 are REDEFINED: they were ESTIMATOR_VELOCITY_VALID and
+ * ESTIMATOR_POSITION_VALID. That is a breaking change to this topic's
+ * meaning, and it is safe only because velocity and position have been
+ * advertised invalid since this estimator existed and no consumer reads them.
+ */
+
+#define ESTIMATOR_ATTITUDE_VALID  (1u << 0)  /* roll and pitch */
+#define ESTIMATOR_YAW_RELATIVE    (1u << 1)  /* heading, arbitrary datum */
+#define ESTIMATOR_YAW_ABSOLUTE    (1u << 2)  /* heading against north */
+#define ESTIMATOR_VELOCITY_HORIZ  (1u << 3)
+#define ESTIMATOR_VELOCITY_VERT   (1u << 4)
+#define ESTIMATOR_POSITION_HORIZ  (1u << 5)
+#define ESTIMATOR_POSITION_VERT   (1u << 6)
 
 struct estimator_state_s
 {
