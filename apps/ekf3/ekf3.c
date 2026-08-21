@@ -126,11 +126,31 @@ static void fill_output(FAR const struct ekf_core_s *core,
   output->instance = 0;
 }
 
-static void drain_imu(int sub, FAR struct ekf3_status_s *status)
-{
-  int drained = 0;
+/* Take exactly ONE fresh IMU packet into the ring. Returns false when there
+ * is nothing left to read.
+ *
+ * One per iteration, not all of them. Draining every pending packet and
+ * publishing once afterwards makes the output rate the rate at which this
+ * task happens to be SCHEDULED rather than the rate at which data arrives -
+ * which collapsed a 400 Hz topic to about 270 Hz, since the task typically
+ * woke with one and a half packets waiting.
+ *
+ * It also kept the published timestamp_sample identical across every
+ * publication in an iteration, because the newest ring entry - which is what
+ * the output is re-propagated to - had not moved.
+ *
+ * Nothing is lost by taking one: poll() returns immediately while packets
+ * are still pending, so a task that falls behind spins until it catches up.
+ *
+ * Stale packets are skipped rather than returned, so one arriving late
+ * cannot cost this iteration its publication.
+ */
 
-  while (drained++ < EKF3_DRAIN_MAX)
+static bool take_imu_sample(int sub, FAR struct ekf3_status_s *status)
+{
+  int skipped = 0;
+
+  while (skipped++ < EKF3_DRAIN_MAX)
     {
       struct vehicle_imu_s message;
       struct ekf_imu_sample_s sample;
@@ -138,7 +158,7 @@ static void drain_imu(int sub, FAR struct ekf3_status_s *status)
 
       if (orb_copy(ORB_ID(vehicle_imu), sub, &message) < 0)
         {
-          return;
+          return false;
         }
 
       now = now_us();
@@ -152,7 +172,10 @@ static void drain_imu(int sub, FAR struct ekf3_status_s *status)
 
       fill_core_sample(&message, &sample);
       ekf_delay_push_imu(&g_delay, &sample);
+      return true;
     }
+
+  return false;
 }
 
 static void drain_mag(int sub, FAR struct ekf3_status_s *status)
@@ -343,9 +366,22 @@ static int ekf3_daemon(int argc, FAR char *argv[])
           break;
         }
 
-      drain_imu(subscriber, &status);
       drain_mag(mag_sub, &status);
       drain_baro(baro_sub, &status);
+
+      /* One packet in, at most one publication out, so estimator_state keeps
+       * the input's rate and every publication carries a distinct sample
+       * time. With nothing new there is nothing to say.
+       */
+
+      if (!take_imu_sample(subscriber, &status))
+        {
+          status.imu_overflow = g_delay.imu_overflow_count;
+          status.mag_overflow = g_delay.mag_overflow_count;
+          status.baro_overflow = g_delay.baro_overflow_count;
+          status_publish(&status);
+          continue;
+        }
 
       now = now_us();
       horizon = ekf_delay_horizon_time(&g_delay, now);
