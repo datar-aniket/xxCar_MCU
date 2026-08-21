@@ -311,6 +311,27 @@ static const struct param_def_s g_params[] =
   { "EK3_ALT_I_GATE", PARAM_TYPE_FLOAT, F32(5.0f), F32(1.0f), F32(100.0f),
     "Barometer height innovation gate (sigma)" },
 
+  /* ---- EKF aiding: magnetic heading -------------------------------------
+   * EK3_MAG_DEC is the angle from TRUE north to MAGNETIC north, positive
+   * east. There is no GPS to look it up from, so it is entered per location.
+   * Left at zero the estimator produces magnetic heading, not true heading -
+   * adequate if consumers need only a consistent absolute reference, wrong
+   * if they need north.
+   *
+   * EK3_YAW_M_NSE takes ArduPilot's default of 0.5 rad, far looser than a
+   * compass's actual accuracy. That is intentional on their part and worth
+   * keeping: a loose measurement noise makes the filter lean on the gyro
+   * between updates and limits how hard one disturbed reading can pull the
+   * heading. It is the first thing to tune once the path is proven.
+   */
+
+  { "EK3_MAG_DEC", PARAM_TYPE_FLOAT, F32(0.0f), F32(-180.0f), F32(180.0f),
+    "Magnetic declination, true to magnetic, +east (deg)" },
+  { "EK3_YAW_M_NSE", PARAM_TYPE_FLOAT, F32(0.5f), F32(0.01f), F32(1.5f),
+    "Yaw measurement noise (rad)" },
+  { "EK3_YAW_I_GATE", PARAM_TYPE_FLOAT, F32(5.0f), F32(1.0f), F32(100.0f),
+    "Yaw innovation gate (sigma)" },
+
   /* ---- Logging (on request only; these choose WHAT gets logged) ---------- */
 
   { "LOG_ENABLE", PARAM_TYPE_INT32, I32(0), I32(0), I32(1),

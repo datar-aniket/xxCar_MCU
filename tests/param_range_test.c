@@ -287,6 +287,59 @@ static void test_estimator_horizon_and_baro_bounds(void)
     }
 }
 
+/* Magnetic heading. Declination defaults to zero, which yields MAGNETIC
+ * heading rather than true - correct as a default, because there is no GPS
+ * to look the real value up from and guessing one would be worse than
+ * reporting the raw magnetic reference.
+ */
+
+static void test_magnetic_heading_bounds(void)
+{
+  float value;
+
+  if (param_find("EK3_MAG_DEC") < 0 ||
+      param_find("EK3_YAW_M_NSE") < 0 ||
+      param_find("EK3_YAW_I_GATE") < 0)
+    {
+      fail("magnetic heading schema is incomplete");
+      return;
+    }
+
+  if (param_get_f32("EK3_MAG_DEC", &value) < 0 || value != 0.0f)
+    {
+      fail("declination does not default to zero");
+    }
+
+  if (param_get_f32("EK3_YAW_M_NSE", &value) < 0 ||
+      fabsf(value - 0.5f) > 1.0e-6f)
+    {
+      fail("yaw measurement noise default is not 0.5 rad");
+    }
+
+  /* Declination is an angle: both signs are meaningful and both extremes
+   * are reachable. A clamp at zero would silently make west declination
+   * unusable.
+   */
+
+  if (param_set_f32("EK3_MAG_DEC", -13.5f) < 0 ||
+      param_get_f32("EK3_MAG_DEC", &value) < 0 ||
+      fabsf(value + 13.5f) > 1.0e-6f)
+    {
+      fail("west declination was not retained");
+    }
+
+  if (param_set_f32("EK3_MAG_DEC", 400.0f) != -ERANGE ||
+      param_get_f32("EK3_MAG_DEC", &value) < 0 || value != 180.0f)
+    {
+      fail("declination did not clamp to +/-180 degrees");
+    }
+
+  if (param_set_f32("EK3_MAG_DEC", 0.0f) < 0)
+    {
+      fail("could not restore zero declination");
+    }
+}
+
 int main(void)
 {
   param_init();
@@ -299,6 +352,7 @@ int main(void)
   test_other_selector_also_protected();
   test_extrinsic_parameter_bounds();
   test_estimator_horizon_and_baro_bounds();
+  test_magnetic_heading_bounds();
 
   if (g_fail != 0)
     {
