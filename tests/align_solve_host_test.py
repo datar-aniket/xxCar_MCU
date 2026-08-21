@@ -11,8 +11,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "tools"))
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
 from align_solve import (GRAVITY, POSITIONS, SNAP_LIMIT_DEG, AlignError,
-                         accel_rotation, is_mirrored, orthonormalise,
-                         snap)
+                         accel_rotation, integrate_attitude, is_mirrored,
+                         earth_up, mag_rotation, orthonormalise, snap)
 from rotation_table import ROTATIONS
 
 # ROLL_180_YAW_90 (10) and PITCH_180_YAW_270 (27) are the same rotation by
@@ -261,6 +261,153 @@ def test_accel_refuses_non_perpendicular_axes():
         assert False, "accepted non-perpendicular axes"
 
 
+def _sweep(count=600, dt=0.02, seed=11):
+    """A rich three-axis rotation, and the attitudes it produces."""
+    rng = np.random.default_rng(seed)
+    t = np.arange(count) * dt
+    gyro = np.stack((1.2 * np.sin(2 * np.pi * 0.30 * t),
+                     1.0 * np.sin(2 * np.pi * 0.21 * t + 1.0),
+                     0.9 * np.sin(2 * np.pi * 0.13 * t + 2.0)), axis=1)
+    gyro += rng.normal(0.0, 0.002, gyro.shape)
+    return gyro, dt
+
+
+def _mag_for(rotation, gyro, dt, field=0.45, dip_deg=60.0, noise=0.0,
+             seed=5):
+    """What a magnetometer at `rotation` reads through that sweep.
+
+    Also returns the vehicle-frame accelerometer, because the dip check needs
+    to know which way is up in the sweep's earth frame - integrate_attitude
+    starts at identity, so that frame is not gravity-aligned by itself.
+    """
+    rng = np.random.default_rng(seed)
+    attitude = integrate_attitude(gyro, dt)
+    dip = np.radians(dip_deg)
+    # Northern hemisphere in a z-UP frame: the field dips DOWN, so -z.
+    earth = np.array((field * np.cos(dip), 0.0, -field * np.sin(dip)))
+    # Specific force points UP, and the synthetic sweep starts level, so up in
+    # the earth frame is +z.
+    up_earth = np.array((0.0, 0.0, GRAVITY))
+
+    out = []
+    accel = []
+
+    for c in attitude:
+        body = c.T @ earth
+        sensor = np.asarray(rotation).T @ body
+
+        if noise:
+            sensor = sensor + rng.normal(0.0, noise, 3)
+
+        out.append(sensor)
+        accel.append(c.T @ up_earth)
+
+    return np.array(out), np.array(accel), attitude
+
+
+def test_mag_recovers_every_representable_rotation():
+    gyro, dt = _sweep()
+
+    for value, matrix in ROTATIONS.items():
+        mag, accel, attitude = _mag_for(matrix, gyro, dt)
+        got = mag_rotation(mag, attitude, earth_up(accel, attitude))
+        assert got["enum"] == CANONICAL.get(value, value), (value,
+                                                            got["enum"])
+        assert got["snap_deg"] < 1.0
+
+
+def test_mag_recovers_the_field_magnitude():
+    gyro, dt = _sweep()
+    mag, accel, attitude = _mag_for(ROTATIONS[0], gyro, dt, field=0.47)
+    got = mag_rotation(mag, attitude, earth_up(accel, attitude))
+    assert abs(got["field"] - 0.47) < 0.01
+
+
+def test_mag_detects_a_mirrored_sensor():
+    """The IST8310 case: y negated. The solver must say mirrored rather than
+    converge on the nearest 180-degree rotation.
+    """
+    gyro, dt = _sweep()
+    mag, accel, attitude = _mag_for(np.diag((1.0, -1.0, 1.0)), gyro, dt)
+    got = mag_rotation(mag, attitude, earth_up(accel, attitude))
+    assert got["mirrored"]
+    assert got["enum"] is None
+
+
+def test_mag_refuses_a_single_axis_sweep():
+    """Rotation about one axis only leaves the solve rank-deficient. It must
+    refuse and name the axis, not return a confident wrong answer.
+    """
+    count, dt = 600, 0.02
+    t = np.arange(count) * dt
+    gyro = np.stack((1.2 * np.sin(2 * np.pi * 0.3 * t),
+                     np.zeros(count), np.zeros(count)), axis=1)
+    mag, accel, attitude = _mag_for(ROTATIONS[0], gyro, dt)
+
+    try:
+        mag_rotation(mag, attitude, np.array((0.0, 0.0, 1.0)))
+    except AlignError as exc:
+        assert "axis" in str(exc).lower()
+    else:
+        assert False, "accepted a single-axis sweep"
+
+
+def test_mag_refuses_excess_noise():
+    gyro, dt = _sweep()
+    mag, accel, attitude = _mag_for(ROTATIONS[0], gyro, dt, noise=0.25)
+
+    try:
+        mag_rotation(mag, attitude, earth_up(accel, attitude))
+    except AlignError as exc:
+        assert "residual" in str(exc).lower() or "still" in str(exc).lower()
+    else:
+        assert False, "accepted a field that does not hold still"
+
+
+def test_mag_works_in_the_southern_hemisphere():
+    """Dip up instead of down. Without the hemisphere setting every southern
+    board would be reported as mirrored.
+    """
+    gyro, dt = _sweep()
+    mag, accel, attitude = _mag_for(ROTATIONS[2], gyro, dt, dip_deg=-55.0)
+    got = mag_rotation(mag, attitude, earth_up(accel, attitude),
+                       dip_down=False)
+    assert got["enum"] == 2
+    assert not got["mirrored"]
+
+
+def test_mag_refuses_a_dip_too_shallow_to_judge():
+    """Near the magnetic equator the field is almost horizontal, so its sign
+    against gravity carries no information and a mirrored sensor genuinely
+    cannot be told from a rotated one. Refuse rather than guess.
+    """
+    gyro, dt = _sweep()
+    mag, accel, attitude = _mag_for(ROTATIONS[0], gyro, dt, dip_deg=3.0)
+
+    try:
+        mag_rotation(mag, attitude, earth_up(accel, attitude))
+    except AlignError as exc:
+        assert "dip" in str(exc).lower()
+    else:
+        assert False, "accepted a dip too shallow to judge handedness"
+
+
+def test_earth_up_refuses_a_translated_sweep():
+    """If the vehicle was carried rather than turned in place, the dynamic
+    accelerations do not average out and up cannot be recovered.
+    """
+    gyro, dt = _sweep()
+    attitude = integrate_attitude(gyro, dt)
+    tiny = np.full((len(attitude), 3), 0.01)
+
+    try:
+        earth_up(tiny, attitude)
+    except AlignError as exc:
+        assert "up" in str(exc).lower()
+    else:
+        assert False, "accepted an accelerometer that cannot show up"
+
+
 def main():
     test_table_matches_c()
     test_table_is_proper_signed_permutations()
@@ -280,6 +427,14 @@ def main():
     test_accel_refuses_a_missing_position()
     test_accel_refuses_two_positions_on_the_same_axis()
     test_accel_refuses_non_perpendicular_axes()
+    test_mag_recovers_every_representable_rotation()
+    test_mag_recovers_the_field_magnitude()
+    test_mag_detects_a_mirrored_sensor()
+    test_mag_refuses_a_single_axis_sweep()
+    test_mag_refuses_excess_noise()
+    test_mag_works_in_the_southern_hemisphere()
+    test_mag_refuses_a_dip_too_shallow_to_judge()
+    test_earth_up_refuses_a_translated_sweep()
     print("align_solve: rotation table verified against rotation.c - OK")
 
 

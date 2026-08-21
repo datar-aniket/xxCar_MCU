@@ -215,3 +215,213 @@ def accel_rotation(positions):
 
     return {"matrix": matrix, "enum": value, "snap_deg": angle,
             "mirrored": False, "residual_g": residual}
+
+
+def _skew(v):
+    return np.array(((0.0, -v[2], v[1]),
+                     (v[2], 0.0, -v[0]),
+                     (-v[1], v[0], 0.0)))
+
+
+def integrate_attitude(gyro, dt):
+    """Relative attitude across a segment, starting at identity.
+
+    Body-to-earth, where "earth" is the frame the vehicle occupied at the
+    first sample. A sweep is seconds long, so gyro drift over the window is
+    negligible and no bias handling is needed.
+    """
+    gyro = np.asarray(gyro, dtype=float)
+    out = np.empty((len(gyro), 3, 3))
+    c = np.eye(3)
+
+    for i, w in enumerate(gyro):
+        out[i] = c
+        norm = float(np.linalg.norm(w))
+        angle = norm * dt
+
+        if angle > 1e-12:
+            axis = w / norm
+            k = _skew(axis)
+            # Rodrigues, exact rather than first-order: a hand sweep reaches
+            # several rad/s and the small-angle form would accumulate a
+            # visible bias over hundreds of samples.
+            step = (np.eye(3) + np.sin(angle) * k
+                    + (1.0 - np.cos(angle)) * (k @ k))
+            c = c @ step
+
+    return out
+
+
+def _excitation(attitude):
+    """How much each body axis was rotated ABOUT across the segment.
+
+    Measured from the spread of where each body axis points over the sweep. An
+    axis that never moved contributes nothing and leaves the solve
+    rank-deficient - which returns a confident wrong answer rather than an
+    error, so it has to be caught here.
+    """
+    spread = []
+
+    for axis in range(3):
+        pointed = np.array([c[:, axis] for c in attitude])
+        spread.append(float(np.linalg.norm(pointed.std(axis=0))))
+
+    return np.array(spread)
+
+
+_MIN_EXCITATION = 0.15
+_MAX_MAG_RESIDUAL = 0.08   # fraction of field magnitude
+
+
+def _require_excitation(attitude):
+    weak = _excitation(attitude) < _MIN_EXCITATION
+
+    if weak.any():
+        names = ", ".join("xyz"[i] for i in np.nonzero(weak)[0])
+        raise AlignError(
+            f"the sweep did not rotate about the {names} axis - the solve "
+            "would be rank-deficient; rotate about all three and repeat")
+
+
+def _kabsch(wanted, measured):
+    """Proper rotation minimising ||wanted - R @ measured||, row-stacked.
+
+    Always forces det=+1. Letting this return a reflection would be pointless
+    here: see mag_rotation, where -R fits the data exactly as well as R, so a
+    reflection is never distinguishable by residual alone.
+    """
+    u, _s, vt = np.linalg.svd(wanted.T @ measured)
+    d = np.diag((1.0, 1.0, float(np.sign(np.linalg.det(u @ vt)))))
+    return u @ d @ vt
+
+
+def _mag_fit(mag, attitude, iterations):
+    """Alternating least squares for the rotation that stills the field.
+
+    Given R the best earth field is the mean; given the field the best R is a
+    Kabsch fit. Seeded at identity.
+    """
+    r = np.eye(3)
+
+    for _ in range(iterations):
+        earth = np.einsum("nij,jk,nk->ni", attitude, r, mag)
+        target = earth.mean(axis=0)
+        wanted = np.einsum("nji,j->ni", attitude, target)
+        r = _kabsch(wanted, mag)
+
+    earth = np.einsum("nij,jk,nk->ni", attitude, r, mag)
+    target = earth.mean(axis=0)
+    residual = float(np.linalg.norm(earth - target, axis=1).mean())
+    return r, target, residual
+
+
+def earth_up(accel, attitude):
+    """The UP direction in the sweep's earth frame, from the accelerometer.
+
+    integrate_attitude starts at identity, so its "earth" frame is whatever
+    attitude the vehicle happened to be in at the first sample - arbitrary, and
+    emphatically not gravity-aligned. Recovering which way is up is what lets
+    the magnetometer's dip be checked, and dip is the only thing that resolves
+    the sign ambiguity below.
+
+    Specific force points up at rest. During a sweep there are dynamic
+    accelerations too, but the vehicle is rotated roughly in place rather than
+    carried anywhere, so those average out and gravity is what is left.
+
+    accel must already be in the VEHICLE frame - rotate it by the Phase A
+    result before calling.
+    """
+    accel = np.asarray(accel, dtype=float)
+    attitude = np.asarray(attitude, dtype=float)
+
+    if len(accel) != len(attitude):
+        raise AlignError("accelerometer and attitude series do not match")
+
+    mean = np.einsum("nij,nj->ni", attitude, accel).mean(axis=0)
+    norm = float(np.linalg.norm(mean))
+
+    if norm < 0.5 * GRAVITY:
+        raise AlignError(
+            f"cannot find up from the accelerometer (mean {norm:.2f} m/s^2) - "
+            "the sweep translated the vehicle instead of rotating it in place")
+
+    return mean / norm
+
+
+# The dip must be at least this fraction of the field before its SIGN can be
+# trusted. Near the magnetic equator the field is almost horizontal and the
+# handedness test genuinely has nothing to work with; 0.15 is about 9 degrees
+# of dip.
+_MIN_DIP_FRACTION = 0.15
+
+
+def mag_rotation(mag, attitude, up, dip_down=True, iterations=60):
+    """Rotation sensor -> vehicle, by making the earth field stop moving.
+
+    The field is constant in the earth frame, so the correct rotation is the
+    one that minimises the variance of C(t) @ R @ m(t). This never needs to
+    know what the field actually is, and it is heading-free - it does not care
+    how the operator turned the vehicle, which is exactly why the static
+    positions cannot be used for the magnetometer.
+
+    THAT CRITERION CANNOT SEE A MIRRORED SENSOR. -I commutes with every
+    rotation, so C(t)(-I)C(t)^T m_e = -m_e is just as constant as +m_e: R and
+    -R fit identically, and in 3D exactly one of that pair is a reflection. No
+    amount of comparing residuals distinguishes them.
+
+    What does distinguish them is which way the recovered field POINTS. The
+    earth's field dips downward in the northern hemisphere, so with `up` known
+    from the accelerometer the sign of field . up decides it. If the proper fit
+    disagrees with the expected dip, the sensor is mirrored and the true
+    mapping is -R.
+    """
+    mag = np.asarray(mag, dtype=float)
+    attitude = np.asarray(attitude, dtype=float)
+    up = np.asarray(up, dtype=float)
+
+    if len(mag) != len(attitude) or len(mag) < 50:
+        raise AlignError("magnetometer and attitude series do not match, or "
+                         "the sweep is too short")
+
+    _require_excitation(attitude)
+
+    r, target, residual = _mag_fit(mag, attitude, iterations)
+    field = float(np.linalg.norm(target))
+
+    if field < 1e-6:
+        raise AlignError("recovered field is zero - is the magnetometer "
+                         "producing?")
+
+    if residual / field > _MAX_MAG_RESIDUAL:
+        raise AlignError(
+            f"the field does not hold still after alignment (residual "
+            f"{residual / field:.1%} of {field:.3f} G) - interference, a bad "
+            "calibration, or the sweep was too fast for the sample rate")
+
+    dip = float(np.dot(target, up))
+
+    if abs(dip) / field < _MIN_DIP_FRACTION:
+        raise AlignError(
+            f"magnetic dip is only {np.degrees(np.arcsin(dip / field)):.1f} "
+            "degrees - too shallow to tell a mirrored sensor from a rotated "
+            "one; this test does not work near the magnetic equator")
+
+    mirrored = (dip < 0.0) != bool(dip_down)
+
+    if mirrored:
+        # The true mapping is -R, which is the reflection the criterion could
+        # not rule out. Report it; do not store it.
+        return {"matrix": -r, "enum": None, "snap_deg": None,
+                "mirrored": True, "field": field, "residual": residual,
+                "dip_deg": float(np.degrees(np.arcsin(dip / field)))}
+
+    value, angle = snap(r)
+
+    if angle > SNAP_LIMIT_DEG:
+        raise AlignError(
+            f"magnetometer is {angle:.1f} degrees from the nearest "
+            f"representable rotation (limit {SNAP_LIMIT_DEG:.0f})")
+
+    return {"matrix": r, "enum": value, "snap_deg": angle,
+            "mirrored": False, "field": field, "residual": residual,
+            "dip_deg": float(np.degrees(np.arcsin(dip / field)))}
