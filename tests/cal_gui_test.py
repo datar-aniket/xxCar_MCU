@@ -202,6 +202,14 @@ def main():
     check(app.cal_on.get() is True,
           "calibrated preview not enabled after mag save")
 
+    # The fourth, GUI-derived trace is the useful verification: corrected
+    # X/Y/Z change while rotating, but |B| should remain nearly flat.
+    app.active = 2
+    app.plot.set_series(["x", "y", "z", "|B|"])
+    app._on_batch((2, 1, 0, 20000, [[0.3, 0.4, 0.0]]))
+    check(abs(app.plot.v[3][0] - 0.5) < 1.0e-6,
+          "mag magnitude verification trace is incorrect")
+
     # ---- recording -------------------------------------------------------
     app._on_json({"evt": "ok", "what": "record",
                   "path": "/fs/microsd/log/log_007.ulg", "topics": 4})

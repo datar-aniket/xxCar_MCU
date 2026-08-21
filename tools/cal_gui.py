@@ -15,6 +15,7 @@ Run:  python3 tools/cal_gui.py
 """
 
 import json
+import math
 import queue
 import struct
 import threading
@@ -800,11 +801,11 @@ class App(tk.Tk):
             self.tree.insert("", "end", iid=iid, text=text, values=(hz,),
                              tags=tags)
 
-    def _axes(self, s):
+    def _axes(self, labels):
         for w in self.axis_box.winfo_children():
             w.destroy()
         self.axis_vars = []
-        for i, lab in enumerate(s["labels"]):
+        for i, lab in enumerate(labels):
             var = tk.BooleanVar(value=True)
             self.axis_vars.append(var)
             row = ttk.Frame(self.axis_box, style="Card.TFrame")
@@ -834,9 +835,12 @@ class App(tk.Tk):
             return
         self.active = s["id"]
         self.drops = self.rx = 0
-        self.plot.set_series(s["labels"])
+        labels = list(s["labels"])
+        if s["name"].startswith("mag"):
+            labels.append("|B|")
+        self.plot.set_series(labels)
         self.plot.unit = s["unit"]
-        self._axes(s)
+        self._axes(labels)
         self._apply()
         self._restream()
 
@@ -1181,6 +1185,10 @@ class App(tk.Tk):
         sid, seq, t0, dt, rows = payload
         if sid != self.active:
             return False
+        sensor = self.sensors.get(sid)
+        if sensor and sensor["name"].startswith("mag"):
+            rows = [list(row) + [math.sqrt(sum(v * v for v in row[:3]))]
+                    for row in rows]
         prev = self.last_seq.get(sid)
         if prev is not None and (prev + 1) & 0xFF != seq:
             self.drops += 1
