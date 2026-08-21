@@ -1206,8 +1206,20 @@ static bool low_dynamics_updates(FAR struct ekf_core_s *ekf)
   return true;
 }
 
-static bool nominal_predict(FAR struct ekf_core_s *ekf,
-                            FAR const struct ekf_imu_sample_s *sample)
+/* One strapdown integration step, shared by the filter and the output
+ * predictor.
+ *
+ * Factored out rather than duplicated because two copies of this that were
+ * meant to be identical would be a slow, silent divergence between what the
+ * filter believes and what the vehicle is told. Returns false when the step
+ * produces a non-finite state.
+ */
+
+static bool strapdown_step(FAR float quaternion[4], FAR float velocity[3],
+                           FAR float position[3],
+                           FAR const float gyro_bias[3],
+                           FAR const float accel_bias[3],
+                           FAR const struct ekf_imu_sample_s *sample)
 {
   float corrected_angle[3];
   float corrected_velocity[3];
@@ -1226,15 +1238,15 @@ static bool nominal_predict(FAR struct ekf_core_s *ekf,
   for (axis = 0; axis < 3; axis++)
     {
       corrected_angle[axis] = sample->delta_angle[axis] -
-                              ekf->gyro_bias[axis] * dt;
+                              gyro_bias[axis] * dt;
       corrected_velocity[axis] = sample->delta_velocity[axis] -
-                                 ekf->accel_bias[axis] * dt;
+                                 accel_bias[axis] * dt;
       half_angle[axis] = 0.5f * corrected_angle[axis];
-      old_velocity[axis] = ekf->velocity[axis];
+      old_velocity[axis] = velocity[axis];
     }
 
   rotation_vector_quaternion(half_angle, half_increment);
-  quaternion_multiply(ekf->quaternion, half_increment, midpoint);
+  quaternion_multiply(quaternion, half_increment, midpoint);
 
   if (!quaternion_normalize(midpoint))
     {
@@ -1255,22 +1267,36 @@ static bool nominal_predict(FAR struct ekf_core_s *ekf,
 
   for (axis = 0; axis < 3; axis++)
     {
-      ekf->velocity[axis] += nav_delta_velocity[axis];
-      ekf->position[axis] +=
+      velocity[axis] += nav_delta_velocity[axis];
+      position[axis] +=
         (old_velocity[axis] + 0.5f * nav_delta_velocity[axis]) * dt;
-      ekf->covariance_delta_angle[axis] += sample->delta_angle[axis];
-      ekf->covariance_delta_velocity[axis] +=
-        sample->delta_velocity[axis];
     }
 
   rotation_vector_quaternion(corrected_angle, increment);
-  quaternion_multiply(ekf->quaternion, increment, next_quaternion);
-  memcpy(ekf->quaternion, next_quaternion, sizeof(ekf->quaternion));
+  quaternion_multiply(quaternion, increment, next_quaternion);
+  memcpy(quaternion, next_quaternion, 4 * sizeof(float));
 
-  if (!quaternion_normalize(ekf->quaternion) ||
-      !vector_finite(ekf->velocity) || !vector_finite(ekf->position))
+  return quaternion_normalize(quaternion) &&
+         vector_finite(velocity) && vector_finite(position);
+}
+
+static bool nominal_predict(FAR struct ekf_core_s *ekf,
+                            FAR const struct ekf_imu_sample_s *sample)
+{
+  float dt = sample->delta_angle_dt;
+  int axis;
+
+  if (!strapdown_step(ekf->quaternion, ekf->velocity, ekf->position,
+                      ekf->gyro_bias, ekf->accel_bias, sample))
     {
       return false;
+    }
+
+  for (axis = 0; axis < 3; axis++)
+    {
+      ekf->covariance_delta_angle[axis] += sample->delta_angle[axis];
+      ekf->covariance_delta_velocity[axis] +=
+        sample->delta_velocity[axis];
     }
 
   ekf->covariance_dt += dt;
@@ -1401,4 +1427,53 @@ uint8_t ekf_core_solution_status(FAR const struct ekf_core_s *ekf)
 {
   return ekf != NULL && ekf->initialized ?
          EKF_SOLUTION_ATTITUDE | EKF_SOLUTION_YAW_RELATIVE : 0;
+}
+
+void ekf_core_output_predict(FAR const struct ekf_core_s *ekf,
+                             FAR const struct ekf_imu_sample_s *const *samples,
+                             uint16_t count,
+                             FAR struct ekf_output_s *out)
+{
+  uint16_t index;
+
+  if (ekf == NULL || out == NULL)
+    {
+      return;
+    }
+
+  memset(out, 0, sizeof(*out));
+  memcpy(out->quaternion, ekf->quaternion, sizeof(out->quaternion));
+  memcpy(out->velocity, ekf->velocity, sizeof(out->velocity));
+  memcpy(out->position, ekf->position, sizeof(out->position));
+  out->timestamp_sample = ekf->last_timestamp_sample;
+  out->valid = ekf->initialized;
+
+  if (!ekf->initialized || samples == NULL)
+    {
+      return;
+    }
+
+  for (index = 0; index < count; index++)
+    {
+      FAR const struct ekf_imu_sample_s *sample = samples[index];
+
+      if (sample == NULL)
+        {
+          break;
+        }
+
+      /* The bias estimates are the filter's, held fixed across the replay.
+       * They change on the scale of minutes; the replay spans milliseconds.
+       */
+
+      if (!strapdown_step(out->quaternion, out->velocity, out->position,
+                          ekf->gyro_bias, ekf->accel_bias, sample))
+        {
+          out->valid = false;
+          return;
+        }
+
+      out->timestamp_sample = sample->timestamp_sample;
+      out->samples_replayed++;
+    }
 }

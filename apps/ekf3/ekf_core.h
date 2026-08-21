@@ -112,7 +112,40 @@ struct ekf_core_s
   float max_gravity_yaw_suppressed;
 };
 
+/* Current-time state, re-propagated from the delayed filter state.
+ *
+ * Deliberately small: quaternion, velocity, position and nothing else. The
+ * alternative - copying the whole ~1.2 kB ekf_core_s and propagating that -
+ * would move covariance the predictor never touches, 400 times a second.
+ */
+
+struct ekf_output_s
+{
+  float    quaternion[4];
+  float    velocity[3];
+  float    position[3];
+  uint64_t timestamp_sample;
+  uint16_t samples_replayed;
+  bool     valid;
+};
+
 void ekf_core_init(FAR struct ekf_core_s *ekf);
+
+/* Replay count samples forward from the filter state.
+ *
+ * samples is an array of POINTERS because the source is a ring buffer and the
+ * entries are not contiguous. With count == 0 the result is the filter state
+ * itself, which is what makes a zero horizon inert at the publication end as
+ * well as at the input end.
+ *
+ * Does not modify ekf. It is called on every publication; a predictor that
+ * mutated the core would integrate the same samples twice.
+ */
+
+void ekf_core_output_predict(FAR const struct ekf_core_s *ekf,
+                             FAR const struct ekf_imu_sample_s *const *samples,
+                             uint16_t count,
+                             FAR struct ekf_output_s *out);
 int ekf_core_process(FAR struct ekf_core_s *ekf,
                      FAR const struct ekf_imu_sample_s *sample);
 uint8_t ekf_core_solution_status(FAR const struct ekf_core_s *ekf);
