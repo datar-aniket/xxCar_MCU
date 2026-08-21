@@ -239,6 +239,48 @@ static uint16_t cal_crc16(FAR const uint8_t *d, size_t n)
  * inferred anywhere.
  */
 
+/****************************************************************************
+ * Alignment streaming
+ *
+ * A SECOND streaming path, deliberately separate from the single-sensor one
+ * below rather than a generalisation of it.
+ *
+ * Alignment needs several sensors at once on a shared timebase - correlating
+ * a magnetometer against a gyro is the whole procedure - and the existing
+ * stream is single-sensor by construction. Generalising it looked like the
+ * obvious move until the call sites were counted: st_idx is threaded through
+ * the calibration preview, the six-position accelerometer run and the
+ * magnetometer staging, none of which have anything to do with alignment and
+ * all of which would have to be re-reasoned about. That is a large risk to
+ * the path you calibrate THROUGH, for no benefit.
+ *
+ * So this path shares the frame format and nothing else. It always sends raw
+ * floats: no calibration is applied, and no integer quantisation, because a
+ * rotation solve wants the sensor's own numbers and the bandwidth is trivial
+ * at these rates.
+ ****************************************************************************/
+
+#define CAL_ALIGN_MAX 6
+
+struct cal_align_s
+{
+  int      idx;                    /* index into g_sensors, -1 = unused */
+  int      sub;
+  uint8_t  seq;
+  uint8_t  nbatch;
+  uint32_t batch_t0;
+  uint64_t batch_since;
+  float    acc[CAL_BATCH_MAX * CAL_MAX_VALUES];
+};
+
+/* File scope, not on the stack: CAL_BATCH_MAX * CAL_MAX_VALUES floats times
+ * six entries is several kilobytes and the cal task's stack cannot hold it.
+ */
+
+static struct cal_align_s g_align[CAL_ALIGN_MAX];
+static int      g_align_n;
+static uint32_t g_align_dt_us;
+
 static int cal_read_values(int i, int sub, FAR float *out, FAR uint32_t *t_us)
 {
   FAR const struct orb_metadata *meta = cal_meta(i);
@@ -541,6 +583,121 @@ static bool cal_parse_mag_candidate(FAR const char *text,
   return true;
 }
 
+/* Index of a sensor by name, or -1. */
+
+static int cal_find(FAR const char *name)
+{
+  int i;
+
+  for (i = 0; i < CAL_NSENSORS; i++)
+    {
+      if (strcmp(name, g_sensors[i].name) == 0)
+        {
+          return i;
+        }
+    }
+
+  return -1;
+}
+
+static void cal_align_stop(void)
+{
+  int i;
+
+  for (i = 0; i < g_align_n; i++)
+    {
+      if (g_align[i].sub >= 0)
+        {
+          orb_unsubscribe(g_align[i].sub);
+        }
+
+      g_align[i].sub = -1;
+      g_align[i].idx = -1;
+    }
+
+  g_align_n = 0;
+}
+
+/* Emit one alignment frame. Same wire format as the single-sensor stream -
+ * the host decoder already routes on the sensor id byte - but always float
+ * encoded, so the host receives exactly what the driver produced.
+ */
+
+static int cal_align_flush(int fd, FAR struct cal_align_s *a,
+                           FAR uint8_t *frame)
+{
+  FAR const struct cal_sensor_s *s = &g_sensors[a->idx];
+  size_t nv = (size_t)a->nbatch * s->nvalues;
+  size_t bytes = nv * sizeof(float);
+  size_t off;
+  uint16_t len;
+  uint16_t crc;
+
+  memcpy(frame + 14, a->acc, bytes);
+  len = (uint16_t)(11 + bytes);
+
+  frame[0] = CAL_SYNC;
+  frame[1] = (uint8_t)(len & 0xff);
+  frame[2] = (uint8_t)(len >> 8);
+  frame[3] = (uint8_t)a->idx;
+  frame[4] = a->seq++;
+  memcpy(frame + 5, &a->batch_t0, 4);
+  frame[9]  = (uint8_t)(g_align_dt_us & 0xff);
+  frame[10] = (uint8_t)(g_align_dt_us >> 8);
+  frame[11] = a->nbatch;
+  frame[12] = s->nvalues;
+  frame[13] = CAL_ENC_F32;
+
+  off = 14 + bytes;
+  crc = cal_crc16(frame + 1, off - 1);
+  frame[off]     = (uint8_t)(crc & 0xff);
+  frame[off + 1] = (uint8_t)(crc >> 8);
+
+  a->nbatch = 0;
+  return cal_write(fd, frame, off + 2);
+}
+
+/* Drain what one alignment stream has ready, flushing when the batch is full
+ * or has waited long enough.
+ */
+
+static int cal_align_service(int fd, FAR struct cal_align_s *a,
+                             FAR uint8_t *frame)
+{
+  if (a->idx < 0 || a->sub < 0)
+    {
+      return OK;
+    }
+
+  while (a->nbatch < CAL_BATCH_MAX)
+    {
+      uint32_t t_us = 0;
+      FAR float *slot = &a->acc[(size_t)a->nbatch *
+                                g_sensors[a->idx].nvalues];
+
+      if (cal_read_values(a->idx, a->sub, slot, &t_us) != OK)
+        {
+          break;
+        }
+
+      if (a->nbatch == 0)
+        {
+          a->batch_t0 = t_us;
+          a->batch_since = cal_now_us();
+        }
+
+      a->nbatch++;
+    }
+
+  if (a->nbatch > 0 &&
+      (a->nbatch >= CAL_BATCH_MAX || cal_now_us() - a->batch_since >= 20000))
+    {
+      return cal_align_flush(fd, a, frame);
+    }
+
+  return OK;
+}
+
 /* Average a stretch of samples and say whether the board was actually still.
  *
  * Stillness is judged by the standard deviation over the window, not by
@@ -737,9 +894,10 @@ int cal_session(void)
 
   while (!done)
     {
-      struct pollfd pfd[2];
+      struct pollfd pfd[2 + CAL_ALIGN_MAX];
       nfds_t nfds = 1;
       char ch;
+      int ai;
 
       pfd[0].fd     = fd;
       pfd[0].events = POLLIN;
@@ -759,9 +917,32 @@ int cal_session(void)
           nfds = 2;
         }
 
+      /* Alignment streams wake the loop the same way, so their rate is the
+       * sensors' rather than the loop's.
+       */
+
+      for (ai = 0; ai < g_align_n; ai++)
+        {
+          if (g_align[ai].sub >= 0)
+            {
+              pfd[nfds].fd     = g_align[ai].sub;
+              pfd[nfds].events = POLLIN;
+              nfds++;
+            }
+        }
+
       if (poll(pfd, nfds, 200) < 0 && errno != EINTR)
         {
           break;
+        }
+
+      for (ai = 0; ai < g_align_n; ai++)
+        {
+          if (cal_align_service(fd, &g_align[ai], frame) < 0)
+            {
+              cal_align_stop();
+              break;
+            }
         }
 
       if ((pfd[0].revents & (POLLHUP | POLLERR)) != 0)
@@ -1038,6 +1219,164 @@ int cal_session(void)
           cal_emit(fd, "{\"evt\":\"ok\",\"what\":\"calib\",\"on\":%s}\n",
                    apply.on ? "true" : "false");
         }
+      /* `align <hz> <name> [<name> ...]` - stream several sensors at once on
+       * a shared timebase, raw. `align stop` ends it.
+       */
+
+      else if (strncmp(line, "align", 5) == 0 &&
+               (line[5] == '\0' || line[5] == ' '))
+        {
+          FAR char *arg = line[5] == ' ' ? line + 6 : NULL;
+          FAR char *save = NULL;
+          FAR char *tok;
+          long hz;
+          int started = 0;
+          int slot[CAL_ALIGN_MAX];
+          int n = 0;
+          int k;
+
+          if (arg == NULL || strcmp(arg, "stop") == 0)
+            {
+              cal_align_stop();
+              cal_emit(fd, "{\"evt\":\"ok\",\"what\":\"align stop\"}\n");
+              continue;
+            }
+
+          tok = strtok_r(arg, " ", &save);
+          hz = tok != NULL ? strtol(tok, NULL, 10) : 0;
+
+          if (hz < 1 || hz > 400)
+            {
+              cal_emit(fd, "{\"evt\":\"error\","
+                           "\"msg\":\"rate must be 1-400\"}\n");
+              continue;
+            }
+
+          /* Resolve every name BEFORE subscribing to any of them. A partially
+           * started set would leave the host solving against a sensor that is
+           * silently absent, which is worse than refusing outright.
+           */
+
+          while ((tok = strtok_r(NULL, " ", &save)) != NULL)
+            {
+              int idx = cal_find(tok);
+
+              if (idx < 0)
+                {
+                  cal_emit(fd, "{\"evt\":\"error\",\"msg\":\"no such "
+                               "sensor\",\"name\":\"%s\"}\n", tok);
+                  n = -1;
+                  break;
+                }
+
+              if (n >= CAL_ALIGN_MAX)
+                {
+                  cal_emit(fd, "{\"evt\":\"error\",\"msg\":\"at most %d "
+                               "sensors at once\"}\n", CAL_ALIGN_MAX);
+                  n = -1;
+                  break;
+                }
+
+              slot[n++] = idx;
+            }
+
+          if (n <= 0)
+            {
+              if (n == 0)
+                {
+                  cal_emit(fd, "{\"evt\":\"error\","
+                               "\"msg\":\"no sensors named\"}\n");
+                }
+
+              continue;
+            }
+
+          cal_align_stop();
+          g_align_dt_us = (uint32_t)(1000000 / hz);
+
+          for (k = 0; k < n; k++)
+            {
+              int sub = cal_subscribe(slot[k]);
+
+              if (sub < 0)
+                {
+                  cal_emit(fd, "{\"evt\":\"error\",\"msg\":\"sensor not "
+                               "available\",\"name\":\"%s\"}\n",
+                           g_sensors[slot[k]].name);
+                  cal_align_stop();
+                  started = -1;
+                  break;
+                }
+
+              orb_set_interval(sub, g_align_dt_us);
+              g_align[g_align_n].idx = slot[k];
+              g_align[g_align_n].sub = sub;
+              g_align[g_align_n].seq = 0;
+              g_align[g_align_n].nbatch = 0;
+              g_align_n++;
+              started++;
+            }
+
+          if (started < 0)
+            {
+              continue;
+            }
+
+          cal_emit(fd, "{\"evt\":\"ok\",\"what\":\"align\",\"n\":%d,"
+                       "\"hz\":%ld}\n", started, hz);
+        }
+
+      /* `still <name>` - a stillness-checked average of one sensor.
+       *
+       * The deviation is REPORTED, not judged here. Alignment tolerates far
+       * more movement than a calibration does - it only has to pick among 24
+       * discrete rotations - so cal6's threshold would reject positions
+       * alignment is perfectly happy with.
+       */
+
+      else if (strncmp(line, "still ", 6) == 0)
+        {
+          float mean[3];
+          float sd[3];
+          int idx = cal_find(line + 6);
+          int sub;
+          int n;
+
+          if (idx < 0)
+            {
+              cal_emit(fd, "{\"evt\":\"error\","
+                           "\"msg\":\"no such sensor\"}\n");
+              continue;
+            }
+
+          sub = cal_subscribe(idx);
+
+          if (sub < 0)
+            {
+              cal_emit(fd, "{\"evt\":\"error\","
+                           "\"msg\":\"sensor not available\"}\n");
+              continue;
+            }
+
+          orb_set_interval(sub, 2000);         /* 500 Hz is ample */
+          n = cal_capture_still(idx, sub, 4000, mean, sd);
+          orb_unsubscribe(sub);
+
+          if (n < 0)
+            {
+              cal_emit(fd, "{\"evt\":\"error\","
+                           "\"msg\":\"sensor produced nothing\"}\n");
+              continue;
+            }
+
+          cal_emit(fd, "{\"evt\":\"still\",\"sensor\":\"%s\","
+                       "\"mean\":[%.5f,%.5f,%.5f],"
+                       "\"sd\":[%.5f,%.5f,%.5f],\"n\":%d}\n",
+                   g_sensors[idx].name,
+                   (double)mean[0], (double)mean[1], (double)mean[2],
+                   (double)sd[0], (double)sd[1], (double)sd[2], n);
+        }
+
       else if (strncmp(line, "record ", 7) == 0)
         {
 #ifdef CONFIG_XXCAR_LOGGER
