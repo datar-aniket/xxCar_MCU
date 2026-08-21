@@ -288,6 +288,29 @@ static const struct param_def_s g_params[] =
     "EKF sources bits: 0 fuse all velocity, 1 align extnav to flow",
     PARAM_RANGE_ENUM },
 
+  /* ---- EKF aiding: fusion horizon and barometer -------------------------
+   * EK3_DELAY_MS is how far behind real time the filter runs. Measurements
+   * are fused against the state as it was when they were sampled, and the
+   * published state is re-propagated forward to the present.
+   *
+   * It defaults to ZERO, which drains the ring every tick and reproduces the
+   * pre-horizon behaviour exactly. That is deliberate: a default should
+   * reproduce known-good behaviour, and it lets the timing change be proven
+   * inert on hardware before any measurement starts correcting anything.
+   *
+   * The maximum is bounded by the IMU ring in ekf_delay.h - a larger horizon
+   * would ask for samples the ring no longer holds. Gates are plain sigma;
+   * ArduPilot stores its as integer sigma x 100, which is a historical
+   * artefact this codebase has no reason to copy.
+   */
+
+  { "EK3_DELAY_MS", PARAM_TYPE_INT32, I32(0), I32(0), I32(100),
+    "EKF fusion horizon behind real time (ms)" },
+  { "EK3_ALT_M_NSE", PARAM_TYPE_FLOAT, F32(2.0f), F32(0.1f), F32(100.0f),
+    "Barometer height measurement noise (m)" },
+  { "EK3_ALT_I_GATE", PARAM_TYPE_FLOAT, F32(5.0f), F32(1.0f), F32(100.0f),
+    "Barometer height innovation gate (sigma)" },
+
   /* ---- Logging (on request only; these choose WHAT gets logged) ---------- */
 
   { "LOG_ENABLE", PARAM_TYPE_INT32, I32(0), I32(0), I32(1),

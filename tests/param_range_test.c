@@ -231,6 +231,62 @@ static void test_extrinsic_parameter_bounds(void)
     }
 }
 
+/* The horizon and barometer parameters Flash A introduces.
+ *
+ * EK3_DELAY_MS defaults to zero so a fresh flash reproduces the pre-horizon
+ * attitude exactly and the timing rewrite can be proven inert before any
+ * measurement starts correcting. Its maximum is bounded by the IMU ring, so a
+ * larger value must clamp rather than index past the end of it.
+ */
+
+static void test_estimator_horizon_and_baro_bounds(void)
+{
+  float value;
+  int32_t horizon;
+
+  if (param_find("EK3_DELAY_MS") < 0 ||
+      param_find("EK3_ALT_M_NSE") < 0 ||
+      param_find("EK3_ALT_I_GATE") < 0)
+    {
+      fail("estimator horizon/barometer schema is incomplete");
+      return;
+    }
+
+  if (param_get_i32("EK3_DELAY_MS", &horizon) < 0 || horizon != 0)
+    {
+      fail("EK3_DELAY_MS does not default to an inert zero horizon");
+    }
+
+  if (param_get_f32("EK3_ALT_M_NSE", &value) < 0 ||
+      fabsf(value - 2.0f) > 1.0e-6f)
+    {
+      fail("barometer measurement noise default is not 2.0 m");
+    }
+
+  if (param_get_f32("EK3_ALT_I_GATE", &value) < 0 ||
+      fabsf(value - 5.0f) > 1.0e-6f)
+    {
+      fail("barometer innovation gate default is not 5 sigma");
+    }
+
+  if (param_set_i32("EK3_DELAY_MS", 500) != -ERANGE ||
+      param_get_i32("EK3_DELAY_MS", &horizon) < 0 || horizon != 100)
+    {
+      fail("EK3_DELAY_MS did not clamp to the IMU ring's bound");
+    }
+
+  if (param_set_i32("EK3_DELAY_MS", 30) < 0 ||
+      param_get_i32("EK3_DELAY_MS", &horizon) < 0 || horizon != 30)
+    {
+      fail("a valid horizon was not retained");
+    }
+
+  if (param_set_i32("EK3_DELAY_MS", 0) < 0)
+    {
+      fail("could not restore the zero horizon");
+    }
+}
+
 int main(void)
 {
   param_init();
@@ -242,6 +298,7 @@ int main(void)
   test_scalar_in_range_is_untouched();
   test_other_selector_also_protected();
   test_extrinsic_parameter_bounds();
+  test_estimator_horizon_and_baro_bounds();
 
   if (g_fail != 0)
     {
