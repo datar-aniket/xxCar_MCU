@@ -106,12 +106,22 @@ static int ekf3_daemon(int argc, FAR char *argv[])
 {
   struct ekf3_status_s status;
   struct pollfd pollfd;
+  char source_error[80];
   int subscriber = -1;
   int publisher = -1;
   int result = EXIT_FAILURE;
 
   memset(&status, 0, sizeof(status));
   ekf_core_init(&status.core);
+
+  if (ekf_sources_load(&status.sources, source_error,
+                       sizeof(source_error)) < 0)
+    {
+      syslog(LOG_ERR, "[ekf3] source configuration rejected: %s\n",
+             source_error);
+      status_publish(&status);
+      goto out;
+    }
 
   subscriber = orb_subscribe(ORB_ID(vehicle_imu));
   publisher = estimator_state_advertise();
@@ -130,7 +140,8 @@ static int ekf3_daemon(int argc, FAR char *argv[])
   status_publish(&status);
 
   syslog(LOG_INFO,
-         "[ekf3] 15-state prediction 400 Hz, covariance 100 Hz\n");
+         "[ekf3] 15-state prediction 400 Hz, covariance 100 Hz, sources %u\n",
+         status.sources.active_set + 1u);
 
   while (!g_should_stop)
     {

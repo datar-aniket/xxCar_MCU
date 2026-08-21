@@ -57,7 +57,7 @@ endif
 
 ifeq ($(CONFIG_SENSORS),y)
 CSRCS += fmuv6c_sensors.c
-CSRCS += ms5611.c
+CSRCS += ms5611.c ms5611_comp.c
 CSRCS += ist8310.c
 ifeq ($(CONFIG_SPI),y)
 CSRCS += fmuv6c_imu_time.c

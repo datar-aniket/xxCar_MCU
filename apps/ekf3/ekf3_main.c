@@ -79,6 +79,16 @@ static void print_status(void)
          " restarts %" PRIu32 "\n",
          (double)progress, core->align_samples,
          core->alignment_restart_count);
+  {
+    FAR const struct ekf_source_set_s *source =
+      &status.sources.set[status.sources.active_set];
+
+    printf("  sources set %u POSXY=%u VELXY=%u POSZ=%u VELZ=%u YAW=%u"
+           " options=0x%02x\n",
+           status.sources.active_set + 1u, source->position_xy,
+           source->velocity_xy, source->position_z, source->velocity_z,
+           source->yaw, status.sources.options);
+  }
   printf("  dynamics %s dwell %.2fs accel_rms %.3f gyro_rms %.4f"
          " entries %" PRIu32 " exits %" PRIu32 "\n",
          core->low_dynamics ? "LOW" : "MOTION",

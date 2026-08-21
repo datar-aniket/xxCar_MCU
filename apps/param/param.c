@@ -166,6 +166,57 @@ static const struct param_def_s g_params[] =
   { "SENS_MAG0_ROT",  PARAM_TYPE_INT32, I32(0), I32(0), I32(37),
     "IST8310 rotation relative to the board", PARAM_RANGE_ENUM },
 
+  /* Sensor extrinsics in the body frame. The existing enum supplies the exact
+   * coarse mounting rotation; calibration later supplies a small arbitrary
+   * residual rotation vector. Positions are metres from the chosen vehicle
+   * body origin. IMU0 is the default reference and therefore starts at zero.
+   *
+   * A magnetometer position is mechanical metadata, not a tumble-calibration
+   * result: translation is unobservable in a uniform magnetic field.
+   */
+
+  { "SENS_IMU0_POS_X", PARAM_TYPE_FLOAT, F32(0.0f), F32(-0.5f), F32(0.5f),
+    "IMU0 X position from body origin (m)" },
+  { "SENS_IMU0_POS_Y", PARAM_TYPE_FLOAT, F32(0.0f), F32(-0.5f), F32(0.5f),
+    "IMU0 Y position from body origin (m)" },
+  { "SENS_IMU0_POS_Z", PARAM_TYPE_FLOAT, F32(0.0f), F32(-0.5f), F32(0.5f),
+    "IMU0 Z position from body origin (m)" },
+  { "SENS_IMU1_POS_X", PARAM_TYPE_FLOAT, F32(0.0f), F32(-0.5f), F32(0.5f),
+    "IMU1 X position from body origin (m)" },
+  { "SENS_IMU1_POS_Y", PARAM_TYPE_FLOAT, F32(0.0f), F32(-0.5f), F32(0.5f),
+    "IMU1 Y position from body origin (m)" },
+  { "SENS_IMU1_POS_Z", PARAM_TYPE_FLOAT, F32(0.0f), F32(-0.5f), F32(0.5f),
+    "IMU1 Z position from body origin (m)" },
+  { "SENS_MAG0_POS_X", PARAM_TYPE_FLOAT, F32(0.0f), F32(-0.5f), F32(0.5f),
+    "Mag0 X position from body origin (m)" },
+  { "SENS_MAG0_POS_Y", PARAM_TYPE_FLOAT, F32(0.0f), F32(-0.5f), F32(0.5f),
+    "Mag0 Y position from body origin (m)" },
+  { "SENS_MAG0_POS_Z", PARAM_TYPE_FLOAT, F32(0.0f), F32(-0.5f), F32(0.5f),
+    "Mag0 Z position from body origin (m)" },
+
+  { "CAL_IMU1_RVX", PARAM_TYPE_FLOAT, F32(0.0f), F32(-0.35f), F32(0.35f),
+    "IMU1 fine rotation vector X after coarse mounting rotation (rad)" },
+  { "CAL_IMU1_RVY", PARAM_TYPE_FLOAT, F32(0.0f), F32(-0.35f), F32(0.35f),
+    "IMU1 fine rotation vector Y after coarse mounting rotation (rad)" },
+  { "CAL_IMU1_RVZ", PARAM_TYPE_FLOAT, F32(0.0f), F32(-0.35f), F32(0.35f),
+    "IMU1 fine rotation vector Z after coarse mounting rotation (rad)" },
+  { "CAL_MAG0_RVX", PARAM_TYPE_FLOAT, F32(0.0f), F32(-0.35f), F32(0.35f),
+    "Mag0 fine rotation vector X after coarse mounting rotation (rad)" },
+  { "CAL_MAG0_RVY", PARAM_TYPE_FLOAT, F32(0.0f), F32(-0.35f), F32(0.35f),
+    "Mag0 fine rotation vector Y after coarse mounting rotation (rad)" },
+  { "CAL_MAG0_RVZ", PARAM_TYPE_FLOAT, F32(0.0f), F32(-0.35f), F32(0.35f),
+    "Mag0 fine rotation vector Z after coarse mounting rotation (rad)" },
+  { "CAL_IMU1_R_ERR", PARAM_TYPE_FLOAT, F32(0.0f), F32(0.0f), F32(1.0f),
+    "IMU1 extrinsic rotation fit RMS (rad)" },
+  { "CAL_IMU1_P_ERR", PARAM_TYPE_FLOAT, F32(0.0f), F32(0.0f), F32(0.5f),
+    "IMU1 lever-arm fit uncertainty (m)" },
+  { "CAL_MAG0_R_ERR", PARAM_TYPE_FLOAT, F32(0.0f), F32(0.0f), F32(1.0f),
+    "Mag0 extrinsic rotation fit RMS (rad)" },
+  { "CAL_IMU1_EXT_OK", PARAM_TYPE_INT32, I32(0), I32(0), I32(1),
+    "IMU1 rotation and lever-arm calibration valid", PARAM_RANGE_ENUM },
+  { "CAL_MAG0_EXT_OK", PARAM_TYPE_INT32, I32(0), I32(0), I32(1),
+    "Mag0 extrinsic rotation calibration valid", PARAM_RANGE_ENUM },
+
   /* Which IMU feeds vehicle_acceleration / vehicle_angular_velocity. There is
    * no voting: with two sensors a disagreement cannot be resolved by majority,
    * and picking one deliberately is more honest than averaging two that may
@@ -189,6 +240,53 @@ static const struct param_def_s g_params[] =
     "Corrected gyro notch centre (Hz, 0=off)" },
   { "SENS_GYR_NF_BW", PARAM_TYPE_FLOAT, F32(20.0f), F32(1.0f), F32(400.0f),
     "Corrected gyro notch bandwidth (Hz)" },
+
+  /* ---- EKF aiding source sets -------------------------------------------
+   * Numeric values match ArduPilot EKF3 so configurations remain readable:
+   * 0 none, 1 baro/compass, 2 range/GPS yaw, 3 GPS, 4 beacon,
+   * 5 optical flow, 6 external navigation, 7 wheel speed, 8 GSF yaw.
+   * Category-specific validation in ekf_sources.c rejects combinations that
+   * have a number but no physical meaning (for example barometer VELZ).
+   */
+
+  { "EK3_SRC1_POSXY", PARAM_TYPE_INT32, I32(0), I32(0), I32(6),
+    "Primary horizontal position source", PARAM_RANGE_ENUM },
+  { "EK3_SRC1_VELXY", PARAM_TYPE_INT32, I32(5), I32(0), I32(7),
+    "Primary horizontal velocity source", PARAM_RANGE_ENUM },
+  { "EK3_SRC1_POSZ", PARAM_TYPE_INT32, I32(1), I32(0), I32(6),
+    "Primary vertical position source", PARAM_RANGE_ENUM },
+  { "EK3_SRC1_VELZ", PARAM_TYPE_INT32, I32(0), I32(0), I32(6),
+    "Primary vertical velocity source", PARAM_RANGE_ENUM },
+  { "EK3_SRC1_YAW", PARAM_TYPE_INT32, I32(1), I32(0), I32(8),
+    "Primary yaw source", PARAM_RANGE_ENUM },
+
+  { "EK3_SRC2_POSXY", PARAM_TYPE_INT32, I32(6), I32(0), I32(6),
+    "Secondary horizontal position source", PARAM_RANGE_ENUM },
+  { "EK3_SRC2_VELXY", PARAM_TYPE_INT32, I32(6), I32(0), I32(7),
+    "Secondary horizontal velocity source", PARAM_RANGE_ENUM },
+  { "EK3_SRC2_POSZ", PARAM_TYPE_INT32, I32(6), I32(0), I32(6),
+    "Secondary vertical position source", PARAM_RANGE_ENUM },
+  { "EK3_SRC2_VELZ", PARAM_TYPE_INT32, I32(6), I32(0), I32(6),
+    "Secondary vertical velocity source", PARAM_RANGE_ENUM },
+  { "EK3_SRC2_YAW", PARAM_TYPE_INT32, I32(6), I32(0), I32(8),
+    "Secondary yaw source", PARAM_RANGE_ENUM },
+
+  { "EK3_SRC3_POSXY", PARAM_TYPE_INT32, I32(0), I32(0), I32(6),
+    "Tertiary horizontal position source", PARAM_RANGE_ENUM },
+  { "EK3_SRC3_VELXY", PARAM_TYPE_INT32, I32(0), I32(0), I32(7),
+    "Tertiary horizontal velocity source", PARAM_RANGE_ENUM },
+  { "EK3_SRC3_POSZ", PARAM_TYPE_INT32, I32(0), I32(0), I32(6),
+    "Tertiary vertical position source", PARAM_RANGE_ENUM },
+  { "EK3_SRC3_VELZ", PARAM_TYPE_INT32, I32(0), I32(0), I32(6),
+    "Tertiary vertical velocity source", PARAM_RANGE_ENUM },
+  { "EK3_SRC3_YAW", PARAM_TYPE_INT32, I32(0), I32(0), I32(8),
+    "Tertiary yaw source", PARAM_RANGE_ENUM },
+  { "EK3_SRC_SET", PARAM_TYPE_INT32, I32(1), I32(1), I32(3),
+    "Active EKF source set (1 primary, 2 secondary, 3 tertiary)",
+    PARAM_RANGE_ENUM },
+  { "EK3_SRC_OPTIONS", PARAM_TYPE_INT32, I32(0), I32(0), I32(3),
+    "EKF sources bits: 0 fuse all velocity, 1 align extnav to flow",
+    PARAM_RANGE_ENUM },
 
   /* ---- Logging (on request only; these choose WHAT gets logged) ---------- */
 

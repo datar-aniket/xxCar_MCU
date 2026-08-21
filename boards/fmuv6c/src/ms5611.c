@@ -13,7 +13,7 @@
  *     (temperature drifts slowly and only feeds the compensation),
  * so a sampling cycle is essentially all sleep -> near-0% CPU.
  *
- * Compensation math is the first-order algorithm from the MS5611 datasheet.
+ * Compensation uses the datasheet's 64-bit first- and second-order algorithm.
  * Output: pressure in hPa/mbar, temperature in degrees C (sensor_baro units).
  ****************************************************************************/
 
@@ -34,6 +34,7 @@
 
 #include "fmuv6c.h"
 #include "ms5611.h"
+#include "ms5611_comp.h"
 
 #if defined(CONFIG_SENSORS) && defined(CONFIG_I2C)
 
@@ -51,6 +52,11 @@
 #define MS5611_I2C_FREQ       400000
 #define MS5611_MIN_INTERVAL   20000  /* us -> 50 Hz cap; interval >= conv (~9ms) */
 #define MS5611_DEFAULT_INTERVAL 100000 /* us -> 10 Hz default */
+#define MS5611_CONVERSION_US  9040
+#define MS5611_PRESSURE_MIN_HPA 10.0f
+#define MS5611_PRESSURE_MAX_HPA 1200.0f
+#define MS5611_TEMP_MIN_C      -40.0f
+#define MS5611_TEMP_MAX_C       85.0f
 
 /* Which conversion is currently in flight (pipelined with the interval sleep) */
 
@@ -66,9 +72,9 @@ struct ms5611_dev_s
   struct sensor_lowerhalf_s lower;
   FAR struct i2c_master_s  *i2c;
   uint8_t                   addr;
-  uint16_t                  c[7];      /* PROM: c[1..6] = C1..C6 */
-  int32_t                   dt;        /* cached dT (from last temp read) */
-  int32_t                   temp;      /* cached TEMP in 0.01 C */
+  uint16_t                  c[8];      /* complete PROM including CRC */
+  uint32_t                  raw_temperature;
+  uint64_t                  pending_timestamp;
   uint32_t                  count;     /* sample counter for temp decimation */
   uint8_t                   pending;   /* conversion in flight (D1/D2) */
   uint32_t                  interval;  /* us */
@@ -140,9 +146,9 @@ static int ms5611_configure(FAR struct ms5611_dev_s *dev)
   ms5611_sendcmd(dev, MS5611_CMD_RESET);
   nxsig_usleep(5000);
 
-  /* Read PROM coefficients C1..C6 (words 1..6) */
+  /* Read the complete PROM: C1..C6 and the factory CRC nibble. */
 
-  for (i = 1; i <= 6; i++)
+  for (i = 0; i <= 7; i++)
     {
       ret = ms5611_read(dev, MS5611_CMD_PROM_READ + (i << 1), buf, 2);
       if (ret < 0)
@@ -154,9 +160,10 @@ static int ms5611_configure(FAR struct ms5611_dev_s *dev)
       dev->c[i] = ((uint16_t)buf[0] << 8) | buf[1];
     }
 
-  if (dev->c[1] == 0 || dev->c[1] == 0xffff)
+  if (!ms5611_prom_valid(dev->c))
     {
-      snerr("ERROR: MS5611 bad PROM (C1=0x%04x)\n", dev->c[1]);
+      snerr("ERROR: MS5611 bad PROM or CRC (stored=%x computed=%x)\n",
+            dev->c[7] & 0x0f, ms5611_prom_crc4(dev->c));
       return -ENODEV;
     }
 
@@ -169,9 +176,19 @@ static int ms5611_configure(FAR struct ms5611_dev_s *dev)
 
 static void ms5611_start(FAR struct ms5611_dev_s *dev, uint8_t which)
 {
+  uint64_t trigger_timestamp = sensor_get_timestamp();
+
   ms5611_sendcmd(dev, which == MS5611_PENDING_D2 ?
                       MS5611_CMD_CONV_D2 : MS5611_CMD_CONV_D1);
   dev->pending = which;
+
+  if (which == MS5611_PENDING_D1)
+    {
+      /* Timestamp the centre of the ADC conversion, not the much later I2C
+       * read. At 10 Hz the old read timestamp was about 95 ms too new. */
+
+      dev->pending_timestamp = trigger_timestamp + MS5611_CONVERSION_US / 2;
+    }
 }
 
 static void ms5611_process(FAR struct ms5611_dev_s *dev, uint8_t was,
@@ -179,25 +196,31 @@ static void ms5611_process(FAR struct ms5611_dev_s *dev, uint8_t was,
 {
   if (was == MS5611_PENDING_D2)
     {
-      /* Temperature: update the cached dT + TEMP (feeds compensation) */
-
-      dev->dt   = (int32_t)raw - ((int32_t)dev->c[5] << 8);
-      dev->temp = 2000 + (int32_t)(((int64_t)dev->dt * dev->c[6]) >> 23);
+      dev->raw_temperature = raw;
     }
   else
     {
-      /* Pressure: compensate with cached dT and push a sample */
-
       struct sensor_baro baro;
-      int64_t off  = ((int64_t)dev->c[2] << 16) +
-                     (((int64_t)dev->c[4] * dev->dt) >> 7);
-      int64_t sens = ((int64_t)dev->c[1] << 15) +
-                     (((int64_t)dev->c[3] * dev->dt) >> 8);
-      int32_t p    = (int32_t)((((int64_t)raw * sens) >> 21) - off) >> 15;
+      struct ms5611_compensated_s compensated;
 
-      baro.timestamp   = sensor_get_timestamp();
-      baro.pressure    = (float)p / 100.0f;          /* hPa / mbar */
-      baro.temperature = (float)dev->temp / 100.0f;  /* deg C */
+      if (!ms5611_compensate(dev->c, raw, dev->raw_temperature,
+                             &compensated))
+        {
+          return;
+        }
+
+      baro.timestamp = dev->pending_timestamp;
+      baro.pressure = (float)compensated.pressure_centi_hpa / 100.0f;
+      baro.temperature = (float)compensated.temperature_centi_c / 100.0f;
+
+      if (baro.pressure < MS5611_PRESSURE_MIN_HPA ||
+          baro.pressure > MS5611_PRESSURE_MAX_HPA ||
+          baro.temperature < MS5611_TEMP_MIN_C ||
+          baro.temperature > MS5611_TEMP_MAX_C)
+        {
+          return;
+        }
+
       dev->lower.push_event(dev->lower.priv, &baro, sizeof(baro));
     }
 }

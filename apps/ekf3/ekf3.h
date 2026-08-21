@@ -11,6 +11,7 @@
 #include <stdint.h>
 
 #include "ekf_core.h"
+#include "ekf_sources.h"
 
 struct ekf3_status_s
 {
@@ -20,6 +21,7 @@ struct ekf3_status_s
   uint32_t publish_count;
   uint32_t publish_errors;
   uint32_t stale_count;
+  struct ekf_source_config_s sources;
   bool running;
 };
 

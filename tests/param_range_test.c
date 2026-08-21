@@ -198,6 +198,39 @@ static void test_nonfinite_float_is_refused(void)
     }
 }
 
+static void test_extrinsic_parameter_bounds(void)
+{
+  float value;
+  int32_t valid;
+
+  if (param_find("SENS_IMU1_POS_X") < 0 ||
+      param_find("CAL_IMU1_RVX") < 0 ||
+      param_find("CAL_MAG0_EXT_OK") < 0)
+    {
+      fail("extrinsic parameter schema is incomplete");
+      return;
+    }
+
+  if (param_set_f32("SENS_IMU1_POS_X", 2.0f) != -ERANGE ||
+      param_get_f32("SENS_IMU1_POS_X", &value) < 0 || value != 0.5f)
+    {
+      fail("extrinsic position did not clamp to its physical bound");
+    }
+
+  if (param_set_f32("CAL_IMU1_RVX", 0.1f) < 0 ||
+      param_get_f32("CAL_IMU1_RVX", &value) < 0 ||
+      fabsf(value - 0.1f) > 1.0e-6f)
+    {
+      fail("valid fine rotation was not retained");
+    }
+
+  if (param_set_i32("CAL_MAG0_EXT_OK", 2) >= 0 ||
+      param_get_i32("CAL_MAG0_EXT_OK", &valid) < 0 || valid != 0)
+    {
+      fail("extrinsic validity selector accepted an invalid value");
+    }
+}
+
 int main(void)
 {
   param_init();
@@ -208,6 +241,7 @@ int main(void)
   test_scalar_still_clamps_and_applies();
   test_scalar_in_range_is_untouched();
   test_other_selector_also_protected();
+  test_extrinsic_parameter_bounds();
 
   if (g_fail != 0)
     {
