@@ -18,7 +18,32 @@ static void usage(void)
 {
   printf("Usage: ekf3 start | stop | status\n"
          "  Requires imu_delta. Runs 400 Hz 15-state prediction and\n"
-         "  100 Hz covariance; this stage publishes attitude only.\n");
+         "  100 Hz covariance at a EK3_DELAY_MS fusion horizon.\n"
+         "  Barometric height is fused when EK3_SRCn_POSZ selects it and\n"
+         "  `sensors aux` is publishing vehicle_baro.\n");
+}
+
+/* The solution used to be one of two fixed strings. Now that validity is per
+ * state, print what is actually valid: a barometer that is correcting has to
+ * be distinguishable from one that is merely selected.
+ */
+
+static void print_solution(uint8_t status)
+{
+  if (status == 0)
+    {
+      printf("NONE");
+      return;
+    }
+
+  printf("%s%s%s%s%s%s",
+         (status & EKF_SOLUTION_ATTITUDE) ? "ATTITUDE " : "",
+         (status & EKF_SOLUTION_YAW_ABSOLUTE) ? "YAW_ABS " :
+           (status & EKF_SOLUTION_YAW_RELATIVE) ? "YAW_REL " : "",
+         (status & EKF_SOLUTION_VELOCITY_HORIZ) ? "VELXY " : "",
+         (status & EKF_SOLUTION_VELOCITY_VERT) ? "VELZ " : "",
+         (status & EKF_SOLUTION_POSITION_HORIZ) ? "POSXY " : "",
+         (status & EKF_SOLUTION_POSITION_VERT) ? "POSZ" : "");
 }
 
 static void print_status(void)
@@ -66,10 +91,11 @@ static void print_status(void)
       progress = 100.0f;
     }
 
-  printf("ekf3: %s, %s, solution %s\n",
+  printf("ekf3: %s, %s, solution ",
          status.running ? "running" : "stopped",
-         core->initialized ? "initialized" : "aligning",
-         core->initialized ? "ATTITUDE+REL_YAW" : "NONE");
+         core->initialized ? "initialized" : "aligning");
+  print_solution(ekf_core_solution_status(core));
+  printf("\n");
   printf("  output %" PRIu32 " %.2fHz predict %" PRIu32 " %.2fHz"
          " covariance %" PRIu32 " %.2fHz\n",
          status.publish_count, output_rate, core->predict_count,
@@ -89,6 +115,30 @@ static void print_status(void)
            source->velocity_xy, source->position_z, source->velocity_z,
            source->yaw, status.sources.options);
   }
+
+  printf("  horizon %" PRIu32 " ms  replay %u samples"
+         "  ring overflow imu %" PRIu32 " mag %" PRIu32 " baro %" PRIu32
+         "\n",
+         status.horizon_ms, status.output_replay,
+         status.imu_overflow, status.mag_overflow, status.baro_overflow);
+  printf("  aiding in  mag %" PRIu32 " (%s)  baro %" PRIu32 " (%s)\n",
+         status.mag_in, status.mag_available ? "subscribed" : "ABSENT",
+         status.baro_in, status.baro_available ? "subscribed" : "ABSENT");
+
+  if (core->baro_have_reference)
+    {
+      printf("  baro ref %.2f hPa  height %+.3f m  accept %" PRIu32
+             " reject %" PRIu32 " (run %" PRIu32 ") NIS %.3f\n",
+             (double)core->baro_reference_hpa,
+             (double)core->last_baro_height,
+             core->baro_accept_count, core->baro_reject_count,
+             core->baro_consecutive_rejects, (double)core->last_baro_nis);
+    }
+  else
+    {
+      printf("  baro no reference yet (noise %.2f m gate %.1f sigma)\n",
+             (double)status.alt_noise, (double)status.alt_gate);
+    }
   printf("  dynamics %s dwell %.2fs accel_rms %.3f gyro_rms %.4f"
          " entries %" PRIu32 " exits %" PRIu32 "\n",
          core->low_dynamics ? "LOW" : "MOTION",
@@ -96,19 +146,25 @@ static void print_status(void)
          (double)accel_rms, (double)gyro_rms,
          core->low_dynamics_entry_count,
          core->low_dynamics_exit_count);
-  printf("  attitude RPY %+.3f %+.3f %+.3f deg (yaw relative)\n",
+  printf("  attitude RPY %+.3f %+.3f %+.3f deg (yaw %s)\n",
          (double)(euler[0] * rad_to_deg),
          (double)(euler[1] * rad_to_deg),
-         (double)(euler[2] * rad_to_deg));
+         (double)(euler[2] * rad_to_deg),
+         (ekf_core_solution_status(core) & EKF_SOLUTION_YAW_ABSOLUTE) ?
+           "absolute" : "relative");
   printf("  quaternion %+.6f %+.6f %+.6f %+.6f\n",
          (double)core->quaternion[0], (double)core->quaternion[1],
          (double)core->quaternion[2], (double)core->quaternion[3]);
-  printf("  velocity NED %+.4f %+.4f %+.4f m/s [INVALID]\n",
+  printf("  velocity NED %+.4f %+.4f %+.4f m/s [%s]\n",
          (double)core->velocity[0], (double)core->velocity[1],
-         (double)core->velocity[2]);
-  printf("  position NED %+.4f %+.4f %+.4f m [INVALID]\n",
+         (double)core->velocity[2],
+         (ekf_core_solution_status(core) & EKF_SOLUTION_VELOCITY_VERT) ?
+           "VERT ONLY" : "INVALID");
+  printf("  position NED %+.4f %+.4f %+.4f m [%s]\n",
          (double)core->position[0], (double)core->position[1],
-         (double)core->position[2]);
+         (double)core->position[2],
+         (ekf_core_solution_status(core) & EKF_SOLUTION_POSITION_VERT) ?
+           "VERT ONLY" : "INVALID");
   printf("  gyro bias %+.6f %+.6f %+.6f rad/s\n",
          (double)core->gyro_bias[0], (double)core->gyro_bias[1],
          (double)core->gyro_bias[2]);
