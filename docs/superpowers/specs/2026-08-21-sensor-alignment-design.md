@@ -154,6 +154,9 @@ This never needs to know what the field actually is, and it is heading-free -
 it does not care how the operator turned the vehicle. Segment length is
 seconds, so gyro drift over the window is negligible.
 
+It determines the rotation only up to sign; see "Flip detection" for why, and
+for the dip test that resolves it.
+
 ### Optical flow
 
 Rate correlation against the IMU gyro. The flow topic reports integrated
@@ -166,13 +169,38 @@ Standard Kabsch forces `det = +1` through `diag(1, 1, det(U V^T))`, which
 would quietly turn a mirrored sensor into the nearest rotation. This is not
 hypothetical: the IST8310 is genuinely mirrored against the vehicle frame.
 
-So both fits are computed - the constrained proper rotation and the
-unconstrained best orthogonal matrix - and their residuals compared. If the
-reflection fits dramatically better, the sensor is mirrored, and that is
-reported and nothing is written. A mirrored sensor is either a known part
-property, which belongs in code as the IST8310 flip now does, or a wiring or
-driver fault. Both need a human; neither should be absorbed into a
-calibration.
+For the RATE sensors - optical flow, and the gyro cross-check - that works:
+a rate is a vector field over a rich rotation, so a reflection genuinely
+cannot fit, and comparing the constrained and unconstrained residuals
+identifies one. `det` means what it says.
+
+**For the magnetometer it does not work, and an earlier version of this spec
+was wrong to say it did.** Making the field hold still cannot see a mirrored
+sensor at all. `-I` commutes with every rotation, so
+`C(t)(-I)C(t)^T m_e = -m_e` is exactly as constant as `+m_e`: `R` and `-R`
+fit identically, and in 3D exactly one of that pair is a reflection. Comparing
+residuals compares noise to noise - measured, on a plain yaw 180, at 3e-08 for
+the proper fit against 1e-12 for the reflection, with the reflection winning
+on nothing at all.
+
+What separates them is which way the field POINTS. The earth's field dips
+downward in the northern hemisphere, so with `up` known the sign of
+`field . up` decides it. That costs two inputs:
+
+- **the accelerometer during the sweep.** `integrate_attitude` starts at
+  identity, so its earth frame is whatever attitude the vehicle happened to be
+  in at the first sample - arbitrary, and not gravity-aligned. Averaging the
+  lifted accelerometer recovers up, because the vehicle is turned in place and
+  dynamic accelerations average out.
+- **a hemisphere setting**, `dip_down`, defaulting to northern.
+
+Near the magnetic equator the field is almost horizontal and its sign carries
+no information, so a dip under about 9 degrees is refused rather than guessed.
+
+Whichever way it is found, a mirrored sensor is reported and nothing is
+written. It is either a known part property, which belongs in code as the
+IST8310 flip now does, or a wiring or driver fault. Both need a human; neither
+should be absorbed into a calibration.
 
 For the accelerometer the same test is simply `det` of the assembled columns,
 which is static and high-SNR and therefore the most reliable flip detection
@@ -254,6 +282,10 @@ The existing `2` came from motion correlation at 0.999 across three axes and
 cross-checks correctly against PX4's fmu-v6c values under the roll-180
 conjugation that negates a yaw. If this procedure disagrees, that is a real
 finding worth chasing, not a result to override.
+
+**The sweep must record the accelerometer.** Not for the IMUs - they are
+solved from the static positions - but because the magnetometer's handedness
+test needs to know which way is up in the sweep's earth frame.
 
 **Falsifying the hardcoded flip.** `mag_frame.c` applies the y-negation
 before anything downstream sees it, so a solver consuming `vehicle_mag` would

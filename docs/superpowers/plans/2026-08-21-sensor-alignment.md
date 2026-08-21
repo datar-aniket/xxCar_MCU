@@ -168,6 +168,13 @@ if __name__ == "__main__":
     print(f"wrote {dest}", file=sys.stderr)
 ```
 
+> **Execution note (2026-08-21):** the generator produces **26** entries, not
+> 24. There are 26 supported enum values but only 24 distinct rotations -
+> ROLL_180_YAW_90 (10) equals PITCH_180_YAW_270 (27), and ROLL_180_YAW_270 (14)
+> equals PITCH_180_YAW_90 (26), the same rotations by different Euler routes.
+> `snap()` resolves each pair to the lowest value so the same mounting is never
+> reported under two names.
+
 - [ ] **Step 2: Run the generator**
 
 ```bash
