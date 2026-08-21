@@ -357,6 +357,9 @@ static int ekf3_daemon(int argc, FAR char *argv[])
 
       while (ekf_delay_next_imu(&g_delay, horizon, &sample))
         {
+          FAR const struct ekf_source_set_s *source =
+            &status.sources.set[status.sources.active_set];
+          struct ekf_baro_sample_s baro;
           struct ekf_mag_sample_s mag;
 
           if (ekf_core_process(&status.core, &sample) ==
@@ -367,9 +370,25 @@ static int ekf3_daemon(int argc, FAR char *argv[])
 
           advanced = true;
 
-          /* Flash B fuses the magnetometer. Drained here so the queue does
-           * not fill and report a misleading overflow.
+          /* Source selection makes a measurement ELIGIBLE. The health gating
+           * inside the fusion decides whether it is USED. A parameter never
+           * makes a bad measurement good.
+           *
+           * Drained either way, so a deselected source cannot fill its queue
+           * and report a misleading overflow.
            */
+
+          while (ekf_delay_next_baro(&g_delay, sample.timestamp_sample,
+                                     EKF3_BARO_MAX_AGE_US, &baro))
+            {
+              if (source->position_z == EKF_SOURCE_BARO_OR_COMPASS)
+                {
+                  ekf_core_fuse_baro(&status.core, baro.pressure,
+                                     status.alt_noise, status.alt_gate);
+                }
+            }
+
+          /* Flash B fuses the magnetometer. */
 
           while (ekf_delay_next_mag(&g_delay, sample.timestamp_sample,
                                     EKF3_MAG_MAX_AGE_US, &mag))

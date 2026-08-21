@@ -89,6 +89,15 @@ struct ekf_core_s
   bool have_source_reset;
   bool initialized;
 
+  float baro_reference_hpa;
+  float last_baro_height;
+  float last_baro_nis;
+  bool  baro_have_reference;
+
+  uint32_t baro_accept_count;
+  uint32_t baro_reject_count;
+  uint32_t baro_consecutive_rejects;
+
   uint32_t input_count;
   uint32_t predict_count;
   uint32_t covariance_count;
@@ -128,6 +137,27 @@ struct ekf_output_s
   uint16_t samples_replayed;
   bool     valid;
 };
+
+/* Pressure sanity, and the rejection run that withdraws vertical validity.
+ * Fixed rather than parameters: these are not tuning decisions, they are the
+ * boundary between a reading and a fault.
+ */
+
+#define EKF_BARO_PRESSURE_MIN      500.0f
+#define EKF_BARO_PRESSURE_MAX     1200.0f
+#define EKF_BARO_REJECT_RUN_MAX      20u
+
+/* Height above the reference pressure, ISA. Positive is UP. */
+
+float ekf_baro_height(float pressure_hpa, float reference_hpa);
+
+/* Fuse a barometric height. Returns 1 accepted, 0 gated, -1 numerical
+ * failure or an insane pressure, and -2 when there is no reference yet - in
+ * which case this sample BECOMES the reference and the filter is left alone.
+ */
+
+int ekf_core_fuse_baro(FAR struct ekf_core_s *ekf, float pressure_hpa,
+                       float noise, float gate_sigma);
 
 void ekf_core_init(FAR struct ekf_core_s *ekf);
 

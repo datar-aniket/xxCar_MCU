@@ -382,6 +382,16 @@ static void restart_alignment(FAR struct ekf_core_s *ekf)
   dynamics_clear(ekf);
   covariance_accumulator_clear(ekf);
   ekf->first_predict_timestamp = 0;
+
+  /* The barometer reference is the height datum, and the datum is the
+   * alignment point. Keeping it across a re-alignment would silently re-datum
+   * the height to whatever the pressure was somewhere else.
+   */
+
+  ekf->baro_reference_hpa = 0.0f;
+  ekf->baro_have_reference = false;
+  ekf->baro_consecutive_rejects = 0;
+  ekf->last_baro_height = 0.0f;
 }
 
 void ekf_core_init(FAR struct ekf_core_s *ekf)
@@ -1562,6 +1572,80 @@ int ekf_core_process(FAR struct ekf_core_s *ekf,
     }
 
   return EKF_PROCESS_PREDICTED;
+}
+
+/* ISA height above a reference pressure. Positive is UP.
+ *
+ * Taken relative to the reference captured at alignment rather than to a
+ * sea-level constant, which is what makes this a height above the alignment
+ * point and consistent with the filter's local-NED origin.
+ */
+
+float ekf_baro_height(float pressure_hpa, float reference_hpa)
+{
+  if (!isfinite(pressure_hpa) || !isfinite(reference_hpa) ||
+      pressure_hpa <= 0.0f || reference_hpa <= 0.0f)
+    {
+      return 0.0f;
+    }
+
+  return 44330.77f * (1.0f - powf(pressure_hpa / reference_hpa,
+                                  0.1902632f));
+}
+
+int ekf_core_fuse_baro(FAR struct ekf_core_s *ekf, float pressure_hpa,
+                       float noise, float gate_sigma)
+{
+  float h[EKF_STATE_DIM];
+  float height;
+  float residual;
+  int result;
+
+  if (ekf == NULL || !ekf->initialized || !isfinite(pressure_hpa) ||
+      pressure_hpa < EKF_BARO_PRESSURE_MIN ||
+      pressure_hpa > EKF_BARO_PRESSURE_MAX ||
+      !isfinite(noise) || noise <= 0.0f)
+    {
+      return -1;
+    }
+
+  /* The first good sample defines where zero is. Correcting against a
+   * reference that does not exist yet would inject the whole altitude of the
+   * site as an error.
+   */
+
+  if (!ekf->baro_have_reference)
+    {
+      ekf->baro_reference_hpa = pressure_hpa;
+      ekf->baro_have_reference = true;
+      ekf->last_baro_height = 0.0f;
+      return -2;
+    }
+
+  height = ekf_baro_height(pressure_hpa, ekf->baro_reference_hpa);
+  ekf->last_baro_height = height;
+
+  /* NED is down-positive and the measurement is up-positive. */
+
+  memset(h, 0, sizeof(h));
+  h[8] = 1.0f;
+  residual = -height - ekf->position[2];
+
+  result = measurement_update_1d(ekf, h, residual, noise * noise,
+                                 gate_sigma, &ekf->last_baro_nis);
+
+  if (result == 1)
+    {
+      ekf->baro_accept_count++;
+      ekf->baro_consecutive_rejects = 0;
+    }
+  else if (result == 0)
+    {
+      ekf->baro_reject_count++;
+      ekf->baro_consecutive_rejects++;
+    }
+
+  return result;
 }
 
 uint8_t ekf_core_solution_status(FAR const struct ekf_core_s *ekf)
