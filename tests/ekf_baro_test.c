@@ -38,7 +38,7 @@ static void align_core(void)
       s.timestamp_first = t - TEST_DT_US;
       s.delta_angle_dt = TEST_DT;
       s.delta_velocity_dt = TEST_DT;
-      s.delta_velocity[2] = -TEST_G * TEST_DT;
+      s.delta_velocity[2] = TEST_G * TEST_DT;   /* at rest: specific force is UP */
       s.samples = 5;
       s.accel_calibrated = true;
       s.gyro_calibrated = true;
@@ -205,7 +205,7 @@ static void test_realignment_discards_reference(void)
   s.timestamp_first = t - TEST_DT_US;
   s.delta_angle_dt = TEST_DT;
   s.delta_velocity_dt = TEST_DT;
-  s.delta_velocity[2] = -TEST_G * TEST_DT;
+  s.delta_velocity[2] = TEST_G * TEST_DT;   /* at rest: specific force is UP */
   s.samples = 5;
   s.accel_calibrated = false;
   s.gyro_calibrated = false;

@@ -223,6 +223,8 @@ static void alignment_clear(FAR struct ekf_core_s *ekf)
 {
   memset(ekf->align_accel_sum, 0, sizeof(ekf->align_accel_sum));
   memset(ekf->align_gyro_sum, 0, sizeof(ekf->align_gyro_sum));
+  memset(ekf->align_mag_sum, 0, sizeof(ekf->align_mag_sum));
+  ekf->align_mag_samples = 0;
   ekf->align_accel_norm2_sum = 0.0f;
   ekf->align_gyro_norm2_sum = 0.0f;
   ekf->align_time_s = 0.0f;
@@ -392,6 +394,15 @@ static void restart_alignment(FAR struct ekf_core_s *ekf)
   ekf->baro_have_reference = false;
   ekf->baro_consecutive_rejects = 0;
   ekf->last_baro_height = 0.0f;
+
+  /* The heading datum goes with the alignment that established it. Keeping
+   * yaw_absolute across a restart would claim north for a heading that is
+   * about to be re-derived from scratch.
+   */
+
+  ekf->yaw_absolute = false;
+  ekf->mag_consecutive_rejects = 0;
+  ekf->last_mag_timestamp = 0;
 }
 
 void ekf_core_init(FAR struct ekf_core_s *ekf)
@@ -479,6 +490,7 @@ static bool alignment_add(FAR struct ekf_core_s *ekf,
       float gyro_variance;
       float roll;
       float pitch;
+      float yaw;
 
       for (axis = 0; axis < 3; axis++)
         {
@@ -516,9 +528,67 @@ static bool alignment_add(FAR struct ekf_core_s *ekf,
       pitch = -atan2f(mean_accel[0],
                       sqrtf(mean_accel[1] * mean_accel[1] +
                             mean_accel[2] * mean_accel[2]));
-      quaternion_from_euler(roll, pitch, 0.0f, ekf->quaternion);
+
+      /* Heading from the averaged field, tilted by the roll and pitch just
+       * derived - accelerometer and magnetometer together, which is the only
+       * way to get an absolute attitude at rest.
+       *
+       * Averaged over the same window and subject to the same stillness
+       * gates the accelerometer already passed, so a field captured during
+       * motion cannot set the datum.
+       */
+
+      yaw = 0.0f;
+      ekf->yaw_absolute = false;
+
+      if (ekf->align_mag_samples > 0)
+        {
+          float mean_mag[3];
+          float level[4];
+
+          for (axis = 0; axis < 3; axis++)
+            {
+              mean_mag[axis] = ekf->align_mag_sum[axis] /
+                               (float)ekf->align_mag_samples;
+            }
+
+          quaternion_from_euler(roll, pitch, 0.0f, level);
+
+          if (ekf_mag_heading(level, mean_mag, ekf->align_declination,
+                              &yaw))
+            {
+              ekf->yaw_absolute = true;
+              ekf->last_mag_field = vector_norm(mean_mag);
+              ekf->last_mag_heading = yaw;
+
+              /* Alignment is itself a magnetometer fix, so it starts the
+               * staleness clock. Without this the solution would report a
+               * relative heading until the first runtime fusion, having just
+               * derived an absolute one.
+               */
+
+              ekf->last_mag_timestamp = sample->timestamp_sample;
+            }
+          else
+            {
+              yaw = 0.0f;
+            }
+        }
+
+      quaternion_from_euler(roll, pitch, yaw, ekf->quaternion);
       memcpy(ekf->gyro_bias, mean_gyro, sizeof(ekf->gyro_bias));
       covariance_initialize(ekf);
+
+      /* A heading that means something deserves a covariance that says so.
+       * Leaving the 180-degree entry would leave the state correct and the
+       * filter still convinced it knew nothing.
+       */
+
+      if (ekf->yaw_absolute && ekf->align_yaw_variance > 0.0f)
+        {
+          ekf->covariance[EKF_P_INDEX(2, 2)] = ekf->align_yaw_variance;
+        }
+
       covariance_accumulator_clear(ekf);
       ekf->initialized = true;
       ekf->first_predict_timestamp = sample->timestamp_sample;
@@ -1574,6 +1644,218 @@ int ekf_core_process(FAR struct ekf_core_s *ekf,
   return EKF_PROCESS_PREDICTED;
 }
 
+static float wrap_pi(float angle)
+{
+  const float two_pi = 6.283185307179586f;
+
+  if (!isfinite(angle))
+    {
+      return 0.0f;
+    }
+
+  while (angle > 3.141592653589793f)
+    {
+      angle -= two_pi;
+    }
+
+  while (angle < -3.141592653589793f)
+    {
+      angle += two_pi;
+    }
+
+  return angle;
+}
+
+bool ekf_mag_heading(FAR const float quaternion[4],
+                     FAR const float field[3], float declination,
+                     FAR float *heading)
+{
+  float roll;
+  float pitch;
+  float sr;
+  float cr;
+  float sp;
+  float cp;
+  float level_x;
+  float level_y;
+  float rotation[3][3];
+
+  if (quaternion == NULL || field == NULL || heading == NULL ||
+      !vector_finite(field) || !isfinite(declination))
+    {
+      return false;
+    }
+
+  /* Roll and pitch ONLY. The current yaw is the quantity being measured, so
+   * using it would make this a very expensive way to read back the state it
+   * is supposed to correct.
+   *
+   * Taken from the rotation matrix rather than through an euler conversion,
+   * so a pitch near vertical degrades into a short horizontal projection -
+   * caught below - instead of a singularity.
+   */
+
+  quaternion_to_rotation(quaternion, rotation);
+  roll = atan2f(rotation[2][1], rotation[2][2]);
+  pitch = -asinf(rotation[2][0] > 1.0f ? 1.0f :
+                 rotation[2][0] < -1.0f ? -1.0f : rotation[2][0]);
+
+  sr = sinf(roll);
+  cr = cosf(roll);
+  sp = sinf(pitch);
+  cp = cosf(pitch);
+
+  /* Rotate the field into the vehicle's level frame: Ry(pitch) * Rx(roll)
+   * applied to the body-frame measurement.
+   */
+
+  level_x = cp * field[0] + sp * sr * field[1] + sp * cr * field[2];
+  level_y = cr * field[1] - sr * field[2];
+
+  /* A horizontal projection this short carries no direction. It happens when
+   * the field is nearly parallel to the vertical - at extreme dip, or when
+   * the sensor has failed to something constant.
+   */
+
+  if (!isfinite(level_x) || !isfinite(level_y) ||
+      level_x * level_x + level_y * level_y < 1.0e-8f)
+    {
+      return false;
+    }
+
+  /* The field points toward MAGNETIC north, so its bearing in the level
+   * frame is the negative of the vehicle's heading. Declination carries that
+   * to true north.
+   */
+
+  *heading = wrap_pi(atan2f(-level_y, level_x) + declination);
+  return isfinite(*heading);
+}
+
+void ekf_core_set_mag_config(FAR struct ekf_core_s *ekf, float declination,
+                             float yaw_variance)
+{
+  if (ekf == NULL)
+    {
+      return;
+    }
+
+  ekf->align_declination = isfinite(declination) ? declination : 0.0f;
+  ekf->align_yaw_variance = isfinite(yaw_variance) && yaw_variance > 0.0f ?
+                            yaw_variance : 0.0f;
+}
+
+void ekf_core_add_align_mag(FAR struct ekf_core_s *ekf,
+                            FAR const float field[3])
+{
+  int axis;
+
+  if (ekf == NULL || field == NULL || ekf->initialized ||
+      !vector_finite(field))
+    {
+      return;
+    }
+
+  for (axis = 0; axis < 3; axis++)
+    {
+      ekf->align_mag_sum[axis] += field[axis];
+    }
+
+  ekf->align_mag_samples++;
+}
+
+int ekf_core_fuse_mag(FAR struct ekf_core_s *ekf,
+                      FAR const float field[3], float declination,
+                      float expected_field, float noise,
+                      float gate_sigma)
+{
+  float h[EKF_STATE_DIM];
+  float rotation[3][3];
+  float euler[3];
+  float heading;
+  float magnitude;
+  float residual;
+  int result;
+  int axis;
+
+  if (ekf == NULL || field == NULL || !ekf->initialized ||
+      !vector_finite(field) || !isfinite(noise) || noise <= 0.0f)
+    {
+      return -1;
+    }
+
+  /* Without an absolute datum this would be a yaw JUMP rather than a
+   * correction: the filter's heading is an arbitrary reference, and pulling
+   * it to magnetic north in one step is not something a Kalman update should
+   * be asked to express.
+   */
+
+  if (!ekf->yaw_absolute)
+    {
+      return -2;
+    }
+
+  magnitude = vector_norm(field);
+  ekf->last_mag_field = magnitude;
+
+  /* A magnitude far from the calibrated field is a magnet, a motor or a
+   * failed sensor. Refuse it before it reaches the filter - the innovation
+   * gate would catch a wrong heading, but not a right heading derived from a
+   * field that is physically impossible.
+   */
+
+  if (expected_field > 0.0f &&
+      fabsf(magnitude - expected_field) >
+        EKF_MAG_FIELD_TOLERANCE * expected_field)
+    {
+      ekf->mag_unhealthy_count++;
+      ekf->mag_consecutive_rejects++;
+      return -1;
+    }
+
+  if (!ekf_mag_heading(ekf->quaternion, field, declination, &heading))
+    {
+      ekf->mag_unhealthy_count++;
+      ekf->mag_consecutive_rejects++;
+      return -1;
+    }
+
+  ekf->last_mag_heading = heading;
+  ekf_core_euler(ekf, euler);
+  residual = wrap_pi(heading - euler[2]);
+
+  /* A yaw error is a rotation about the NED down axis. The error state is a
+   * BODY-frame rotation vector, so the observation is that axis expressed in
+   * body - the third row of the body-to-NED rotation, which is exactly the
+   * gauge direction the gravity update projects OUT.
+   */
+
+  quaternion_to_rotation(ekf->quaternion, rotation);
+  memset(h, 0, sizeof(h));
+
+  for (axis = 0; axis < 3; axis++)
+    {
+      h[axis] = rotation[2][axis];
+    }
+
+  result = measurement_update_1d(ekf, h, residual, noise * noise,
+                                 gate_sigma, &ekf->last_mag_nis);
+
+  if (result == 1)
+    {
+      ekf->mag_accept_count++;
+      ekf->mag_consecutive_rejects = 0;
+      ekf->last_mag_timestamp = ekf->last_timestamp_sample;
+    }
+  else if (result == 0)
+    {
+      ekf->mag_reject_count++;
+      ekf->mag_consecutive_rejects++;
+    }
+
+  return result;
+}
+
 /* ISA height above a reference pressure. Positive is UP.
  *
  * Taken relative to the reference captured at alignment rather than to a
@@ -1658,10 +1940,26 @@ uint8_t ekf_core_solution_status(FAR const struct ekf_core_s *ekf)
     }
 
   /* Roll and pitch come from gravity, which is always available. Heading is
-   * relative until a magnetometer makes it absolute - Flash B.
+   * absolute only while a magnetometer is actually holding it there: it
+   * needs a datum from alignment, an accepted update, no sustained rejection
+   * run, and a measurement that is not stale. Any of those failing leaves a
+   * heading that still exists and still integrates - just without north.
    */
 
-  status = EKF_SOLUTION_ATTITUDE | EKF_SOLUTION_YAW_RELATIVE;
+  status = EKF_SOLUTION_ATTITUDE;
+
+  if (ekf->yaw_absolute &&
+      ekf->mag_consecutive_rejects < EKF_MAG_REJECT_RUN_MAX &&
+      ekf->last_mag_timestamp != 0 &&
+      ekf->last_timestamp_sample <=
+        ekf->last_mag_timestamp + EKF_MAG_MAX_AGE_US)
+    {
+      status |= EKF_SOLUTION_YAW_ABSOLUTE;
+    }
+  else
+    {
+      status |= EKF_SOLUTION_YAW_RELATIVE;
+    }
 
   /* Vertical validity is a claim about the barometer actually correcting,
    * not about it being selected. A sustained rejection run withdraws it

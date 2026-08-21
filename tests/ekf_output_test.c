@@ -43,7 +43,7 @@ static void align_core(void)
       s.timestamp_first = t - TEST_DT_US;
       s.delta_angle_dt = TEST_DT;
       s.delta_velocity_dt = TEST_DT;
-      s.delta_velocity[2] = -TEST_G * TEST_DT;
+      s.delta_velocity[2] = TEST_G * TEST_DT;   /* at rest: specific force is UP */
       s.samples = 5;
       s.accel_calibrated = true;
       s.gyro_calibrated = true;
@@ -110,7 +110,7 @@ static void test_matches_filter_propagation(void)
       seq[i].delta_angle[0] = 0.5f * TEST_DT;    /* out of low-dynamics */
       seq[i].delta_angle[2] = 0.3f * TEST_DT;
       seq[i].delta_velocity[0] = 0.5f * TEST_DT;
-      seq[i].delta_velocity[2] = -TEST_G * TEST_DT;
+      seq[i].delta_velocity[2] = TEST_G * TEST_DT;
       seq[i].samples = 5;
       seq[i].accel_calibrated = true;
       seq[i].gyro_calibrated = true;

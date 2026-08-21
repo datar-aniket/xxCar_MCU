@@ -96,6 +96,22 @@ struct ekf_core_s
   bool have_source_reset;
   bool initialized;
 
+  float align_mag_sum[3];
+  uint32_t align_mag_samples;
+  float align_declination;     /* rad, EK3_MAG_DEC at start */
+  float align_yaw_variance;    /* rad^2, EK3_YAW_M_NSE^2; 0 leaves 180 deg */
+
+  float last_mag_heading;      /* rad, true, last accepted measurement */
+  float last_mag_nis;
+  float last_mag_field;        /* Gauss, magnitude of the last sample */
+  uint64_t last_mag_timestamp; /* filter time of the last accepted fusion */
+  bool  yaw_absolute;          /* heading is north-referenced */
+
+  uint32_t mag_accept_count;
+  uint32_t mag_reject_count;
+  uint32_t mag_consecutive_rejects;
+  uint32_t mag_unhealthy_count;
+
   float baro_reference_hpa;
   float last_baro_height;
   float last_baro_nis;
@@ -153,6 +169,57 @@ struct ekf_output_s
 #define EKF_BARO_PRESSURE_MIN      500.0f
 #define EKF_BARO_PRESSURE_MAX     1200.0f
 #define EKF_BARO_REJECT_RUN_MAX      20u
+
+/* Magnetometer health. The field band is wide enough to tolerate ordinary
+ * vehicle-borne distortion and narrow enough to catch a magnet, a motor or a
+ * failed sensor. Staleness is measured against the filter's own clock.
+ */
+
+#define EKF_MAG_FIELD_TOLERANCE     0.30f
+#define EKF_MAG_MAX_AGE_US       500000ull
+#define EKF_MAG_REJECT_RUN_MAX       20u
+
+/* Tilt-compensated magnetic heading, radians, from a body-frame field.
+ *
+ * Uses roll and pitch ONLY - never the current yaw, which is the quantity
+ * being measured. Returns false when the field is not finite or its
+ * horizontal projection is too short to give a direction, which is what
+ * happens when the field is nearly parallel to the tilt axis.
+ */
+
+bool ekf_mag_heading(FAR const float quaternion[4],
+                     FAR const float field[3], float declination,
+                     FAR float *heading);
+
+/* Declination and initial yaw uncertainty used at alignment. The core reads
+ * no parameters itself, so the daemon hands these in once at start. Survives
+ * a re-alignment, because it is configuration rather than state.
+ */
+
+void ekf_core_set_mag_config(FAR struct ekf_core_s *ekf, float declination,
+                             float yaw_variance);
+
+/* Accumulate a body-frame field for heading initialisation. Ignored once the
+ * filter is aligned; the running estimate is maintained by fusion instead.
+ */
+
+void ekf_core_add_align_mag(FAR struct ekf_core_s *ekf,
+                            FAR const float field[3]);
+
+/* Fuse a body-frame field as a heading observation.
+ *
+ * Returns 1 accepted, 0 gated, -1 unhealthy or numerically refused, and -2
+ * when the filter's heading has no absolute datum - alignment never got a
+ * usable field - in which case fusing would be a yaw JUMP rather than a
+ * correction, so it is refused.
+ *
+ * expected_field is CAL_MAG0_FIELD; pass <= 0 to skip the magnitude check.
+ */
+
+int ekf_core_fuse_mag(FAR struct ekf_core_s *ekf,
+                      FAR const float field[3], float declination,
+                      float expected_field, float noise,
+                      float gate_sigma);
 
 /* Height above the reference pressure, ISA. Positive is UP. */
 
