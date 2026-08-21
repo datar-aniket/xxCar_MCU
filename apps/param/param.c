@@ -163,8 +163,26 @@ static const struct param_def_s g_params[] =
   { "SENS_IMU1_ROT",  PARAM_TYPE_INT32, I32(2), I32(0), I32(37),
     "IMU1 (BMI055) rotation relative to the board (2 = yaw 90, measured)",
     PARAM_RANGE_ENUM },
-  { "SENS_MAG0_ROT",  PARAM_TYPE_INT32, I32(0), I32(0), I32(37),
-    "IST8310 rotation relative to the board", PARAM_RANGE_ENUM },
+  /* ROLL_180, not NONE, and the difference is worth writing down.
+   *
+   * PX4 and ArduPilot both declare the 6C's internal IST8310 as
+   * ROTATION_NONE - but relative to THEIR board frame, which their drivers
+   * reach by negating axes first: the ICM-42688-P reports +x forward, +y
+   * LEFT, +z up and they flip y and z; the IST8310 reports +y RIGHT and they
+   * flip z.
+   *
+   * Our drivers publish the chip axes as they come, so with SENS_IMU0_ROT=0
+   * the body frame is the ICM's own FLU frame. The magnetometer, once its z
+   * is made right handed in the driver, is FRD. FRD to FLU is roll 180.
+   *
+   * Left at NONE the magnetometer's y pointed opposite the body's, and since
+   * heading is atan2(-y, x) the heading ran BACKWARDS - while roll and pitch
+   * stayed perfect, because neither uses mag y.
+   */
+
+  { "SENS_MAG0_ROT",  PARAM_TYPE_INT32, I32(8), I32(0), I32(37),
+    "IST8310 rotation relative to the board (8 = roll 180)",
+    PARAM_RANGE_ENUM },
 
   /* Sensor extrinsics in the body frame. The existing enum supplies the exact
    * coarse mounting rotation; calibration later supplies a small arbitrary

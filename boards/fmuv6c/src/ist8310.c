@@ -11,8 +11,11 @@
  * then sleep the whole sample interval (the conversion completes during the
  * sleep), then read + publish. Exactly one nxsig_usleep per sample, no spin.
  *
- * Output: x/y/z in Gauss (sensor_mag units), raw sensor axes. Board-frame
- * rotation and hard/soft-iron calibration are deferred to the fusion stage.
+ * Output: x/y/z in Gauss (sensor_mag units) in the chip's own axes made
+ * RIGHT HANDED - x forward, y right, z down - by negating the z the part
+ * reports upward. Mounting rotation and hard/soft-iron calibration are
+ * deferred to the fusion stage; handedness is not, because a left-handed
+ * topic cannot be corrected by any rotation downstream.
  ****************************************************************************/
 
 #include <nuttx/config.h>
@@ -172,10 +175,22 @@ static void ist8310_process(FAR struct ist8310_dev_s *dev)
   y = (int16_t)((uint16_t)buf[3] << 8 | buf[2]);
   z = (int16_t)((uint16_t)buf[5] << 8 | buf[4]);
 
+  /* The IST8310's own frame is +x forward, +y right, +z UP, which is LEFT
+   * handed against the +z down convention everything downstream uses.
+   * Negating z makes it right handed (x forward, y right, z down), which is
+   * what both PX4's and ArduPilot's IST8310 drivers do - PX4 as "flip z",
+   * ArduPilot as "flip Z to conform to right-hand rule convention".
+   *
+   * This is a FRAME conversion, not a calibration: it belongs in the driver
+   * for the same reason the scale does. Publishing a left-handed topic and
+   * expecting every consumer to know is how a heading ends up running
+   * backwards while roll and pitch look perfect.
+   */
+
   mag.timestamp   = sensor_get_timestamp();
   mag.x           = (float)x * IST8310_GAUSS_PER_LSB;
   mag.y           = (float)y * IST8310_GAUSS_PER_LSB;
-  mag.z           = (float)z * IST8310_GAUSS_PER_LSB;
+  mag.z           = -(float)z * IST8310_GAUSS_PER_LSB;
   mag.temperature = 0.0f;   /* IST8310 temp is uncalibrated; not published */
   mag.status      = 0;
   dev->lower.push_event(dev->lower.priv, &mag, sizeof(mag));
