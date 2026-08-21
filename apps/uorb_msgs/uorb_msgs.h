@@ -151,6 +151,35 @@ struct vehicle_gyro_s
   uint8_t  pad[2];                /* 30 */
 };
 
+/* Calibrated body-frame aiding sensors. Both carry the driver's sample time
+ * separately from publication time, because the EKF fuses them at the horizon
+ * against the state as it was when the sample was taken - not when it arrived.
+ *
+ * vehicle_baro deliberately carries pressure, not height. Converting needs a
+ * reference pressure, and that reference is captured at EKF alignment: it is
+ * an estimator concern, and a height field here would be meaningless before
+ * the estimator has aligned.
+ */
+
+struct vehicle_mag_s
+{
+  uint64_t timestamp;             /*  0: us, publication time */
+  uint64_t timestamp_sample;      /*  8: us, driver sample time */
+  float    field[3];              /* 16: Gauss, calibrated, body frame */
+  float    temperature;           /* 28: degrees C */
+  uint8_t  calibrated;            /* 32: 0 = raw passthrough, 1 = corrected */
+  uint8_t  instance;              /* 33 */
+  uint8_t  pad[6];                /* 34: size a multiple of 8 */
+};
+
+struct vehicle_baro_s
+{
+  uint64_t timestamp;             /*  0: us, publication time */
+  uint64_t timestamp_sample;      /*  8: us, driver sample time */
+  float    pressure;              /* 16: hPa */
+  float    temperature;           /* 20: degrees C */
+};
+
 /* Calibrated body-frame increments for strapdown propagation. Unlike the
  * corrected controller topics above, this path bypasses every configurable
  * software LPF/notch. The hardware anti-alias filters remain part of the
@@ -218,6 +247,8 @@ ORB_DECLARE(optical_flow);
 ORB_DECLARE(distance_sensor);
 ORB_DECLARE(vehicle_accel);
 ORB_DECLARE(vehicle_gyro);
+ORB_DECLARE(vehicle_mag);
+ORB_DECLARE(vehicle_baro);
 ORB_DECLARE(vehicle_imu);
 ORB_DECLARE(estimator_state);
 
@@ -236,6 +267,12 @@ int vehicle_accel_publish(int fd, FAR const struct vehicle_accel_s *msg);
 
 int vehicle_gyro_advertise(void);
 int vehicle_gyro_publish(int fd, FAR const struct vehicle_gyro_s *msg);
+
+int vehicle_mag_advertise(void);
+int vehicle_mag_publish(int fd, FAR const struct vehicle_mag_s *msg);
+
+int vehicle_baro_advertise(void);
+int vehicle_baro_publish(int fd, FAR const struct vehicle_baro_s *msg);
 
 int vehicle_imu_advertise(void);
 int vehicle_imu_publish(int fd, FAR const struct vehicle_imu_s *msg);
