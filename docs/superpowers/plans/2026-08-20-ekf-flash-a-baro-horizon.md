@@ -30,14 +30,14 @@
 
 | File | Responsibility |
 |---|---|
-| `apps/sensors/mag_correct.h` / `.c` | Pure magnetometer calibration + rotation math. No I/O, host-testable. |
+| `apps/sensors/mag_frame.h` / `.c` | Loads the stored mag calibration and rotates the corrected field into the body frame. Calls `cal_mag_apply()`; does not reimplement it. |
 | `apps/sensors/aux.h` / `.c` | Low-rate daemon: polls `sensor_mag0`/`sensor_baro0`, publishes `vehicle_mag`/`vehicle_baro`. |
 | `apps/ekf3/ekf_delay.h` / `.c` | IMU ring buffer and timestamped measurement queues. No filter math. |
-| `tests/mag_correct_test.c` | Calibration application, rotation composition, ordering. |
+| `tests/mag_frame_test.c` | Parameter loading, rotation composition, calibrate-then-rotate ordering. |
 | `tests/ekf_delay_test.c` | Ring ordering, horizon arithmetic, overflow, output window. |
 | `tests/ekf_output_test.c` | Output predictor equivalence and determinism. |
 | `tests/ekf_baro_test.c` | Height conversion, sign convention, gating, timeout. |
-| `tools/test-mag-correct.sh`, `test-ekf-delay.sh`, `test-ekf-output.sh`, `test-ekf-baro.sh` | Host test runners. |
+| `tools/test-mag-frame.sh`, `test-ekf-delay.sh`, `test-ekf-output.sh`, `test-ekf-baro.sh` | Host test runners. |
 
 **Modified:**
 
@@ -242,575 +242,52 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 ---
 
-### Task 2: Magnetometer calibration math
-
-Pure functions, no I/O, fully host-tested. The ordering — calibrate in sensor axes, *then* rotate — is the part most likely to be got wrong, so it gets a dedicated test.
-
-**Files:**
-- Create: `apps/sensors/mag_correct.h`, `apps/sensors/mag_correct.c`
-- Create: `tests/mag_correct_test.c`, `tools/test-mag-correct.sh`
-- Modify: `apps/sensors/Makefile`
-
-**Interfaces:**
-- Consumes: `rotation_apply()`, `rotation_supported()` from `apps/sensors/rotation.h`; `param_f32()`, `param_i32()` from `apps/param/param.h`.
-- Produces: `struct mag_cal_s`, `bool mag_correct_load(FAR struct mag_cal_s *cal)`, `bool mag_correct_apply(FAR const struct mag_cal_s *cal, FAR const float raw[3], FAR float out[3])`.
-
-- [ ] **Step 1: Write the header**
-
-Create `apps/sensors/mag_correct.h`:
-
-```c
-/****************************************************************************
- * apps/sensors/mag_correct.h
- *
- * SPDX-License-Identifier: Apache-2.0
- *
- * Turns one raw magnetometer reading into a calibrated body-frame field.
- *
- *     corrected = SOFT_IRON * (raw - OFFSET)
- *     body      = BOARD_ROT( FINE_ROT( MAG_ROT( corrected ) ) )
- *
- * The order is not arbitrary, and is the same argument sensors.h makes for
- * the IMU: calibration is measured in the SENSOR's own axes - the sphere fit
- * records what each chip axis reads - so it must be applied before any
- * rotation. A soft-iron matrix means nothing once the axes have been mixed.
- *
- * FINE_ROT is CAL_MAG0_RV*, the small residual rotation a host extrinsic
- * calibration would solve for. It defaults to zero, which is identity, and
- * that is the correct assumption for a magnetometer soldered to a known board.
- ****************************************************************************/
-
-#ifndef __APPS_SENSORS_MAG_CORRECT_H
-#define __APPS_SENSORS_MAG_CORRECT_H
-
-#include <stdbool.h>
-#include <stdint.h>
-
-#ifndef FAR
-#  define FAR
-#endif
-
-struct mag_cal_s
-{
-  float   offset[3];      /* CAL_MAG0_{X,Y,Z}OFF, Gauss */
-  float   matrix[3][3];   /* CAL_MAG0_{XX,YY,ZZ,XY,XZ,YZ}, symmetric */
-  float   fine_rv[3];     /* CAL_MAG0_RV{X,Y,Z}, rotation vector, rad */
-  float   field;          /* CAL_MAG0_FIELD, expected magnitude, Gauss */
-  uint8_t mag_rot;        /* SENS_MAG0_ROT */
-  uint8_t board_rot;      /* SENS_BOARD_ROT */
-  bool    valid;          /* CAL_MAG0_OK and both rotations supported */
-};
-
-/* Read CAL_MAG0_* / SENS_MAG0_ROT / SENS_BOARD_ROT into cal.
- *
- * Always fills cal, and always returns having set cal->valid. Returns the
- * same value as cal->valid, which is false when CAL_MAG0_OK is clear or
- * either rotation is one rotation_apply() cannot perform exactly. An invalid
- * calibration is not an error: the caller publishes the raw field with
- * calibrated=0 so the topic stays observable for diagnostics.
- */
-
-bool mag_correct_load(FAR struct mag_cal_s *cal);
-
-/* Apply cal to raw, writing the body-frame field to out.
- *
- * When cal->valid is false, copies raw to out unchanged and returns false:
- * the reading is still the right shape, just not in the right frame. Returns
- * false and leaves out untouched if raw is not finite.
- */
-
-bool mag_correct_apply(FAR const struct mag_cal_s *cal,
-                       FAR const float raw[3], FAR float out[3]);
-
-#endif /* __APPS_SENSORS_MAG_CORRECT_H */
-```
-
-- [ ] **Step 2: Write the failing test**
-
-Create `tests/mag_correct_test.c`:
-
-```c
-#include <assert.h>
-#include <math.h>
-#include <stdio.h>
-#include <string.h>
-
-#include "mag_correct.h"
-#include "param.h"
-
-#define CLOSE(a, b) (fabsf((a) - (b)) < 1.0e-4f)
-
-/* Identity calibration in every respect: no offset, unit matrix, no fine
- * rotation, no mounting rotation. Anything that changes the vector here is a
- * bug in the plumbing rather than in the mathematics.
- */
-
-static void test_identity(void)
-{
-  struct mag_cal_s cal;
-  float raw[3] = {0.20f, -0.10f, 0.40f};
-  float out[3];
-
-  memset(&cal, 0, sizeof(cal));
-  cal.matrix[0][0] = 1.0f;
-  cal.matrix[1][1] = 1.0f;
-  cal.matrix[2][2] = 1.0f;
-  cal.valid = true;
-
-  assert(mag_correct_apply(&cal, raw, out));
-  assert(CLOSE(out[0], 0.20f));
-  assert(CLOSE(out[1], -0.10f));
-  assert(CLOSE(out[2], 0.40f));
-}
-
-/* Hard iron is removed before soft iron is applied. With offset (1,2,3) and a
- * diagonal soft-iron of 2, the input (2,3,4) must give (2,2,2): 2*(2-1),
- * 2*(3-2), 2*(4-3). Applying the matrix first would give (3,4,5).
- */
-
-static void test_offset_precedes_matrix(void)
-{
-  struct mag_cal_s cal;
-  float raw[3] = {2.0f, 3.0f, 4.0f};
-  float out[3];
-
-  memset(&cal, 0, sizeof(cal));
-  cal.offset[0] = 1.0f;
-  cal.offset[1] = 2.0f;
-  cal.offset[2] = 3.0f;
-  cal.matrix[0][0] = 2.0f;
-  cal.matrix[1][1] = 2.0f;
-  cal.matrix[2][2] = 2.0f;
-  cal.valid = true;
-
-  assert(mag_correct_apply(&cal, raw, out));
-  assert(CLOSE(out[0], 2.0f));
-  assert(CLOSE(out[1], 2.0f));
-  assert(CLOSE(out[2], 2.0f));
-}
-
-/* Calibration is applied in sensor axes, THEN rotated. The offset must hit
- * the axis it was measured on, not the axis that ends up there.
- *
- * ROTATION_YAW_90 maps (x,y,z) -> (-y,x,z). Removing an offset of 1.0 on
- * sensor X from the input (1,0,0) gives (0,0,0), which rotates to (0,0,0).
- * Rotating first would give (0,1,0), and subtracting X's offset from that
- * leaves (-1,1,0) - a wrong answer that still looks like a field.
- */
-
-static void test_calibration_precedes_rotation(void)
-{
-  struct mag_cal_s cal;
-  float raw[3] = {1.0f, 0.0f, 0.0f};
-  float out[3];
-
-  memset(&cal, 0, sizeof(cal));
-  cal.offset[0] = 1.0f;
-  cal.matrix[0][0] = 1.0f;
-  cal.matrix[1][1] = 1.0f;
-  cal.matrix[2][2] = 1.0f;
-  cal.mag_rot = 2;   /* ROTATION_YAW_90 */
-  cal.valid = true;
-
-  assert(mag_correct_apply(&cal, raw, out));
-  assert(CLOSE(out[0], 0.0f));
-  assert(CLOSE(out[1], 0.0f));
-  assert(CLOSE(out[2], 0.0f));
-}
-
-/* A fine rotation of 90 degrees about Z is a full Rodrigues rotation, not a
- * small-angle approximation. CAL_MAG0_RV* is bounded at 0.35 rad, where the
- * first-order error is already about 2 percent, so the implementation must
- * use the exact form. Test it well past the bound to make the distinction
- * unambiguous: (1,0,0) about Z by pi/2 is (0,1,0).
- */
-
-static void test_fine_rotation_is_exact(void)
-{
-  struct mag_cal_s cal;
-  float raw[3] = {1.0f, 0.0f, 0.0f};
-  float out[3];
-
-  memset(&cal, 0, sizeof(cal));
-  cal.matrix[0][0] = 1.0f;
-  cal.matrix[1][1] = 1.0f;
-  cal.matrix[2][2] = 1.0f;
-  cal.fine_rv[2] = (float)M_PI / 2.0f;
-  cal.valid = true;
-
-  assert(mag_correct_apply(&cal, raw, out));
-  assert(CLOSE(out[0], 0.0f));
-  assert(CLOSE(out[1], 1.0f));
-  assert(CLOSE(out[2], 0.0f));
-}
-
-/* An invalid calibration passes the reading through unchanged and says so.
- * The topic stays observable; the EKF is what declines to fuse it.
- */
-
-static void test_invalid_passes_through(void)
-{
-  struct mag_cal_s cal;
-  float raw[3] = {0.20f, -0.10f, 0.40f};
-  float out[3];
-
-  memset(&cal, 0, sizeof(cal));
-  cal.offset[0] = 99.0f;
-  cal.valid = false;
-
-  assert(!mag_correct_apply(&cal, raw, out));
-  assert(CLOSE(out[0], 0.20f));
-  assert(CLOSE(out[1], -0.10f));
-  assert(CLOSE(out[2], 0.40f));
-}
-
-static void test_nonfinite_rejected(void)
-{
-  struct mag_cal_s cal;
-  float raw[3] = {0.0f, NAN, 0.0f};
-  float out[3] = {7.0f, 7.0f, 7.0f};
-
-  memset(&cal, 0, sizeof(cal));
-  cal.matrix[0][0] = 1.0f;
-  cal.matrix[1][1] = 1.0f;
-  cal.matrix[2][2] = 1.0f;
-  cal.valid = true;
-
-  assert(!mag_correct_apply(&cal, raw, out));
-  assert(CLOSE(out[0], 7.0f));   /* untouched */
-}
-
-/* Defaults are identity plus CAL_MAG0_OK clear, so a board that has never
- * been calibrated reports invalid rather than silently applying zeros.
- */
-
-static void test_load_defaults_invalid(void)
-{
-  struct mag_cal_s cal;
-
-  param_init();
-  assert(!mag_correct_load(&cal));
-  assert(!cal.valid);
-  assert(CLOSE(cal.matrix[0][0], 1.0f));
-  assert(CLOSE(cal.offset[0], 0.0f));
-}
-
-static void test_load_valid(void)
-{
-  struct mag_cal_s cal;
-
-  param_init();
-  assert(param_set_f32("CAL_MAG0_XOFF", 0.05f) == 0);
-  assert(param_set_i32("CAL_MAG0_OK", 1) == 0);
-  assert(mag_correct_load(&cal));
-  assert(cal.valid);
-  assert(CLOSE(cal.offset[0], 0.05f));
-}
-
-/* A 45-degree rotation cannot be done as an exact axis permutation. It must
- * invalidate the calibration rather than be approximated, for the reason
- * rotation.h gives: an inexact rotation changes the magnitude, and every
- * value is a plausible orientation so the mistake would be invisible.
- */
-
-static void test_load_rejects_unsupported_rotation(void)
-{
-  struct mag_cal_s cal;
-
-  param_init();
-  assert(param_set_i32("CAL_MAG0_OK", 1) == 0);
-  assert(param_set_i32("SENS_MAG0_ROT", 1) == 0);  /* ROTATION_YAW_45 */
-  assert(!mag_correct_load(&cal));
-  assert(!cal.valid);
-}
-
-int main(void)
-{
-  test_identity();
-  test_offset_precedes_matrix();
-  test_calibration_precedes_rotation();
-  test_fine_rotation_is_exact();
-  test_invalid_passes_through();
-  test_nonfinite_rejected();
-  test_load_defaults_invalid();
-  test_load_valid();
-  test_load_rejects_unsupported_rotation();
-
-  puts("mag_correct: calibration order, fine rotation and gating verified - OK");
-  return 0;
-}
-```
-
-- [ ] **Step 3: Write the test runner**
-
-Create `tools/test-mag-correct.sh`, modelled on `tools/test-ekf-sources.sh`:
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUT="$(mktemp -d)"
-trap 'rm -rf "$OUT"' EXIT
-
-mkdir -p "$OUT/nuttx"
-cat > "$OUT/nuttx/config.h" <<'STUB'
-#ifndef OK
-#  define OK 0
-#endif
-STUB
-
-cc -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror \
-  -Wno-unused-parameter \
-  -Wno-missing-field-initializers -DFAR= -I"$OUT" \
-  -I"$REPO/apps/sensors" -I"$REPO/apps/param" \
-  -DPARAM_FILE='"/tmp/xxcar-mag-correct-no-file"' \
-  -DPARAM_TMPFILE='"/tmp/xxcar-mag-correct-no-temp"' \
-  "$REPO/tests/mag_correct_test.c" "$REPO/apps/sensors/mag_correct.c" \
-  "$REPO/apps/sensors/rotation.c" \
-  "$REPO/apps/param/param.c" -lm -o "$OUT/test"
-"$OUT/test"
-```
-
-Then `chmod +x tools/test-mag-correct.sh`.
-
-- [ ] **Step 4: Run the test to verify it fails**
-
-```bash
-tools/test-mag-correct.sh
-```
-
-Expected: FAIL at compile — `mag_correct.c: No such file or directory`.
-
-- [ ] **Step 5: Implement `mag_correct.c`**
-
-Create `apps/sensors/mag_correct.c`. `mag_correct.c` must not include `nuttx/config.h` unconditionally — the host test does not have it. Follow the `cal_mag.c` precedent and guard it.
-
-```c
-/****************************************************************************
- * apps/sensors/mag_correct.c
- *
- * SPDX-License-Identifier: Apache-2.0
- ****************************************************************************/
-
-#ifndef MAG_CORRECT_HOST_TEST
-#  include <nuttx/config.h>
-#endif
-
-#include <math.h>
-#include <stdio.h>
-#include <string.h>
-
-#include "mag_correct.h"
-#include "rotation.h"
-#include "../param/param.h"
-
-#define MAG_FINE_ROTATION_MIN 1.0e-9f
-
-static bool vector_finite(FAR const float v[3])
-{
-  return isfinite(v[0]) && isfinite(v[1]) && isfinite(v[2]);
-}
-
-/* Full Rodrigues rotation about the axis of rv by |rv|.
- *
- * Not the small-angle form. CAL_MAG0_RV* is bounded at 0.35 rad, where a
- * first-order approximation is already about 2 percent wrong AND no longer
- * norm-preserving - which would corrupt the field-magnitude health check the
- * EKF uses to decide whether the reading can be trusted at all.
- */
-
-static void rotate_by_vector(FAR const float rv[3], FAR float v[3])
-{
-  float angle = sqrtf(rv[0] * rv[0] + rv[1] * rv[1] + rv[2] * rv[2]);
-  float axis[3];
-  float cross[3];
-  float dot;
-  float sine;
-  float cosine;
-  int i;
-
-  if (!isfinite(angle) || angle < MAG_FINE_ROTATION_MIN)
-    {
-      return;
-    }
-
-  for (i = 0; i < 3; i++)
-    {
-      axis[i] = rv[i] / angle;
-    }
-
-  sine = sinf(angle);
-  cosine = cosf(angle);
-  dot = axis[0] * v[0] + axis[1] * v[1] + axis[2] * v[2];
-  cross[0] = axis[1] * v[2] - axis[2] * v[1];
-  cross[1] = axis[2] * v[0] - axis[0] * v[2];
-  cross[2] = axis[0] * v[1] - axis[1] * v[0];
-
-  for (i = 0; i < 3; i++)
-    {
-      v[i] = v[i] * cosine + cross[i] * sine +
-             axis[i] * dot * (1.0f - cosine);
-    }
-}
-
-bool mag_correct_load(FAR struct mag_cal_s *cal)
-{
-  static const FAR char *offset_names[3] =
-  {
-    "CAL_MAG0_XOFF", "CAL_MAG0_YOFF", "CAL_MAG0_ZOFF"
-  };
-
-  static const FAR char *fine_names[3] =
-  {
-    "CAL_MAG0_RVX", "CAL_MAG0_RVY", "CAL_MAG0_RVZ"
-  };
-
-  float xy;
-  float xz;
-  float yz;
-  int i;
-
-  if (cal == NULL)
-    {
-      return false;
-    }
-
-  memset(cal, 0, sizeof(*cal));
-
-  for (i = 0; i < 3; i++)
-    {
-      cal->offset[i] = param_f32(offset_names[i]);
-      cal->fine_rv[i] = param_f32(fine_names[i]);
-    }
-
-  /* The stored soft-iron is symmetric: six parameters, nine entries. */
-
-  xy = param_f32("CAL_MAG0_XY");
-  xz = param_f32("CAL_MAG0_XZ");
-  yz = param_f32("CAL_MAG0_YZ");
-
-  cal->matrix[0][0] = param_f32("CAL_MAG0_XX");
-  cal->matrix[1][1] = param_f32("CAL_MAG0_YY");
-  cal->matrix[2][2] = param_f32("CAL_MAG0_ZZ");
-  cal->matrix[0][1] = xy;
-  cal->matrix[1][0] = xy;
-  cal->matrix[0][2] = xz;
-  cal->matrix[2][0] = xz;
-  cal->matrix[1][2] = yz;
-  cal->matrix[2][1] = yz;
-
-  cal->field = param_f32("CAL_MAG0_FIELD");
-  cal->mag_rot = (uint8_t)param_i32("SENS_MAG0_ROT");
-  cal->board_rot = (uint8_t)param_i32("SENS_BOARD_ROT");
-
-  cal->valid = param_i32("CAL_MAG0_OK") != 0 &&
-               rotation_supported(cal->mag_rot) &&
-               rotation_supported(cal->board_rot);
-
-  return cal->valid;
-}
-
-bool mag_correct_apply(FAR const struct mag_cal_s *cal,
-                       FAR const float raw[3], FAR float out[3])
-{
-  float centred[3];
-  int row;
-  int column;
-
-  if (cal == NULL || raw == NULL || out == NULL || !vector_finite(raw))
-    {
-      return false;
-    }
-
-  if (!cal->valid)
-    {
-      memcpy(out, raw, 3 * sizeof(float));
-      return false;
-    }
-
-  for (row = 0; row < 3; row++)
-    {
-      centred[row] = raw[row] - cal->offset[row];
-    }
-
-  for (row = 0; row < 3; row++)
-    {
-      out[row] = 0.0f;
-
-      for (column = 0; column < 3; column++)
-        {
-          out[row] += cal->matrix[row][column] * centred[column];
-        }
-    }
-
-  /* Sensor axes -> board axes -> vehicle axes. rotation_apply() returning
-   * false means the value was validated at load and cannot fail here; treat
-   * it as a failure anyway rather than publishing the wrong frame.
-   */
-
-  if (!rotation_apply(cal->mag_rot, out))
-    {
-      return false;
-    }
-
-  rotate_by_vector(cal->fine_rv, out);
-
-  if (!rotation_apply(cal->board_rot, out))
-    {
-      return false;
-    }
-
-  return vector_finite(out);
-}
-```
-
-- [ ] **Step 6: Add `-DMAG_CORRECT_HOST_TEST` to the runner**
-
-In `tools/test-mag-correct.sh`, add `-DMAG_CORRECT_HOST_TEST` to the `cc` flags, after `-DFAR=`.
-
-- [ ] **Step 7: Run the test to verify it passes**
-
-```bash
-tools/test-mag-correct.sh
-```
-
-Expected: `mag_correct: calibration order, fine rotation and gating verified - OK`
-
-- [ ] **Step 8: Add to the sensors build**
-
-In `apps/sensors/Makefile`, change the `CSRCS` line and its comment:
-
-```make
-# sensors.c is the daemon; rotation.c is the shared rotation table;
-# dsp_filter.c is the native-rate three-axis FPU biquad;
-# mag_correct.c is the magnetometer calibration and frame math;
-# sensors_main.c is the `sensors` command.
-CSRCS    += sensors.c rotation.c dsp_filter.c mag_correct.c
-```
-
-- [ ] **Step 9: Build and commit**
-
-```bash
-./tools/build.sh
-git add apps/sensors/mag_correct.h apps/sensors/mag_correct.c \
-        apps/sensors/Makefile tests/mag_correct_test.c \
-        tools/test-mag-correct.sh
-git commit -m "sensors: apply the magnetometer calibration in the sensor's own axes
-
-Hard iron, then soft iron, then rotation - the same argument sensors.h
-makes for the IMU. A sphere fit records what each chip axis reads, so
-rotating first would subtract each offset from the wrong axis and still
-produce something that looks like a field.
-
-The fine CAL_MAG0_RV* rotation uses full Rodrigues rather than the
-small-angle form: the parameter is bounded at 0.35 rad, where first order
-is already ~2% wrong and no longer norm-preserving, which would corrupt
-the field-magnitude health check downstream.
-
-Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
-```
-
----
+### Task 2: Magnetometer body-frame framing — COMPLETED, RESCOPED
+
+**This task was planned wrong and has been corrected during execution.**
+
+The original plan had this task write `mag_correct.c` containing hard-iron
+subtraction and a 3x3 soft-iron multiply. **That code already exists** as
+`cal_mag_apply()` in `apps/cal/cal_mag.c`, together with `cal_mag_validate()`
+and `struct cal_mag_fit_s`, and both are host- AND UBSan-tested through
+`tools/test-cal-mag.sh`. Writing it again would have been a straight
+duplication of working, tested code.
+
+What did NOT exist, confirmed by grepping `apps/` and `boards/` for
+`SENS_MAG0_ROT` and `CAL_MAG0_RV*` and finding hits in `param.c` only:
+
+- **No rotation is ever applied to the magnetometer.** `ist8310.c` says so in
+  its header - it publishes raw sensor axes and defers framing to "the fusion
+  stage", which never existed. Those parameters were dead, like `EK3_SRC*`
+  and `SENS_MAG_RATE`.
+- No reusable parameter-to-`cal_mag_fit_s` loader. `cal_load_apply()` in
+  `cal.c` is `static` and its struct is tangled with accel/gyro scale.
+
+**Delivered instead** (commit `b3f529b`): `apps/sensors/mag_frame.h` / `.c`,
+holding only the loader and the rotation, calling `cal_mag_apply()` for the
+correction itself.
+
+- `struct mag_frame_s` — wraps `struct cal_mag_fit_s` plus `fine_rv[3]`,
+  `mag_rot`, `board_rot`, `valid`.
+- `bool mag_frame_load(FAR struct mag_frame_s *frame)`
+- `bool mag_frame_apply(FAR const struct mag_frame_s *frame,
+   FAR const float raw[3], FAR float out[3])`
+
+Chain: `cal_mag_apply()` → `SENS_MAG0_ROT` → `CAL_MAG0_RV*` (full Rodrigues)
+→ `SENS_BOARD_ROT`.
+
+`mag_frame_load()` re-runs `cal_mag_validate()` rather than trusting
+`CAL_MAG0_OK`, because the parameter ranges are wider than the validator's
+bounds — `CAL_MAG0_XOFF` permits ±2.0 Gauss while `CAL_MAG_OFFSET_MAX`
+rejects past 1.50.
+
+Tests: `tests/mag_frame_test.c`, `tools/test-mag-frame.sh` (plain + UBSan).
+Covers loading, rotation ordering, rotation composition, Rodrigues exactness
+and norm preservation, and the invalid/non-finite paths. It does **not**
+retest `cal_mag_apply()`.
+
+`apps/sensors/Kconfig` gained `select XXCAR_CAL` so `sensors` cannot be built
+without the module it now links against.
 
 ### Task 3: Flash A parameters
 
@@ -914,7 +391,7 @@ Publishes the two corrected aiding topics and applies the two rate parameters no
 - Modify: `apps/sensors/Makefile`, `apps/sensors/Kconfig`, `apps/sensors/sensors_main.c`
 
 **Interfaces:**
-- Consumes: `mag_correct_load()`, `mag_correct_apply()`, `struct mag_cal_s` from Task 2; `vehicle_mag_advertise/_publish`, `vehicle_baro_advertise/_publish` from Task 1.
+- Consumes: `mag_frame_load()`, `mag_frame_apply()`, `struct mag_frame_s` from Task 2; `vehicle_mag_advertise/_publish`, `vehicle_baro_advertise/_publish` from Task 1.
 - Produces: `struct sensors_aux_status_s`, `int sensors_aux_start(void)`, `int sensors_aux_stop(void)`, `void sensors_aux_status(FAR struct sensors_aux_status_s *out)`.
 
 - [ ] **Step 1: Write the header**
@@ -1008,7 +485,7 @@ Create `apps/sensors/aux.c`. Read `apps/ekf3/ekf3.c` lines 26–50 and 233–284
 #include <uORB/uORB.h>
 
 #include "aux.h"
-#include "mag_correct.h"
+#include "mag_frame.h"
 #include "../param/param.h"
 #include "../uorb_msgs/uorb_msgs.h"
 
@@ -1051,7 +528,7 @@ static unsigned rate_to_interval_us(int32_t hz)
 }
 
 static void handle_mag(int sub, int pub,
-                       FAR const struct mag_cal_s *cal,
+                       FAR const struct mag_frame_s *frame,
                        FAR struct sensors_aux_status_s *s)
 {
   struct sensor_mag raw;
@@ -1070,14 +547,14 @@ static void handle_mag(int sub, int pub,
   in[1] = raw.y;
   in[2] = raw.z;
 
-  corrected = mag_correct_apply(cal, in, body);
+  corrected = mag_frame_apply(frame, in, body);
 
-  /* mag_correct_apply() returns false both for "not calibrated, passed
+  /* mag_frame_apply() returns false both for "not calibrated, passed
    * through" and for "could not be corrected at all". The first leaves body
-   * usable; the second does not. cal->valid tells them apart.
+   * usable; the second does not. frame->valid tells them apart.
    */
 
-  if (!corrected && cal->valid)
+  if (!corrected && frame->valid)
     {
       s->mag_skipped++;
       return;
@@ -1141,7 +618,7 @@ static void handle_baro(int sub, int pub,
 static int aux_daemon(int argc, FAR char *argv[])
 {
   struct sensors_aux_status_s status;
-  struct mag_cal_s cal;
+  struct mag_frame_s frame;
   struct pollfd fds[2];
   int mag_sub = -1;
   int baro_sub = -1;
@@ -1151,10 +628,10 @@ static int aux_daemon(int argc, FAR char *argv[])
 
   memset(&status, 0, sizeof(status));
 
-  status.mag_calibrated = mag_correct_load(&cal);
-  status.mag_rot = cal.mag_rot;
-  status.board_rot = cal.board_rot;
-  status.mag_expected = cal.field;
+  status.mag_calibrated = mag_frame_load(&frame);
+  status.mag_rot = frame.mag_rot;
+  status.board_rot = frame.board_rot;
+  status.mag_expected = frame.fit.field;
   status.mag_rate_hz = (uint32_t)param_i32("SENS_MAG_RATE");
   status.baro_rate_hz = (uint32_t)param_i32("SENS_BARO_RATE");
 
@@ -1220,7 +697,7 @@ static int aux_daemon(int argc, FAR char *argv[])
 
       if ((fds[0].revents & POLLIN) != 0)
         {
-          handle_mag(mag_sub, mag_pub, &cal, &status);
+          handle_mag(mag_sub, mag_pub, &frame, &status);
         }
 
       if ((fds[1].revents & POLLIN) != 0)
@@ -1417,7 +894,7 @@ paragraph describing the aux daemon and the two rate parameters.
 `apps/sensors/Makefile` — extend `CSRCS`:
 
 ```make
-CSRCS    += sensors.c rotation.c dsp_filter.c mag_correct.c aux.c
+CSRCS    += sensors.c rotation.c dsp_filter.c mag_frame.c aux.c
 ```
 
 `apps/sensors/Kconfig` — append to the `XXCAR_SENSORS` help text:
