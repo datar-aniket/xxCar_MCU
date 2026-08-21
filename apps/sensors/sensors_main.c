@@ -15,6 +15,7 @@
 #include <inttypes.h>
 
 #include "sensors.h"
+#include "aux.h"
 #include "rotation.h"
 
 /****************************************************************************
@@ -24,6 +25,7 @@
 static void usage(void)
 {
   printf("Usage: sensors start | stop | status\n"
+         "       sensors aux start | stop | status\n"
          "\n"
          "  Applies the stored IMU calibration and rotates into the body\n"
          "  frame, publishing vehicle_acceleration and\n"
@@ -34,7 +36,109 @@ static void usage(void)
          "  Orientation: SENS_IMU0_ROT / SENS_IMU1_ROT (sensor to board)\n"
          "               SENS_BOARD_ROT               (board to vehicle)\n"
          "  Filters: SENS_ACC_LPF / SENS_GYR_LPF (Hz, 0 disables)\n"
-         "           SENS_GYR_NF_FRQ / SENS_GYR_NF_BW (Hz)\n");
+         "           SENS_GYR_NF_FRQ / SENS_GYR_NF_BW (Hz)\n"
+         "\n"
+         "  `aux` is the low-rate aiding daemon: it applies the stored\n"
+         "  magnetometer calibration, rotates the field into the vehicle\n"
+         "  frame, and publishes vehicle_mag and vehicle_baro for the\n"
+         "  estimator. sensor_mag0/sensor_baro0 stay untouched.\n"
+         "\n"
+         "  Mag frame: SENS_MAG0_ROT  (sensor to board)\n"
+         "             CAL_MAG0_RVX/Y/Z (fine residual rotation)\n"
+         "             SENS_BOARD_ROT (board to vehicle)\n"
+         "  Rates:     SENS_MAG_RATE / SENS_BARO_RATE (Hz)\n");
+}
+
+static void print_aux_status(void)
+{
+  struct sensors_aux_status_s s;
+
+  sensors_aux_status(&s);
+
+  if (!s.running)
+    {
+      printf("sensors aux: stopped\n");
+      return;
+    }
+
+  printf("sensors aux: running, mag %s\n",
+         s.mag_calibrated ? "calibrated" :
+                            "NOT CALIBRATED - raw passthrough");
+  printf("  frame  mag %s + board %s\n",
+         rotation_name(s.mag_rot), rotation_name(s.board_rot));
+  printf("  rates  mag %" PRIu32 " Hz  baro %" PRIu32 " Hz"
+         "  (SENS_MAG_RATE / SENS_BARO_RATE)\n",
+         s.mag_rate_hz, s.baro_rate_hz);
+  printf("  mag    %+.4f %+.4f %+.4f Gauss  |B| %.4f expected %.4f\n",
+         (double)s.mag_field[0], (double)s.mag_field[1],
+         (double)s.mag_field[2], (double)s.mag_magnitude,
+         (double)s.mag_expected);
+  printf("  baro   %.2f hPa  %.1f C\n",
+         (double)s.baro_pressure, (double)s.baro_temperature);
+  printf("  published  mag %" PRIu32 " (%" PRIu32 " skipped)"
+         "  baro %" PRIu32 " (%" PRIu32 " skipped)\n",
+         s.mag_out, s.mag_skipped, s.baro_out, s.baro_skipped);
+}
+
+/* `sensors aux <verb>`. Separate lifecycle from the IMU daemon so an aiding
+ * sensor can be started, stopped and diagnosed without disturbing the
+ * strapdown path.
+ */
+
+static int aux_command(int argc, FAR char *argv[])
+{
+  int ret;
+
+  if (argc < 3)
+    {
+      usage();
+      return EXIT_FAILURE;
+    }
+
+  if (strcmp(argv[2], "start") == 0)
+    {
+      ret = sensors_aux_start();
+
+      if (ret == -EALREADY)
+        {
+          printf("sensors aux: already running\n");
+          return EXIT_FAILURE;
+        }
+
+      if (ret < 0)
+        {
+          printf("sensors aux: failed to start (%d) - check the syslog; a\n"
+                 "             missing magnetometer or barometer stops it\n",
+                 ret);
+          return EXIT_FAILURE;
+        }
+
+      print_aux_status();
+      return EXIT_SUCCESS;
+    }
+
+  if (strcmp(argv[2], "stop") == 0)
+    {
+      ret = sensors_aux_stop();
+
+      if (ret == -ESRCH)
+        {
+          printf("sensors aux: not running\n");
+          return EXIT_FAILURE;
+        }
+
+      printf("sensors aux: %s\n", ret == OK ? "stopped" : "did not stop");
+      return ret == OK ? EXIT_SUCCESS : EXIT_FAILURE;
+    }
+
+  if (strcmp(argv[2], "status") == 0)
+    {
+      print_aux_status();
+      return EXIT_SUCCESS;
+    }
+
+  usage();
+  return EXIT_FAILURE;
 }
 
 static void print_status(void)
@@ -114,6 +218,11 @@ int main(int argc, FAR char *argv[])
     {
       usage();
       return EXIT_FAILURE;
+    }
+
+  if (strcmp(argv[1], "aux") == 0)
+    {
+      return aux_command(argc, argv);
     }
 
   if (strcmp(argv[1], "start") == 0)

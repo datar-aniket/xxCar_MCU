@@ -17,7 +17,7 @@ MODULE    = $(CONFIG_XXCAR_SENSORS)
 # corrected field into the vehicle frame (the correction itself is
 # apps/cal/cal_mag.c, which is not duplicated here);
 # sensors_main.c is the `sensors` command.
-CSRCS    += sensors.c rotation.c dsp_filter.c mag_frame.c
+CSRCS    += sensors.c rotation.c dsp_filter.c mag_frame.c aux.c
 MAINSRC   = sensors_main.c
 
 include $(APPDIR)/Application.mk

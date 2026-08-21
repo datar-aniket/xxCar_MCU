@@ -32,6 +32,16 @@ config XXCAR_SENSORS
 		disabled by default. Raw IMU topics and the future EKF delta path are
 		unchanged.
 
+		`sensors aux` is a second, low-rate daemon for the aiding sensors. It
+		applies the stored magnetometer calibration (apps/cal/cal_mag.c),
+		rotates the field into the vehicle frame through SENS_MAG0_ROT,
+		CAL_MAG0_RVX/Y/Z and SENS_BOARD_ROT, and publishes vehicle_mag and
+		vehicle_baro for the estimator. sensor_mag0 and sensor_baro0 stay
+		raw, for the same reason the IMU topics do.
+
+		It is also the first code to honour SENS_MAG_RATE and SENS_BARO_RATE,
+		which until now were read by nothing.
+
 if XXCAR_SENSORS
 
 config XXCAR_SENSORS_PROGNAME
