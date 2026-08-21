@@ -9,6 +9,7 @@ config XXCAR_SENSORS
 	depends on UORB && SENSORS
 	select XXCAR_PARAM
 	select XXCAR_UORB_MSGS
+	select XXCAR_CAL
 	---help---
 		Applies the stored IMU calibration and rotates the result into the
 		vehicle's frame, publishing vehicle_acceleration and
