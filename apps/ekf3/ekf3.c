@@ -253,6 +253,17 @@ static void publish_output(int publisher, FAR struct ekf3_status_s *status,
   ekf_core_output_predict(&status->core, replay, count, &output);
   status->output_replay = output.samples_replayed;
 
+  /* Nothing has reached the filter yet. At a 100 ms horizon the first ~40
+   * packets are buffered before a single one is released, and publishing
+   * here would stamp first_output_us with a zero the reported rate never
+   * recovers from.
+   */
+
+  if (output.timestamp_sample == 0)
+    {
+      return;
+    }
+
   fill_output(&status->core, &output, now, &message);
 
   if (estimator_state_publish(publisher, &message) < 0)
@@ -358,7 +369,6 @@ static int ekf3_daemon(int argc, FAR char *argv[])
       struct ekf_imu_sample_s sample;
       uint64_t now;
       uint64_t horizon;
-      bool advanced = false;
       int ready = poll(fds, nfds, 100);
 
       if (ready < 0 && errno != EINTR)
@@ -404,8 +414,6 @@ static int ekf3_daemon(int argc, FAR char *argv[])
               continue;
             }
 
-          advanced = true;
-
           /* Source selection makes a measurement ELIGIBLE. The health gating
            * inside the fusion decides whether it is USED. A parameter never
            * makes a bad measurement good.
@@ -432,10 +440,22 @@ static int ekf3_daemon(int argc, FAR char *argv[])
             }
         }
 
-      if (advanced)
-        {
-          publish_output(publisher, &status, now);
-        }
+      /* Publish once per PACKET, not once per sample the horizon released.
+       *
+       * Those are not the same event and do not line up one to one: a sample
+       * is released when the horizon time crosses its timestamp, and `now` is
+       * read once per iteration, so some iterations release two and some
+       * release none. Gating publication on a release dropped the output to
+       * about 250 Hz against 400 Hz of input.
+       *
+       * The packet is the right trigger because it is what moves the newest
+       * ring entry - the point the output is re-propagated TO. Each new
+       * packet therefore adds one strapdown step to the result and carries a
+       * distinct sample time, whether or not the filter itself advanced this
+       * iteration.
+       */
+
+      publish_output(publisher, &status, now);
 
       status.imu_overflow = g_delay.imu_overflow_count;
       status.mag_overflow = g_delay.mag_overflow_count;
