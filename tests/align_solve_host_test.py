@@ -10,6 +10,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "tools"))
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
+from align_solve import (AlignError, SNAP_LIMIT_DEG, is_mirrored,
+                         orthonormalise, snap)
 from rotation_table import ROTATIONS
 
 # ROLL_180_YAW_90 (10) and PITCH_180_YAW_270 (27) are the same rotation by
@@ -65,11 +67,74 @@ def test_identity_is_rotation_none():
     assert np.allclose(ROTATIONS[0], np.eye(3))
 
 
+def _rot_z(deg):
+    a = np.radians(deg)
+    return np.array(((np.cos(a), -np.sin(a), 0.0),
+                     (np.sin(a), np.cos(a), 0.0),
+                     (0.0, 0.0, 1.0)))
+
+
+def test_snap_finds_the_exact_value():
+    for value, matrix in ROTATIONS.items():
+        got, angle = snap(matrix)
+        assert got == CANONICAL.get(value, value), (value, got)
+        assert angle < 1e-6
+
+
+def test_snap_is_deterministic_across_duplicates():
+    """The two duplicate pairs must always resolve the same way, or the same
+    physical mounting would be reported under two different names depending on
+    floating-point noise.
+    """
+    assert snap(ROTATIONS[27])[0] == 10
+    assert snap(ROTATIONS[26])[0] == 14
+
+
+def test_snap_reports_the_angle_off():
+    got, angle = snap(_rot_z(8.0) @ ROTATIONS[0])
+    assert got == 0
+    assert 7.9 < angle < 8.1
+
+
+def test_snap_refuses_a_reflection():
+    """A mirrored triad is not a rotation and must not be snapped to one.
+
+    This is not hypothetical - the IST8310 is genuinely mirrored against the
+    vehicle frame. Snapping it would return the nearest 180-degree rotation,
+    which looks converged and is wrong.
+    """
+    mirrored = np.diag((1.0, -1.0, 1.0))
+    assert is_mirrored(mirrored)
+
+    try:
+        snap(mirrored)
+    except AlignError as exc:
+        assert "mirror" in str(exc).lower()
+    else:
+        assert False, "snap accepted a reflection"
+
+
+def test_orthonormalise_preserves_handedness():
+    """Polar decomposition must not quietly repair a reflection into a
+    rotation - that would destroy the evidence the flip check depends on.
+    """
+    noisy = np.diag((1.0, -1.0, 1.0)) + np.full((3, 3), 0.01)
+    fixed = orthonormalise(noisy)
+
+    assert np.allclose(fixed @ fixed.T, np.eye(3), atol=1e-9)
+    assert np.linalg.det(fixed) < 0
+
+
 def main():
     test_table_matches_c()
     test_table_is_proper_signed_permutations()
     test_the_known_duplicate_pairs_really_are_duplicates()
     test_identity_is_rotation_none()
+    test_snap_finds_the_exact_value()
+    test_snap_is_deterministic_across_duplicates()
+    test_snap_reports_the_angle_off()
+    test_snap_refuses_a_reflection()
+    test_orthonormalise_preserves_handedness()
     print("align_solve: rotation table verified against rotation.c - OK")
 
 
