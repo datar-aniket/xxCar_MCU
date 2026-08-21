@@ -425,3 +425,117 @@ def mag_rotation(mag, attitude, up, dip_down=True, iterations=60):
     return {"matrix": r, "enum": value, "snap_deg": angle,
             "mirrored": False, "field": field, "residual": residual,
             "dip_deg": float(np.degrees(np.arcsin(dip / field)))}
+
+
+def rate_rotation(reference, target, attitude):
+    """Rotation target -> vehicle, from two rate streams.
+
+    The reference is a gyro already known to be in the vehicle frame. Used for
+    optical flow, whose integrated_*gyro channels work regardless of whether it
+    can see a surface, and as a cross-check on each IMU's accelerometer result -
+    the two share a package, so they must agree.
+
+    Unlike the magnetometer this has no sign ambiguity: a rate is a vector
+    field over a rich rotation, not a single constant direction, so a
+    reflection genuinely cannot fit and det means what it says.
+    """
+    reference = np.asarray(reference, dtype=float)
+    target = np.asarray(target, dtype=float)
+
+    if reference.shape != target.shape or len(reference) < 50:
+        raise AlignError("rate series do not match, or the sweep is too "
+                         "short")
+
+    _require_excitation(attitude)
+
+    scale = float(np.linalg.norm(reference, axis=1).mean())
+
+    if scale < 1e-9:
+        raise AlignError("reference gyro is silent")
+
+    r = orthonormalise(reference.T @ target)
+    residual = float(
+        np.linalg.norm(reference - (r @ target.T).T, axis=1).mean())
+
+    if is_mirrored(r):
+        return {"matrix": r, "enum": None, "snap_deg": None,
+                "mirrored": True, "residual": residual}
+
+    value, angle = snap(r)
+
+    if angle > SNAP_LIMIT_DEG:
+        raise AlignError(
+            f"{angle:.1f} degrees from the nearest representable rotation "
+            f"(limit {SNAP_LIMIT_DEG:.0f})")
+
+    return {"matrix": r, "enum": value, "snap_deg": angle,
+            "mirrored": False, "residual": residual}
+
+
+def _attempt(fn, *args, **kwargs):
+    """Run a solver, turning a refusal into a reported result.
+
+    One sensor refusing must not hide the others: the operator needs to see
+    everything that WAS solved alongside what was not, or a session that is
+    mostly fine looks like a total failure.
+    """
+    try:
+        out = dict(fn(*args, **kwargs))
+        out["error"] = None
+        return out
+    except AlignError as exc:
+        return {"matrix": None, "enum": None, "snap_deg": None,
+                "mirrored": False, "error": str(exc)}
+
+
+def solve_alignment(session, dip_down=True):
+    """Solve every sensor in one captured session.
+
+    session = {
+        "positions": {sensor: {position_name: reading}},
+        "sweep": {"dt": float,
+                  "accel": (N,3) vehicle-frame, for the magnetometer's dip,
+                  "gyro": {sensor: (N,3)},
+                  "mag": (N,3) RAW sensor_mag0},
+    }
+    """
+    positions = session["positions"]
+    sweep = session["sweep"]
+    dt = sweep["dt"]
+    results = {}
+
+    for name in ("imu0", "imu1"):
+        if name in positions:
+            results[name] = _attempt(accel_rotation, positions[name])
+
+    reference = np.asarray(sweep["gyro"]["imu0"], dtype=float)
+    attitude = integrate_attitude(reference, dt)
+
+    if "mag" in sweep:
+        def _mag():
+            up = earth_up(sweep["accel"], attitude)
+            return mag_rotation(sweep["mag"], attitude, up, dip_down)
+
+        results["mag"] = _attempt(_mag)
+
+    if "flow" in sweep["gyro"]:
+        results["flow"] = _attempt(rate_rotation, reference,
+                                   sweep["gyro"]["flow"], attitude)
+
+    # Cross-check each IMU's accelerometer answer against its own gyro. They
+    # share a package, so the rotation is the same one and they must snap to
+    # the same value.
+    for name in ("imu0", "imu1"):
+        if name not in results or name not in sweep["gyro"]:
+            continue
+
+        check = _attempt(rate_rotation, reference, sweep["gyro"][name],
+                         attitude)
+
+        if check["error"] is not None or results[name]["enum"] is None:
+            results[name]["cross_check"] = None
+        else:
+            results[name]["cross_check"] = (
+                check["enum"] == results[name]["enum"])
+
+    return results

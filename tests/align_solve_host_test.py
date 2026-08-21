@@ -12,7 +12,8 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 
 from align_solve import (GRAVITY, POSITIONS, SNAP_LIMIT_DEG, AlignError,
                          accel_rotation, integrate_attitude, is_mirrored,
-                         earth_up, mag_rotation, orthonormalise, snap)
+                         earth_up, mag_rotation, orthonormalise,
+                         rate_rotation, snap, solve_alignment)
 from rotation_table import ROTATIONS
 
 # ROLL_180_YAW_90 (10) and PITCH_180_YAW_270 (27) are the same rotation by
@@ -408,6 +409,91 @@ def test_earth_up_refuses_a_translated_sweep():
         assert False, "accepted an accelerometer that cannot show up"
 
 
+def test_rate_recovers_every_representable_rotation():
+    gyro, dt = _sweep()
+    attitude = integrate_attitude(gyro, dt)
+
+    for value, matrix in ROTATIONS.items():
+        target = np.array([np.asarray(matrix).T @ w for w in gyro])
+        got = rate_rotation(gyro, target, attitude)
+        assert got["enum"] == CANONICAL.get(value, value), (value,
+                                                            got["enum"])
+
+
+def test_rate_refuses_a_single_axis_sweep():
+    count, dt = 400, 0.02
+    t = np.arange(count) * dt
+    gyro = np.stack((np.sin(2 * np.pi * 0.3 * t),
+                     np.zeros(count), np.zeros(count)), axis=1)
+    attitude = integrate_attitude(gyro, dt)
+
+    try:
+        rate_rotation(gyro, gyro.copy(), attitude)
+    except AlignError as exc:
+        assert "axis" in str(exc).lower()
+    else:
+        assert False, "accepted a single-axis sweep"
+
+
+def _session(imu0=None, imu1=None, mag=None):
+    imu0 = ROTATIONS[0] if imu0 is None else imu0
+    imu1 = ROTATIONS[2] if imu1 is None else imu1
+    mag = ROTATIONS[0] if mag is None else mag
+    gyro, dt = _sweep()
+    mag_series, accel_series, _attitude = _mag_for(mag, gyro, dt)
+
+    return {
+        "positions": {
+            "imu0": _positions_for(imu0),
+            "imu1": _positions_for(imu1),
+        },
+        "sweep": {
+            "dt": dt,
+            "accel": accel_series,
+            "gyro": {
+                "imu0": gyro,
+                "imu1": np.array([np.asarray(imu1).T @ w for w in gyro]),
+                "flow": np.array([ROTATIONS[4].T @ w for w in gyro]),
+            },
+            "mag": mag_series,
+        },
+    }
+
+
+def test_solve_reports_every_sensor():
+    got = solve_alignment(_session())
+
+    assert got["imu0"]["enum"] == 0
+    assert got["imu1"]["enum"] == 2
+    assert got["mag"]["enum"] == 0
+    assert got["flow"]["enum"] == 4
+    assert all(r.get("error") is None for r in got.values())
+
+
+def test_solve_flags_a_gyro_cross_check_disagreement():
+    """The gyro must land on the same value the accelerometer did. They share
+    a package, so a disagreement means one of the two streams is wrong - and
+    which one matters, so it is named rather than averaged away.
+    """
+    session = _session()
+    session["sweep"]["gyro"]["imu1"] = np.array(
+        [ROTATIONS[6].T @ w for w in session["sweep"]["gyro"]["imu0"]])
+
+    got = solve_alignment(session)
+    assert got["imu1"]["cross_check"] is False
+
+
+def test_solve_isolates_one_bad_sensor():
+    """A sensor that refuses must not take the others down with it."""
+    session = _session()
+    del session["positions"]["imu1"]["level"]
+
+    got = solve_alignment(session)
+    assert got["imu1"]["error"] is not None
+    assert got["imu0"]["error"] is None
+    assert got["imu0"]["enum"] == 0
+
+
 def main():
     test_table_matches_c()
     test_table_is_proper_signed_permutations()
@@ -435,7 +521,13 @@ def main():
     test_mag_works_in_the_southern_hemisphere()
     test_mag_refuses_a_dip_too_shallow_to_judge()
     test_earth_up_refuses_a_translated_sweep()
-    print("align_solve: rotation table verified against rotation.c - OK")
+    test_rate_recovers_every_representable_rotation()
+    test_rate_refuses_a_single_axis_sweep()
+    test_solve_reports_every_sensor()
+    test_solve_flags_a_gyro_cross_check_disagreement()
+    test_solve_isolates_one_bad_sensor()
+    print("align_solve: rotations, gravity columns, magnetometer dip "
+          "and every refusal path verified - OK")
 
 
 if __name__ == "__main__":
