@@ -13,6 +13,11 @@
 
 #include <arch/board/board.h>
 
+#include <nuttx/clock.h>
+#include <nuttx/compiler.h>
+#include <nuttx/irq.h>
+#include <nuttx/semaphore.h>
+
 #include "arm_internal.h"
 #include "stm32_gpio.h"
 #include "hardware/stm32_fdcan.h"
@@ -20,6 +25,8 @@
 
 #include <arch/board/fdcan.h>
 #include "fdcan_ram.h"
+#include "fdcan_ring.h"
+#include "fmuv6c.h"
 
 /* NuttX's stm32_fdcan.h defines NTSEG1, NBRP and NSJW but NOT NTSEG2.
  * Reference manual: NBTP bits [6:0]. Without this the field would land at
@@ -77,6 +84,13 @@
 
 #define FDCAN_TX_DLC_SHIFT        (16u)
 
+/* The interrupt flags this driver acts on. RF0N is a new message in Rx
+ * FIFO 0; RF0L is one the hardware had to discard because the FIFO was
+ * already full. Both are write-1-to-clear in IR.
+ */
+
+#define FDCAN_IRQ_MASK            (FDCAN_IR_RF0N | FDCAN_IR_RF0L)
+
 /* GFC: reject everything that does not match, including remote frames.
  * ANFE/ANFS 3 = reject non-matching.
  */
@@ -95,6 +109,26 @@
 
 static struct fdcan_stats_s g_stats;
 static bool g_ready;
+static bool g_irq_attached;
+static bool g_sem_initialized;
+
+/* The receive ring. `head` belongs to the interrupt handler and `tail` to
+ * the task; neither writes the other's. See fdcan_ring.h for why that is
+ * enough, and why one slot stays empty.
+ */
+
+static struct fdcan_frame_s g_ring[FDCAN_RING_N];
+static volatile uint32_t g_head;
+static volatile uint32_t g_tail;
+
+/* Posted once per interrupt batch, not once per frame. The task drains the
+ * whole ring on each wake, so a post per frame would only make it loop
+ * through an empty ring counting down a semaphore.
+ */
+
+static sem_t g_rx_sem;
+
+static int fdcan_isr(int irq, FAR void *context, FAR void *arg);
 
 static void fdcan_ram_clear(void)
 {
@@ -225,6 +259,11 @@ int fdcan_init(uint32_t bitrate)
       return -ENOTSUP;
     }
 
+  if (g_ready)
+    {
+      return -EALREADY;
+    }
+
   regval = getreg32(STM32_RCC_APB1HENR);
   regval |= RCC_APB1HENR_FDCANEN;
   putreg32(regval, STM32_RCC_APB1HENR);
@@ -280,14 +319,113 @@ int fdcan_init(uint32_t bitrate)
 
   fdcan_write_filter(0);
 
-  fdcan_leave_config();
+  /* Route both flags to interrupt line 0 (ILS = 0 selects line 0 for every
+   * source) and enable that line. Enabling a source in IE without ILE is the
+   * quiet failure here: the flag sets in IR, nothing reaches the NVIC, and
+   * the driver looks like a bus with no traffic on it.
+   */
+
+  putreg32(FDCAN_IRQ_MASK, STM32_FDCAN1_IE);
+  putreg32(0, STM32_FDCAN1_ILS);
+  putreg32(FDCAN_ILE_EINT0, STM32_FDCAN1_ILE);
+
+  /* IR is write-one-to-clear and can retain a pending receive indication
+   * across a daemon restart. Clear it before the NVIC line is enabled.
+   */
+
+  putreg32(UINT32_MAX, STM32_FDCAN1_IR);
 
   memset(&g_stats, 0, sizeof(g_stats));
+  g_head = 0;
+  g_tail = 0;
+
+  /* Matches the pattern the IMU drivers already use on this board: a plain
+   * counting semaphore, posted from interrupt context, waited on with
+   * nxsem_tickwait.
+   */
+
+  ret = nxsem_init(&g_rx_sem, 0, 0);
+
+  if (ret < 0)
+    {
+      putreg32(0, STM32_FDCAN1_IE);
+      putreg32(0, STM32_FDCAN1_ILE);
+      return ret;
+    }
+
+  g_sem_initialized = true;
+
+  ret = irq_attach(STM32_IRQ_FDCAN1_0, fdcan_isr, NULL);
+
+  if (ret < 0)
+    {
+      nxsem_destroy(&g_rx_sem);
+      g_sem_initialized = false;
+      putreg32(0, STM32_FDCAN1_IE);
+      putreg32(0, STM32_FDCAN1_ILE);
+      return ret;
+    }
+
+  g_irq_attached = true;
+
+  /* Ready BEFORE the first interrupt can arrive: the handler fills the ring
+   * unconditionally, but fdcan_receive refuses to hand anything out until
+   * this is set, and leaving INIT is what starts the traffic.
+   */
+
   g_ready = true;
+
+  fdcan_leave_config();
+  up_enable_irq(STM32_IRQ_FDCAN1_0);
   return OK;
 }
 
-int fdcan_receive(FAR struct fdcan_frame_s *frame)
+void fdcan_deinit(void)
+{
+  up_disable_irq(STM32_IRQ_FDCAN1_0);
+  putreg32(0, STM32_FDCAN1_IE);
+  putreg32(0, STM32_FDCAN1_ILE);
+  g_ready = false;
+
+  if (g_irq_attached)
+    {
+      irq_detach(STM32_IRQ_FDCAN1_0);
+      g_irq_attached = false;
+    }
+
+  if (g_sem_initialized)
+    {
+      nxsem_destroy(&g_rx_sem);
+      g_sem_initialized = false;
+    }
+
+  /* INIT stops both reception and command transmission. Interrupts and
+   * public access are already disabled if the transition itself fails.
+   */
+
+  if (fdcan_enter_config() == OK)
+    {
+      putreg32(UINT32_MAX, STM32_FDCAN1_IR);
+    }
+
+  g_head = 0;
+  g_tail = 0;
+}
+
+/* Move one element out of Rx FIFO 0 into `frame`, and release the slot.
+ *
+ * Shared by the interrupt handler; split out because acknowledging the FIFO
+ * has to happen on every path, including the ones that discard the frame.
+ */
+
+enum fdcan_take_e
+{
+  FDCAN_TAKE_EMPTY = 0,
+  FDCAN_TAKE_ACCEPTED,
+  FDCAN_TAKE_REJECTED
+};
+
+static enum fdcan_take_e fdcan_fifo_take(FAR struct fdcan_frame_s *frame)
 {
   uint32_t status;
   uint32_t index;
@@ -296,20 +434,11 @@ int fdcan_receive(FAR struct fdcan_frame_s *frame)
   uint32_t w1;
   uint32_t i;
 
-  if (!g_ready || frame == NULL)
-    {
-      return -EINVAL;
-    }
-
   status = getreg32(STM32_FDCAN1_RXF0S);
-
-  /* F0FL is the fill level. Everything else in this register is about
-   * WHERE, not whether.
-   */
 
   if ((status & FDCAN_RXF0S_F0FL_MASK) == 0)
     {
-      return -EAGAIN;
+      return FDCAN_TAKE_EMPTY;
     }
 
   index = (status & FDCAN_RXF0S_F0GI_MASK) >> FDCAN_RXF0S_F0GI_SHIFT;
@@ -347,10 +476,147 @@ int fdcan_receive(FAR struct fdcan_frame_s *frame)
   if ((w0 & FDCAN_RX_XTD) == 0 || (w0 & FDCAN_RX_RTR) != 0)
     {
       g_stats.rejected++;
+      return FDCAN_TAKE_REJECTED;
+    }
+
+  return FDCAN_TAKE_ACCEPTED;
+}
+
+static int fdcan_isr(int irq, FAR void *context, FAR void *arg)
+{
+  uint32_t pending;
+  bool arrived = false;
+  int guard;
+
+  pending = getreg32(STM32_FDCAN1_IR) & FDCAN_IRQ_MASK;
+
+  /* Clear BEFORE draining. A frame that lands while this handler is running
+   * sets RF0N again, and clearing afterwards would wipe that notification
+   * along with the one being serviced - leaving a frame in the FIFO with
+   * nothing scheduled to come back for it.
+   */
+
+  putreg32(pending, STM32_FDCAN1_IR);
+
+  if ((pending & FDCAN_IR_RF0L) != 0)
+    {
+      g_stats.lost++;
+    }
+
+  /* Bounded by the hardware FIFO depth, which is the most that can be
+   * waiting. It cannot spin: a frame takes at least ~50 us on the wire at
+   * 1 Mbit/s and about a microsecond to move out of the FIFO here, so the
+   * drain always wins. The bound only guarantees that if the assumption is
+   * ever wrong, this leaves interrupt context anyway.
+   */
+
+  for (guard = 0; guard < (int)FDCAN_RAM_RXF0_N; guard++)
+    {
+      struct fdcan_frame_s frame;
+      enum fdcan_take_e taken;
+
+      taken = fdcan_fifo_take(&frame);
+
+      if (taken == FDCAN_TAKE_EMPTY)
+        {
+          break;
+        }
+
+      if (taken == FDCAN_TAKE_REJECTED)
+        {
+          continue;
+        }
+
+      if (fdcan_ring_full(g_head, g_tail))
+        {
+          /* The task has not kept up. Drop the newest rather than overwrite
+           * the oldest: the tail is the task's index and moving it from here
+           * is the one thing that would need a lock.
+           */
+
+          g_stats.ring_full++;
+          continue;
+        }
+
+      frame.ts = fmuv6c_imu_time_now();
+      g_ring[g_head] = frame;
+
+      /* Publish the slot only after its complete frame is visible. The task
+       * performs the matching acquire barrier after observing head.
+       */
+
+      memory_barrier();
+      g_head = fdcan_ring_next(g_head);
+      g_stats.rx++;
+      arrived = true;
+    }
+
+  if (arrived)
+    {
+      int value = 0;
+
+      /* Only post when the task is actually waiting. Otherwise the count
+       * builds up while it is busy and it spins through an empty ring that
+       * many times before blocking again.
+       */
+
+      if (nxsem_get_value(&g_rx_sem, &value) == OK && value <= 0)
+        {
+          nxsem_post(&g_rx_sem);
+        }
+    }
+
+  UNUSED(irq);
+  UNUSED(context);
+  UNUSED(arg);
+  return OK;
+}
+
+int fdcan_wait(uint32_t timeout_us)
+{
+  sclock_t ticks;
+  uint64_t rounded;
+
+  if (!g_ready)
+    {
+      return -EINVAL;
+    }
+
+  if (!fdcan_ring_empty(g_head, g_tail))
+    {
+      return OK;
+    }
+
+  /* Round up. USEC2TICK truncates, and a timeout that rounds to zero would
+   * turn this into a spin.
+   */
+
+  rounded = (uint64_t)timeout_us + USEC_PER_TICK - 1u;
+  ticks = (sclock_t)(rounded / USEC_PER_TICK);
+
+  if (ticks < 1)
+    {
+      ticks = 1;
+    }
+
+  return nxsem_tickwait(&g_rx_sem, ticks);
+}
+
+int fdcan_receive(FAR struct fdcan_frame_s *frame)
+{
+  if (!g_ready || frame == NULL)
+    {
+      return -EINVAL;
+    }
+
+  if (fdcan_ring_empty(g_head, g_tail))
+    {
       return -EAGAIN;
     }
 
-  g_stats.rx++;
+  memory_barrier();
+  *frame = g_ring[g_tail];
+  g_tail = fdcan_ring_next(g_tail);
   return OK;
 }
 
@@ -433,6 +699,7 @@ int fdcan_transmit(FAR const struct fdcan_frame_s *frame)
 
 void fdcan_stats(FAR struct fdcan_stats_s *out)
 {
+  irqstate_t flags;
   uint32_t psr;
 
   if (out == NULL)
@@ -441,14 +708,11 @@ void fdcan_stats(FAR struct fdcan_stats_s *out)
     }
 
   psr = getreg32(STM32_FDCAN1_PSR);
+  flags = enter_critical_section();
   g_stats.last_error = (uint8_t)(psr & FDCAN_PSR_LEC_MASK);
   g_stats.bus_off = (psr & FDCAN_PSR_BO_MASK) != 0;
   g_stats.error_passive = (psr & FDCAN_PSR_EP_MASK) != 0;
 
-  if ((getreg32(STM32_FDCAN1_RXF0S) & FDCAN_RXF0S_RF0L) != 0)
-    {
-      g_stats.lost++;
-    }
-
   *out = g_stats;
+  leave_critical_section(flags);
 }

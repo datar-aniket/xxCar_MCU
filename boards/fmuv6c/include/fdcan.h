@@ -14,6 +14,12 @@
  * of the first version so that a driver still proving its bit timing could
  * not spin a motor; that timing is now confirmed on hardware.
  *
+ * Receive is INTERRUPT DRIVEN. There is no DMA option: FDCAN has no DMAMUX
+ * request line on this part, and does not need one - the CAN core writes
+ * received frames into its own message RAM with no CPU and no DMA channel.
+ * The bytes have already moved by the time anything notices. Polling never
+ * cost a copy; it cost the delay in finding out.
+ *
  * Classic CAN, 8-byte frames. CAN FD would change the message RAM element
  * size from four words to eighteen and invalidate the layout in fdcan.c.
  ****************************************************************************/
@@ -30,6 +36,13 @@
 
 struct fdcan_frame_s
 {
+  /* When the interrupt handler took the frame out of the hardware FIFO, on
+   * the same epoch as CLOCK_MONOTONIC but with microsecond resolution rather
+   * than the 1 ms system tick. Set on receive; ignored on transmit.
+   */
+
+  uint64_t ts;
+
   uint32_t id;              /* 29-bit extended identifier */
   uint8_t  dlc;             /* 0..8 */
   uint8_t  data[8];
@@ -37,11 +50,12 @@ struct fdcan_frame_s
 
 struct fdcan_stats_s
 {
-  uint32_t rx;              /* frames handed out */
+  uint32_t rx;              /* valid frames captured by the ISR */
   uint32_t lost;            /* RX FIFO0 overruns - not drained fast enough */
   uint32_t rejected;        /* non-extended or remote frames */
   uint32_t tx;              /* frames queued for transmission */
   uint32_t tx_full;         /* dropped: Tx FIFO had no free element */
+  uint32_t ring_full;       /* dropped: the task did not keep up */
   uint8_t  last_error;      /* PSR LEC */
   bool     bus_off;
   bool     error_passive;
@@ -53,14 +67,33 @@ struct fdcan_stats_s
 
 int fdcan_init(uint32_t bitrate);
 
-/* Take one frame. Returns OK, or -EAGAIN when the FIFO is empty.
+/* Stop receive interrupts and put the peripheral back into INIT mode.
+ * Safe to call after a partial initialization failure.
+ */
+
+void fdcan_deinit(void);
+
+/* Take one frame from the receive ring. Returns OK, or -EAGAIN when the ring
+ * is empty. Never blocks.
  *
- * Non-blocking and polled. Much less code than an interrupt path and
- * adequate for telemetry, but it puts the caller's poll interval as jitter
- * on the data - worth revisiting if a control loop ever depends on it.
+ * The frame was moved out of the hardware FIFO and timestamped by the
+ * interrupt handler, so `ts` is the arrival time and not the time this was
+ * called.
  */
 
 int fdcan_receive(FAR struct fdcan_frame_s *frame);
+
+/* Block until a frame arrives or the timeout expires.
+ *
+ * Returns OK if woken by an arrival, -ETIMEDOUT on the timeout. Callers with
+ * their own deadline - a transmit cadence, say - pass the time remaining and
+ * treat both returns the same way: drain, then check the deadline.
+ *
+ * The timeout is rounded up to whole system ticks, which are 1 ms here.
+ * Asking for less does not get less.
+ */
+
+int fdcan_wait(uint32_t timeout_us);
 
 /* Queue one frame. Returns OK, -EAGAIN when the Tx FIFO is full, or -EINVAL
  * before init.

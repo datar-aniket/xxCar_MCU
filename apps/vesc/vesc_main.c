@@ -78,9 +78,9 @@ static void print_status(void)
          s.bitrate,
          s.filter_id == 0 ? "accept-any" : "one id");
 
-  printf("  bus     rx %" PRIu32 "  lost %" PRIu32 "  rejected %" PRIu32
-         "  state %s\n",
-         s.bus.rx, s.bus.lost, s.bus.rejected,
+  printf("  bus     rx %" PRIu32 "  hw_lost %" PRIu32
+         "  ring_lost %" PRIu32 "  rejected %" PRIu32 "  state %s\n",
+         s.bus.rx, s.bus.lost, s.bus.ring_full, s.bus.rejected,
          s.bus.bus_off ? "BUS_OFF" :
          s.bus.error_passive ? "ERROR_PASSIVE" : "ERROR_ACTIVE");
 

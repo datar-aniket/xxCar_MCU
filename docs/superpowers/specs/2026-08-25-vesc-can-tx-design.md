@@ -162,11 +162,11 @@ some other rate should not change what the bus sees. A steady heartbeat is
 also what keeps the VESC's internal command timeout from firing during normal
 operation.
 
-The transmit deadline is checked in the same loop as the receive poll, and
-that loop runs at 1 ms — the scheduler tick, and so the finest sleep
-available. It was 2 ms until the transmit path needed it tighter: a 2 ms
-check cannot place a 2500 us period, and produced gaps alternating between
-2 ms and 4 ms. At 1 ms the same 400 Hz comes out as 2 ms and 3 ms in turn.
+The daemon blocks on the receive interrupt semaphore with the next transmit
+deadline as its timeout. Timeout resolution is still the 1 ms scheduler tick,
+so 400 Hz commands alternate between 2 ms and 3 ms gaps. RX arrival is not
+tick-quantized: FDCAN writes the frame directly into message RAM, the ISR
+timestamps it from the shared 1 MHz TIM5 clock, and wakes the daemon.
 
 `VESC_TX_RATE` is capped at 500, which is exactly two ticks and the last rate
 the clock can express evenly. Rates that are not a whole number of ticks
@@ -333,8 +333,7 @@ firing is a failsafe nobody knows the state of.
   nothing compares it to the command. Closing that needs the calibration this
   spec declines to invent.
 - **One VESC.** `VESC_CAN_ID` addresses a single controller.
-- **Transmit jitter is the scheduler tick.** Commands go out on a 1 ms polled
-  loop, which is `CONFIG_USEC_PER_TICK` and the shortest sleep expressible
-  without tickless mode. At the default 400 Hz that means gaps of 2 ms and
-  3 ms in turn rather than a steady 2.5 ms. Removing it needs a hardware
-  timer or an interrupt-driven transmit, not a smaller sleep.
+- **Transmit jitter is the scheduler tick.** The interrupt-driven RX path
+  does not change the timeout resolution used for TX. At the default 400 Hz
+  that means gaps of 2 ms and 3 ms in turn rather than a steady 2.5 ms.
+  Removing it needs a hardware timer or interrupt-driven transmit scheduling.

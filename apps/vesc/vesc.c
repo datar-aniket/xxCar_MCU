@@ -29,19 +29,12 @@
 #define VESC_PRIORITY   (SCHED_PRIORITY_DEFAULT + 10)
 #define VESC_STACK      2048
 
-/* Loop interval, and the floor on it: CONFIG_USEC_PER_TICK is 1000 and there
- * is no tickless mode, so a shorter sleep is not expressible.
- *
- * It was 2 ms, which was ample for draining STATUS_5 at tens of hertz. The
- * transmit deadline is what tightened it: checking every 2 ms cannot place a
- * 2500 us period, and the cadence came out as 2 ms and 4 ms in turn - the
- * right average rate with twice the jitter it needs.
- *
- * This interval IS the jitter on both directions - see the note in fdcan.h
- * about polling being a deliberate trade.
+/* Discovery mode has no transmit deadline to wake the task. Keep a bounded
+ * wait so `vesc stop` and status refresh remain responsive even on a silent
+ * bus. Normal operation wakes at the next transmit deadline instead.
  */
 
-#define VESC_POLL_US    1000
+#define VESC_IDLE_WAIT_US  100000
 
 /* Bound on one drain pass. Without it a bus stuck jabbering would keep this
  * loop from ever reaching g_should_stop, and `vesc stop` would hang.
@@ -132,10 +125,21 @@ static void vesc_handle(FAR const struct fdcan_frame_s *frame, int pub,
   uint8_t packet_id = vesc_packet_id(frame->id);
   uint8_t controller_id = vesc_controller_id(frame->id);
   uint64_t now = vesc_now_us();
+  uint64_t sample_us = frame->ts != 0 ? frame->ts : now;
   struct vesc_status5_s decoded;
   struct vesc_status_s out;
 
-  vesc_note_seen(s, packet_id, controller_id, now);
+  /* CLOCK_MONOTONIC is tick-quantized on this configuration while the ISR
+   * timestamp is not. Do not publish a reception time that appears to occur
+   * before its sample by the sub-tick remainder.
+   */
+
+  if (now < sample_us)
+    {
+      now = sample_us;
+    }
+
+  vesc_note_seen(s, packet_id, controller_id, sample_us);
 
   if (packet_id != VESC_PACKET_STATUS_5)
     {
@@ -159,7 +163,7 @@ static void vesc_handle(FAR const struct fdcan_frame_s *frame, int pub,
 
   memset(&out, 0, sizeof(out));
   out.timestamp = now;
-  out.timestamp_sample = now;
+  out.timestamp_sample = sample_us;
   out.tachometer = decoded.tachometer;
   out.current_a = decoded.current_a;
   out.adc_volts = decoded.adc_volts;
@@ -172,7 +176,7 @@ static void vesc_handle(FAR const struct fdcan_frame_s *frame, int pub,
     }
 
   s->last = decoded;
-  s->last_us = now;
+  s->last_us = sample_us;
   s->decoded++;
 }
 
@@ -309,6 +313,7 @@ static int vesc_daemon(int argc, FAR char *argv[])
   int pub = -1;
   int sub = -1;
   int result = EXIT_FAILURE;
+  bool can_ready = false;
   uint64_t next_tx_us;
   uint64_t tx_period_us;
   int ret;
@@ -334,11 +339,19 @@ static int vesc_daemon(int argc, FAR char *argv[])
       goto out;
     }
 
+  can_ready = true;
+
   /* fdcan_init leaves the filter accept-any. Narrowing it is a separate
    * call so discovery and normal operation take the same path.
    */
 
-  fdcan_set_filter(status.filter_id);
+  ret = fdcan_set_filter(status.filter_id);
+
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "[vesc] cannot set FDCAN1 filter (%d)\n", -ret);
+      goto out;
+    }
 
   pub = vesc_status_advertise();
 
@@ -373,10 +386,9 @@ static int vesc_daemon(int argc, FAR char *argv[])
       struct fdcan_frame_s frame;
       int drained = 0;
 
-      /* Drain everything pending before sleeping. A burst arrives faster
-       * than the poll interval, and leaving frames in the FIFO to collect
-       * one per wake-up is how an overrun happens on a bus that is not even
-       * busy.
+      /* Drain the complete software ring after every wake. Taking only one
+       * frame would leave the remainder queued until another interrupt or
+       * transmit deadline, adding latency and eventually overflowing it.
        */
 
       while (drained++ < VESC_DRAIN_MAX && fdcan_receive(&frame) == OK)
@@ -409,7 +421,28 @@ static int vesc_daemon(int argc, FAR char *argv[])
 
       fdcan_stats(&status.bus);
       status_publish(&status);
-      usleep(VESC_POLL_US);
+
+      /* RX wakes this task immediately. With a configured controller the
+       * timeout is the time left to the transmit deadline; discovery mode
+       * uses only a bounded stop/status watchdog.
+       */
+
+      if (status.filter_id != 0)
+        {
+          uint64_t now = vesc_now_us();
+          uint64_t wait_us = next_tx_us > now ? next_tx_us - now : 1u;
+
+          if (wait_us > UINT32_MAX)
+            {
+              wait_us = UINT32_MAX;
+            }
+
+          fdcan_wait((uint32_t)wait_us);
+        }
+      else
+        {
+          fdcan_wait(VESC_IDLE_WAIT_US);
+        }
     }
 
   result = EXIT_SUCCESS;
@@ -426,6 +459,11 @@ out:
   if (pub >= 0)
     {
       orb_unadvertise(pub);
+    }
+
+  if (can_ready)
+    {
+      fdcan_deinit();
     }
 
   g_armed = false;
