@@ -109,10 +109,13 @@ wrong direction then fails to route at all, rather than half-working.
   float32 velocity[3]       m/s, local NWU
   uint8   solution_status   ESTIMATOR_* validity bits
   uint8   reset_counter     estimator reset generation
-  uint8   pad[2]
+  uint8   pad[6]
 ```
 
-52 bytes. A quaternion rather than Euler angles: no singularity, and no
+56 bytes. The payload sums to 50, but a uint64 first member forces 8-byte
+alignment, so the compiler would pad to 56 regardless - the padding is
+declared explicitly rather than left implicit, and asserted, so the wire
+format is what the struct says it is. A quaternion rather than Euler angles: no singularity, and no
 convention to argue about across a language boundary.
 
 `reset_counter` matters more than it looks. The datum reset below moves
