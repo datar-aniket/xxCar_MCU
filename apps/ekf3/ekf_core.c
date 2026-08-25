@@ -1800,19 +1800,56 @@ void ekf_core_add_align_mag(FAR struct ekf_core_s *ekf,
   ekf->align_mag_samples++;
 }
 
+/* Fuse an absolute yaw measurement.
+ *
+ * Shared by the magnetometer and by external navigation. Two copies of this
+ * would be two ideas about what a yaw update is, free to drift apart while
+ * both look correct.
+ *
+ * A yaw error is a rotation about the navigation UP axis. The state is a
+ * BODY-frame rotation vector, so the observation is that axis expressed in
+ * body - the third row of the body-to-nav rotation, which is exactly the
+ * gauge direction the gravity update projects OUT.
+ */
+
+static int fuse_yaw(FAR struct ekf_core_s *ekf, float yaw_meas, float noise,
+                    float gate_sigma, FAR float *nis)
+{
+  float h[EKF_STATE_DIM];
+  float rotation[3][3];
+  float euler[3];
+  float residual;
+  int axis;
+
+  if (ekf == NULL || !isfinite(yaw_meas) || !isfinite(noise) ||
+      noise <= 0.0f)
+    {
+      return -1;
+    }
+
+  ekf_core_euler(ekf, euler);
+  residual = wrap_pi(yaw_meas - euler[2]);
+
+  quaternion_to_rotation(ekf->quaternion, rotation);
+  memset(h, 0, sizeof(h));
+
+  for (axis = 0; axis < 3; axis++)
+    {
+      h[axis] = rotation[2][axis];
+    }
+
+  return measurement_update_1d(ekf, h, residual, noise * noise, gate_sigma,
+                               nis);
+}
+
 int ekf_core_fuse_mag(FAR struct ekf_core_s *ekf,
                       FAR const float field[3], float declination,
                       float expected_field, float noise,
                       float gate_sigma)
 {
-  float h[EKF_STATE_DIM];
-  float rotation[3][3];
-  float euler[3];
   float heading;
   float magnitude;
-  float residual;
   int result;
-  int axis;
 
   if (ekf == NULL || field == NULL || !ekf->initialized ||
       !vector_finite(field) || !isfinite(noise) || noise <= 0.0f)
@@ -1857,25 +1894,8 @@ int ekf_core_fuse_mag(FAR struct ekf_core_s *ekf,
     }
 
   ekf->last_mag_heading = heading;
-  ekf_core_euler(ekf, euler);
-  residual = wrap_pi(heading - euler[2]);
 
-  /* A yaw error is a rotation about the navigation UP axis. The state is a
-   * BODY-frame rotation vector, so the observation is that axis expressed in
-   * body - the third row of the body-to-nav rotation, which is exactly the
-   * gauge direction the gravity update projects OUT.
-   */
-
-  quaternion_to_rotation(ekf->quaternion, rotation);
-  memset(h, 0, sizeof(h));
-
-  for (axis = 0; axis < 3; axis++)
-    {
-      h[axis] = rotation[2][axis];
-    }
-
-  result = measurement_update_1d(ekf, h, residual, noise * noise,
-                                 gate_sigma, &ekf->last_mag_nis);
+  result = fuse_yaw(ekf, heading, noise, gate_sigma, &ekf->last_mag_nis);
 
   if (result == 1)
     {
