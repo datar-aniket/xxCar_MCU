@@ -150,8 +150,9 @@ static const struct param_def_s g_params[] =
    * The estimator agrees, which is worth checking rather than assuming: at
    * rest a level FLU accelerometer reads +g on z, and ekf_core.c removes
    * gravity as `nav_delta_velocity[2] -= EKF_GRAVITY * dt`. Those cancel only
-   * if the navigation frame's z is UP too. It is NWU - north, west, up - and
-   * yaw is positive counter-clockwise seen from above, zero at north.
+   * if the navigation frame's z is UP too. It is ENU - east, north, up - the ROS
+   * REP-103 convention, and yaw is positive counter-clockwise seen from
+   * above with ZERO AT EAST.
    *
    * A consequence worth knowing before comparing anything against PX4 or
    * ArduPilot: roll and yaw run in the opposite sense to FRD, because a

@@ -261,13 +261,14 @@ struct vehicle_imu_s
 
 /* FRAMES. Body is +x FORWARD, +y LEFT, +z UP - what the ICM-42688-P and
  * BMI055 natively report, and what this project keeps rather than flipping
- * into PX4's FRD. The navigation frame is NWU: north, west, up.
+ * into PX4's FRD. The navigation frame is ENU: east, north, up.
  *
  * This is not a label, it is arithmetic: at rest a level FLU accelerometer
  * reads +g on z, and ekf_core.c removes gravity as `nav_dv[2] -= g*dt`.
  * Those cancel only if nav z is UP. position[2] and velocity[2] are
  * therefore UP-positive, and yaw is positive COUNTER-CLOCKWISE seen from
- * above, zero at north - the opposite sense to a compass bearing.
+ * above, ZERO AT EAST - the ROS REP-103 convention, and the opposite sense
+ * to a compass bearing.
  *
  * These fields said "NED" until 2026-08-20 and it was never true. The label
  * was believed over the arithmetic once already, and it put an inverted sign
@@ -278,9 +279,9 @@ struct estimator_state_s
 {
   uint64_t timestamp;             /*   0: us, publication time */
   uint64_t timestamp_sample;      /*   8: us, state prediction horizon */
-  float    quaternion[4];         /*  16: body(FLU) to local NWU, w/x/y/z */
-  float    velocity[3];           /*  32: NWU m/s, +z is up */
-  float    position[3];           /*  44: local NWU m, +z is up */
+  float    quaternion[4];         /*  16: body(FLU) to local ENU, w/x/y/z */
+  float    velocity[3];           /*  32: ENU m/s, +z is up */
+  float    position[3];           /*  44: local ENU m, +z is up */
   float    gyro_bias[3];          /*  56: body rad/s */
   float    accel_bias[3];         /*  68: body m/s^2 */
   float    angle_variance[3];     /*  80: rad^2 */

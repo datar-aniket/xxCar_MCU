@@ -629,7 +629,7 @@ static bool covariance_predict(FAR struct ekf_core_s *ekf)
   quaternion_to_rotation(ekf->quaternion, rotation);
 
   /* -R_nb * skew(f_b), coupling attitude error into navigation-frame
-   * velocity. The frame is NWU - north, west, up - not NED; see
+   * velocity. The frame is ENU - east, north, up - not NED; see
    * uorb_msgs.h.
    */
 
@@ -1726,12 +1726,22 @@ bool ekf_mag_heading(FAR const float quaternion[4],
       return false;
     }
 
-  /* The field points toward MAGNETIC north, so its bearing in the level
-   * frame is the negative of the vehicle's heading. Declination carries that
-   * to true north.
+  /* ENU: yaw is measured COUNTER-CLOCKWISE FROM EAST about the up axis, the
+   * ROS REP-103 convention.
+   *
+   * The field points toward magnetic north. With the vehicle at yaw psi, a
+   * level body sees it at (B_h*sin(psi), B_h*cos(psi), -B_d) - entirely to
+   * the LEFT when facing east, straight ahead when facing north - so the
+   * heading is atan2(x, y), not the atan2(y, x) a bearing-from-north frame
+   * would use.
+   *
+   * Declination is SUBTRACTED. It is positive east, meaning magnetic north
+   * lies east of true north, so a vehicle whose compass reads magnetic north
+   * is actually pointing east of true north - a SMALLER counter-clockwise
+   * angle. Adding it doubles the error instead of removing it.
    */
 
-  *heading = wrap_pi(atan2f(-level_y, level_x) + declination);
+  *heading = wrap_pi(atan2f(level_x, level_y) - declination);
   return isfinite(*heading);
 }
 
@@ -1863,7 +1873,7 @@ int ekf_core_fuse_mag(FAR struct ekf_core_s *ekf,
  *
  * Taken relative to the reference captured at alignment rather than to a
  * sea-level constant, which is what makes this a height above the alignment
- * point and consistent with the filter's local NWU origin.
+ * point and consistent with the filter's local ENU origin.
  */
 
 float ekf_baro_height(float pressure_hpa, float reference_hpa)

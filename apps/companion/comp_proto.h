@@ -79,9 +79,9 @@ struct comp_external_pose_s
 struct comp_estimator_pose_s
 {
   uint64_t timestamp_us;    /*  0: board monotonic */
-  float    position[3];     /*  8: m, local NWU */
+  float    position[3];     /*  8: m, local ENU */
   float    quaternion[4];   /* 20: w x y z, body to nav */
-  float    velocity[3];     /* 36: m/s, local NWU */
+  float    velocity[3];     /* 36: m/s, local ENU */
   uint8_t  solution_status; /* 48: ESTIMATOR_* validity bits */
   uint8_t  reset_counter;   /* 49: estimator reset generation */
   uint8_t  pad[6];          /* 50: a uint64 first member forces 8-byte

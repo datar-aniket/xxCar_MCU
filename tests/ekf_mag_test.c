@@ -53,12 +53,16 @@ static void level_field(float yaw, FAR float out[3])
   float h = FIELD_TOTAL * cosf(FIELD_DIP);
   float d = FIELD_TOTAL * sinf(FIELD_DIP);
 
-  /* The field points toward magnetic north. With the vehicle yawed by `yaw`,
-   * north sits at -yaw in the body frame.
+  /* ENU: yaw is counter-clockwise FROM EAST. The field points toward
+   * magnetic north, which sits 90 degrees counter-clockwise from east, so in
+   * the body frame it lies at (90 - yaw) from forward.
+   *
+   *   facing east  (yaw 0)   -> field entirely to the LEFT, (0, h, -d)
+   *   facing north (yaw 90)  -> field straight AHEAD,       (h, 0, -d)
    */
 
-  out[0] = h * cosf(yaw);
-  out[1] = -h * sinf(yaw);
+  out[0] = h * sinf(yaw);
+  out[1] = h * cosf(yaw);
   out[2] = -d;   /* northern hemisphere: the field dips DOWN, and z is UP */
 }
 
@@ -106,6 +110,10 @@ static void tilt_into_body(float roll, float pitch,
 }
 
 /* Level and pointing north gives zero heading; the four cardinals follow. */
+
+/* East is zero, north is +90. Pinned explicitly rather than only
+ * round-tripped, so a frame change cannot quietly redefine what these mean.
+ */
 
 static void test_heading_cardinals(void)
 {
@@ -164,8 +172,15 @@ static void test_heading_is_tilt_compensated(void)
     }
 }
 
-/* Declination shifts magnetic heading to true heading, and both signs work.
- * A west declination clamped to zero would be a silent fixed error.
+/* Declination carries MAGNETIC heading to TRUE heading, and the sign is
+ * asserted from the physics rather than from what the code happens to do.
+ *
+ * This test previously asserted heading == declination, which is a
+ * round-trip of the implementation and agreed with a sign error for as long
+ * as it existed. Declination is positive EAST: magnetic north lies east of
+ * true north. So a vehicle whose compass reads magnetic north is pointing
+ * east of true north, which in ENU - counter-clockwise from east - is a
+ * SMALLER angle than 90, not a larger one.
  */
 
 static void test_declination_applied(void)
@@ -174,17 +189,28 @@ static void test_declination_applied(void)
   float field[3];
   float heading;
 
-  quaternion_from_euler_test(0.0f, 0.0f, 0.0f, q);
-  level_field(0.0f, field);
+  /* Point the vehicle at MAGNETIC north: the synthetic field is built for
+   * yaw 90, so with zero declination the heading reads 90.
+   */
+
+  quaternion_from_euler_test(0.0f, 0.0f, 90.0f * DEG, q);
+  level_field(90.0f * DEG, field);
 
   assert(ekf_mag_heading(q, field, 0.0f, &heading));
-  assert(close_angle(heading, 0.0f, 1.0e-3f));
+  assert(close_angle(heading, 90.0f * DEG, 1.0e-3f));
+
+  /* +10 degrees EAST declination. Magnetic north is 10 east of true north,
+   * so pointing at magnetic north is pointing 10 east of true north: 80 in
+   * ENU, NOT 100. Getting this backwards is a 2x declination error.
+   */
 
   assert(ekf_mag_heading(q, field, 10.0f * DEG, &heading));
-  assert(close_angle(heading, 10.0f * DEG, 1.0e-3f));
+  assert(close_angle(heading, 80.0f * DEG, 1.0e-3f));
+
+  /* A WEST declination goes the other way, and must not be clamped away. */
 
   assert(ekf_mag_heading(q, field, -13.5f * DEG, &heading));
-  assert(close_angle(heading, -13.5f * DEG, 1.0e-3f));
+  assert(close_angle(heading, 103.5f * DEG, 1.0e-3f));
 }
 
 static void test_heading_refuses_degenerate_field(void)
