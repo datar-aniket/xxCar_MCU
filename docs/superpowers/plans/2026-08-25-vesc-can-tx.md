@@ -1662,8 +1662,12 @@ Restore after each:
    Expected: `test_non_finite_is_neutral` fails.
 3. In `cmd_steer_us`, use `steer_max - steer_trim` for both halves.
    Expected: `test_steering_asymmetric` fails on the `-0.5` case.
-4. In `vesc_cmd_may_arm`, drop the `age_us` check.
-   Expected: `test_may_arm` fails on the stale case.
+4. In `vesc_cmd_may_arm`, INVERT the staleness comparison — `age_us <` in
+   place of `age_us >`. Expected: `test_may_arm` fails on the stale case.
+
+   Do not instead delete the check: that leaves `age_us` and `timeout_ms`
+   unused and `-Werror=unused-parameter` rejects it before the test runs. The
+   compiler catching it is a real guard, but it is not the test's.
 
 - [ ] **Step 8: Commit**
 
