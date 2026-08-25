@@ -28,11 +28,13 @@ static void usage(void)
          "       vesc set duty|current <motor> <steering> [seconds]\n"
          "\n"
          "  Receives VESC telemetry on FDCAN1 and publishes vesc_status.\n"
-         "  Commands the motor and steering from actuator_command.\n"
+         "  Commands the motor and steering from routed actuator_command.\n"
          "\n"
          "  <motor>     duty ratio -1..+1, or amps, per mode\n"
          "  <steering>  normalised -1..+1, POSITIVE IS LEFT\n"
          "  [seconds]   how long to keep publishing; default 2, max 30\n"
+         "  'set' publishes control_cmd and therefore requires the router\n"
+         "  in AUTO, a healthy RC link, and its arm switch high.\n"
          "\n"
          "  Transmit needs VESC_CAN_ID set to the real node id. At 0 the\n"
          "  link is in discovery mode and sends nothing.\n"
@@ -156,7 +158,7 @@ static void print_status(void)
 
 static int do_set(int argc, FAR char *argv[])
 {
-  struct actuator_command_s message;
+  struct control_cmd_s message;
   int32_t rate;
   double seconds = 2.0;
   int pub;
@@ -213,11 +215,11 @@ static int do_set(int argc, FAR char *argv[])
       rate = 50;
     }
 
-  pub = actuator_command_advertise();
+  pub = control_cmd_advertise();
 
   if (pub < 0)
     {
-      printf("vesc: cannot advertise actuator_command (%d)\n", errno);
+      printf("vesc: cannot advertise control_cmd (%d)\n", errno);
       return EXIT_FAILURE;
     }
 
@@ -230,7 +232,7 @@ static int do_set(int argc, FAR char *argv[])
   for (i = 0; i < ticks; i++)
     {
       message.timestamp = 0;    /* the daemon stamps it on arrival */
-      actuator_command_publish(pub, &message);
+      control_cmd_publish(pub, &message);
       usleep(period_us);
     }
 

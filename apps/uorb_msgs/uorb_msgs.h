@@ -277,6 +277,20 @@ struct actuator_command_s
   uint8_t  pad[7];                /* 17 */
 };
 
+/* Command produced by the autonomous controller before safety/source
+ * selection. It intentionally matches actuator_command's units, but remains
+ * a distinct topic so the router cannot subscribe to its own output.
+ */
+
+struct control_cmd_s
+{
+  uint64_t timestamp;             /*  0: us */
+  float    motor;                 /*  8: duty ratio or amps, per mode */
+  float    steering;              /* 12: normalised -1..+1, left positive */
+  uint8_t  mode;                  /* 16: ACTUATOR_MODE_* */
+  uint8_t  pad[7];                /* 17 */
+};
+
 /* Calibrated body-frame increments for strapdown propagation. Unlike the
  * corrected controller topics above, this path bypasses every configurable
  * software LPF/notch. The hardware anti-alias filters remain part of the
@@ -377,6 +391,7 @@ ORB_DECLARE(vehicle_baro);
 ORB_DECLARE(external_pose);
 ORB_DECLARE(vesc_status);
 ORB_DECLARE(actuator_command);
+ORB_DECLARE(control_cmd);
 ORB_DECLARE(vehicle_imu);
 ORB_DECLARE(estimator_state);
 
@@ -411,6 +426,9 @@ int vesc_status_publish(int fd, FAR const struct vesc_status_s *msg);
 int actuator_command_advertise(void);
 int actuator_command_publish(int fd,
                              FAR const struct actuator_command_s *msg);
+
+int control_cmd_advertise(void);
+int control_cmd_publish(int fd, FAR const struct control_cmd_s *msg);
 
 int vehicle_imu_advertise(void);
 int vehicle_imu_publish(int fd, FAR const struct vehicle_imu_s *msg);

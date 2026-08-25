@@ -483,6 +483,51 @@ static void test_vesc_parameters(void)
     }
 }
 
+static void test_control_router_parameters(void)
+{
+  static const struct
+  {
+    const char *name;
+    int32_t expected;
+  } maps[] =
+  {
+    { "RC_MAP_STEERING", 1 },
+    { "RC_MAP_THROTTLE", 3 },
+    { "RC_MAP_SOURCE", 5 },
+    { "RC_MAP_MODE", 6 },
+    { "RC_MAP_ARM", 7 }
+  };
+  size_t i;
+  int32_t value;
+
+  if (param_get_i32("CTRL_ROUTER_EN", &value) < 0 || value != 1)
+    {
+      fail("control router does not default to boot enabled");
+    }
+
+  for (i = 0; i < sizeof(maps) / sizeof(maps[0]); i++)
+    {
+      if (param_get_i32(maps[i].name, &value) < 0 ||
+          value != maps[i].expected)
+        {
+          fail(maps[i].name);
+        }
+
+      if (param_set_i32(maps[i].name, 19) >= 0 ||
+          param_get_i32(maps[i].name, &value) < 0 ||
+          value != maps[i].expected)
+        {
+          fail("RC channel selector accepted an invalid channel");
+        }
+    }
+
+  if (param_get_i32("RC_SW_LOW", &value) < 0 || value != 1300 ||
+      param_get_i32("RC_SW_HIGH", &value) < 0 || value != 1700)
+    {
+      fail("RC switch thresholds do not match the safe defaults");
+    }
+}
+
 int main(void)
 {
   param_init();
@@ -498,6 +543,7 @@ int main(void)
   test_magnetic_heading_bounds();
   test_companion_parameters();
   test_vesc_parameters();
+  test_control_router_parameters();
 
   if (g_fail != 0)
     {

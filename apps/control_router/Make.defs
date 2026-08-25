@@ -1,0 +1,3 @@
+ifneq ($(CONFIG_XXCAR_CONTROL_ROUTER),)
+CONFIGURED_APPS += $(APPDIR)/xxcar/control_router
+endif

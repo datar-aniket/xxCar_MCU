@@ -1,0 +1,27 @@
+config XXCAR_CONTROL_ROUTER
+
+	tristate "control_router: RC/manual and autonomous safety router"
+	default n
+	depends on UORB && XXCAR_VESC
+	select XXCAR_PARAM
+	select XXCAR_RC_IN
+	select XXCAR_UORB_MSGS
+	---help---
+		Selects between RC and control_cmd, owns VESC arming, and publishes
+		the single actuator_command stream consumed by the VESC daemon.
+
+if XXCAR_CONTROL_ROUTER
+
+config XXCAR_CONTROL_ROUTER_PROGNAME
+	string "Program name"
+	default "control_router"
+
+config XXCAR_CONTROL_ROUTER_PRIORITY
+	int "command priority"
+	default 100
+
+config XXCAR_CONTROL_ROUTER_STACKSIZE
+	int "command stack size"
+	default 2048
+
+endif

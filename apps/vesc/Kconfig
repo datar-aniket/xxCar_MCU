@@ -14,7 +14,8 @@ config XXCAR_VESC
 		tachometer, filtered motor current, and the ADC1 voltage used as
 		steering feedback.
 
-		Receive only. Nothing here commands a motor or a servo.
+		The safety router publishes actuator_command; this daemon applies the
+		VESC limits, repeats it at VESC_TX_RATE, and transmits it over CAN.
 
 		With VESC_CAN_ID at 0 it accepts any controller id and `vesc
 		status` lists every packet id seen, which is how the node id and

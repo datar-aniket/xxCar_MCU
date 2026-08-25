@@ -1,0 +1,11 @@
+include $(APPDIR)/Make.defs
+
+PROGNAME  = $(CONFIG_XXCAR_CONTROL_ROUTER_PROGNAME)
+PRIORITY  = $(CONFIG_XXCAR_CONTROL_ROUTER_PRIORITY)
+STACKSIZE = $(CONFIG_XXCAR_CONTROL_ROUTER_STACKSIZE)
+MODULE    = $(CONFIG_XXCAR_CONTROL_ROUTER)
+
+CSRCS   = control_router.c control_router_policy.c
+MAINSRC = control_router_main.c
+
+include $(APPDIR)/Application.mk

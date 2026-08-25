@@ -94,6 +94,14 @@
 #  include "../../../apps/px4io/px4io.h"
 #endif
 
+#ifdef CONFIG_XXCAR_VESC
+#  include "../../../apps/vesc/vesc.h"
+#endif
+
+#ifdef CONFIG_XXCAR_CONTROL_ROUTER
+#  include "../../../apps/control_router/control_router.h"
+#endif
+
 #ifdef CONFIG_XXCAR_IMU_DELTA
 #  include "../../../apps/imu_delta/imu_delta.h"
 #endif
@@ -107,6 +115,7 @@
 #endif
 
 #if defined(CONFIG_XXCAR_SERIAL) || defined(CONFIG_XXCAR_PX4IO) || \
+    defined(CONFIG_XXCAR_VESC) || defined(CONFIG_XXCAR_CONTROL_ROUTER) || \
     defined(CONFIG_XXCAR_LOGGER)
 #  include "../../../apps/param/param.h"
 #endif
@@ -897,6 +906,43 @@ int stm32_bringup(void)
                      ret);
               fmuv6c_boot_required_failure(&boot);
             }
+        }
+    }
+#endif
+
+#ifdef CONFIG_XXCAR_VESC
+  if (param_i32("VESC_EN") != 0)
+    {
+      ret = vesc_start();
+      if (ret < 0)
+        {
+          syslog(LOG_ERR, "[vesc] boot start failed: %d\n", ret);
+          fmuv6c_boot_optional_failure(&boot);
+        }
+      else
+        {
+          syslog(LOG_INFO, "[vesc] started at boot\n");
+        }
+    }
+#endif
+
+#ifdef CONFIG_XXCAR_CONTROL_ROUTER
+  /* The router is the safety boundary and starts even when VESC_EN is off.
+   * It will publish neutral and refuse arming until the VESC daemon exists,
+   * while still providing live RC/source diagnostics.
+   */
+
+  if (param_i32("CTRL_ROUTER_EN") != 0)
+    {
+      ret = control_router_start();
+      if (ret < 0)
+        {
+          syslog(LOG_ERR, "[router] boot start failed: %d\n", ret);
+          fmuv6c_boot_optional_failure(&boot);
+        }
+      else
+        {
+          syslog(LOG_INFO, "[router] started at boot\n");
         }
     }
 #endif

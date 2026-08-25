@@ -97,6 +97,51 @@ static const struct param_def_s g_params[] =
     "RC protocol on an FMU UART (0=auto SBUS/CRSF 1=SBUS 2=CRSF 3=PPM)",
     PARAM_RANGE_ENUM },
 
+  /* RC safety router. Channel maps are one-based, matching transmitter and
+   * `rc status` labels. The arm channel deliberately starts on channel 7:
+   * channels 5 and 6 are source and motor-mode selection respectively.
+   */
+
+  { "CTRL_ROUTER_EN", PARAM_TYPE_INT32, I32(1), I32(0), I32(1),
+    "Start RC/auto safety router at boot", PARAM_RANGE_ENUM },
+  { "RC_MAP_STEERING", PARAM_TYPE_INT32, I32(1), I32(1), I32(18),
+    "RC steering channel (one-based)", PARAM_RANGE_ENUM },
+  { "RC_MAP_THROTTLE", PARAM_TYPE_INT32, I32(3), I32(1), I32(18),
+    "RC throttle channel (one-based)", PARAM_RANGE_ENUM },
+  { "RC_MAP_SOURCE", PARAM_TYPE_INT32, I32(5), I32(1), I32(18),
+    "RC manual/auto switch channel", PARAM_RANGE_ENUM },
+  { "RC_MAP_MODE", PARAM_TYPE_INT32, I32(6), I32(1), I32(18),
+    "RC duty/current switch channel", PARAM_RANGE_ENUM },
+  { "RC_MAP_ARM", PARAM_TYPE_INT32, I32(7), I32(1), I32(18),
+    "RC arm/disarm switch channel", PARAM_RANGE_ENUM },
+
+  { "RC_ST_MIN", PARAM_TYPE_INT32, I32(1000), I32(750), I32(2250),
+    "Steering PWM at -1 (us)" },
+  { "RC_ST_TRIM", PARAM_TYPE_INT32, I32(1500), I32(750), I32(2250),
+    "Steering centre PWM (us)" },
+  { "RC_ST_MAX", PARAM_TYPE_INT32, I32(2000), I32(750), I32(2250),
+    "Steering PWM at +1 (us)" },
+  { "RC_ST_DZ", PARAM_TYPE_INT32, I32(30), I32(0), I32(400),
+    "Steering deadzone about trim (us)" },
+  { "RC_THR_MIN", PARAM_TYPE_INT32, I32(1000), I32(750), I32(2250),
+    "Throttle PWM at -1 (us)" },
+  { "RC_THR_TRIM", PARAM_TYPE_INT32, I32(1500), I32(750), I32(2250),
+    "Throttle neutral PWM (us)" },
+  { "RC_THR_MAX", PARAM_TYPE_INT32, I32(2000), I32(750), I32(2250),
+    "Throttle PWM at +1 (us)" },
+  { "RC_THR_DZ", PARAM_TYPE_INT32, I32(30), I32(0), I32(400),
+    "Throttle deadzone about trim (us)" },
+  { "RC_SW_LOW", PARAM_TYPE_INT32, I32(1300), I32(750), I32(2250),
+    "Switch low threshold (us)" },
+  { "RC_SW_HIGH", PARAM_TYPE_INT32, I32(1700), I32(750), I32(2250),
+    "Switch high threshold (us)" },
+  { "RC_INPUT_TO_MS", PARAM_TYPE_INT32, I32(150), I32(50), I32(2000),
+    "RC frame timeout in router (ms)" },
+  { "AUTO_CMD_TO_MS", PARAM_TYPE_INT32, I32(200), I32(20), I32(5000),
+    "Automatic control command timeout (ms)" },
+  { "RC_ARM_MAX", PARAM_TYPE_FLOAT, F32(0.05f), F32(0.0f), F32(0.25f),
+    "Maximum normalized motor demand when arming" },
+
   /* ---- PX4IO co-processor ------------------------------------------------
    * Owns the RC IN connector and the 8 PWM servo rails. Not all FMUv6C boards
    * are fitted with the chip, so this is allowed to fail harmlessly.
@@ -407,9 +452,9 @@ static const struct param_def_s g_params[] =
    * into every controller that ever publishes a command.
    *
    * VESC_TX_RATE is capped at 500 because the scheduler tick is 1000 us
-   * (CONFIG_USEC_PER_TICK) and the daemon sleeps in whole ticks. 500 Hz is
-   * exactly two ticks; above that the requested period is shorter than the
-   * clock can express and the real rate would stop matching the parameter.
+   * (CONFIG_USEC_PER_TICK) and the interrupt wait timeout uses whole ticks.
+   * 500 Hz is exactly two ticks; above that the requested period is shorter
+   * than the clock can express and the real rate would stop matching it.
    *
    * Rates that are not a whole number of ticks still average correctly, but
    * individual periods alternate between the ticks either side. 400 Hz is
