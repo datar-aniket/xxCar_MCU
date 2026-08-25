@@ -27,6 +27,7 @@
 #include <nuttx/config.h>
 
 #include <inttypes.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -40,6 +41,8 @@
 #include "rc.h"
 #include "../serial/serial.h"
 #include "../param/param.h"
+
+#define RC_STATUS_WAIT_MS  250
 
 /****************************************************************************
  * Private Functions
@@ -96,6 +99,7 @@ static bool rc_topic_status(FAR struct rc_in_s *input, FAR uint64_t *age_us,
 {
   uint64_t now;
   uint64_t timeout_us;
+  struct pollfd pfd;
   int sub;
   int ret;
 
@@ -109,7 +113,25 @@ static bool rc_topic_status(FAR struct rc_in_s *input, FAR uint64_t *age_us,
       return false;
     }
 
-  ret = orb_copy(ORB_ID(rc_in), sub, input);
+  /* PX4IO advertises a normal non-persistent topic. A new subscriber cannot
+   * rely on copying a frame published before it opened, so wait for the next
+   * 50 Hz PX4IO update. Keep the wait bounded for a disconnected receiver.
+   */
+
+  pfd.fd = sub;
+  pfd.events = POLLIN;
+  pfd.revents = 0;
+  ret = poll(&pfd, 1, RC_STATUS_WAIT_MS);
+
+  if (ret > 0 && (pfd.revents & POLLIN) != 0)
+    {
+      ret = orb_copy(ORB_ID(rc_in), sub, input);
+    }
+  else
+    {
+      ret = -1;
+    }
+
   orb_unsubscribe(sub);
 
   if (ret < 0 || input->timestamp == 0 || input->source == RC_IN_SRC_NONE)
