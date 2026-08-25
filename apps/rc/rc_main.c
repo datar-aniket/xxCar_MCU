@@ -5,7 +5,7 @@
  *
  * `rc` - RC receiver on a plain FMU serial port.
  *
- *   rc status            what it locked on to, and the live channels
+ *   rc status            active system RC source and live channels
  *   rc start <port>      start it now (normally the serial manager does this)
  *   rc stop
  *
@@ -17,20 +17,25 @@
  *   param save
  *   reboot
  *
- * A receiver in the RC IN connector is NOT this - that connector belongs to the
- * PX4IO co-processor. Use `px4io rc` for it. Both publish the same `rc_in` uORB
- * topic, so anything downstream sees one RC source either way:
+ * A receiver in the RC IN connector belongs to the PX4IO co-processor. Both
+ * drivers publish the same `rc_in` uORB topic, and `rc status` reports whichever
+ * source is active. `px4io rc` remains available for low-level IO diagnostics:
  *
  *   uorb_listener rc_in
  ****************************************************************************/
 
 #include <nuttx/config.h>
 
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <time.h>
+
+#include <nuttx/uorb.h>
+#include <uORB/uORB.h>
 
 #include "rc.h"
 #include "../serial/serial.h"
@@ -43,7 +48,7 @@
 static void rc_usage(void)
 {
   printf("Usage: rc <command>\n"
-         "  status           what it detected, and the live channels\n"
+         "  status           active system RC source and live channels\n"
          "  start <port>     start on a port now (e.g. TELEM2)\n"
          "  stop\n"
          "\n"
@@ -52,8 +57,8 @@ static void rc_usage(void)
          "  param set RC_PROT 0         (0 = auto, 1 = SBUS, 2 = CRSF)\n"
          "  param save && reboot\n"
          "\n"
-         "A receiver in the RC IN connector belongs to PX4IO, not to this -\n"
-         "use `px4io rc`. Both publish the same 'rc_in' uORB topic.\n");
+         "RC IN/PX4IO and FMU UART receivers share the 'rc_in' topic.\n"
+         "Use `px4io rc` only for low-level PX4IO diagnostics.\n");
 }
 
 static FAR const char *rc_protoname(uint8_t proto)
@@ -66,12 +71,123 @@ static FAR const char *rc_protoname(uint8_t proto)
     }
 }
 
+static FAR const char *rc_source_name(uint8_t source)
+{
+  switch (source)
+    {
+      case RC_IN_SRC_PX4IO: return "PX4IO";
+      case RC_IN_SRC_SBUS:  return "SBUS";
+      case RC_IN_SRC_CRSF:  return "CRSF/ELRS";
+      case RC_IN_SRC_PPM:   return "PPM";
+      default:              return "unknown";
+    }
+}
+
+static uint64_t rc_now_us(void)
+{
+  struct timespec ts;
+
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000ull;
+}
+
+static bool rc_topic_status(FAR struct rc_in_s *input, FAR uint64_t *age_us,
+                            FAR bool *fresh)
+{
+  uint64_t now;
+  uint64_t timeout_us;
+  int sub;
+  int ret;
+
+  memset(input, 0, sizeof(*input));
+  *age_us = UINT64_MAX;
+  *fresh = false;
+  sub = orb_subscribe(ORB_ID(rc_in));
+
+  if (sub < 0)
+    {
+      return false;
+    }
+
+  ret = orb_copy(ORB_ID(rc_in), sub, input);
+  orb_unsubscribe(sub);
+
+  if (ret < 0 || input->timestamp == 0 || input->source == RC_IN_SRC_NONE)
+    {
+      return false;
+    }
+
+  now = rc_now_us();
+  if (input->timestamp > now)
+    {
+      return true;
+    }
+
+  *age_us = now - input->timestamp;
+  timeout_us = (uint64_t)param_i32("RC_INPUT_TO_MS") * 1000ull;
+  *fresh = *age_us <= timeout_us;
+  return true;
+}
+
 static int rc_do_status(void)
 {
   struct rc_status_s s;
+  struct rc_in_s input;
+  uint64_t age_us;
+  bool fresh;
   unsigned i;
 
   rc_get_status(&s);
+
+  /* `rc_in` is the system-level RC source. PX4IO and the direct UART driver
+   * both publish it, so prefer it over the private status of the UART driver.
+   */
+
+  if (rc_topic_status(&input, &age_us, &fresh))
+    {
+      bool valid = fresh && input.ok != 0 && input.failsafe == 0;
+      unsigned count = input.count <= RC_IN_MAX_CHANNELS ?
+                       input.count : RC_IN_MAX_CHANNELS;
+
+      printf("rc: %s  %s%s%s\n", rc_source_name(input.source),
+             valid ? "OK" : "NO SIGNAL",
+             fresh ? "" : "  STALE",
+             input.failsafe ? "  FAILSAFE" : "");
+
+      if (age_us == UINT64_MAX)
+        {
+          printf("  age       future timestamp\n");
+        }
+      else
+        {
+          printf("  age       %.1f ms\n", (double)age_us / 1000.0);
+        }
+
+      printf("  frames    %u\n", input.frames);
+      printf("  lost      %u\n", input.lost_frames);
+      printf("  rssi      %u/255\n", input.rssi);
+
+      if (input.count > RC_IN_MAX_CHANNELS)
+        {
+          printf("  channels  invalid count %u (showing first %u)\n",
+                 input.count, count);
+        }
+
+      for (i = 0; i < count; i++)
+        {
+          printf("  ch%-2u %4u us\n", i + 1, input.channel[i]);
+        }
+
+      if (s.running &&
+          (input.source == RC_IN_SRC_SBUS ||
+           input.source == RC_IN_SRC_CRSF))
+        {
+          printf("  decoder errors=%" PRIu32 " timeouts=%" PRIu32 "\n",
+                 s.errors, s.timeouts);
+        }
+
+      return 0;
+    }
 
   if (!s.running)
     {

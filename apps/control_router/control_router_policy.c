@@ -85,6 +85,41 @@ static bool switch_update(uint16_t pwm, uint16_t low, uint16_t high,
   return false;
 }
 
+static bool toggle_update(uint16_t pwm, uint16_t low, uint16_t high,
+                          struct router_state_s *state)
+{
+  if (!state->mode_initialized)
+    {
+      /* Seed the edge detector without changing the boot-default DUTY mode.
+       * Booting while a momentary switch is held high must not create an
+       * unexpected toggle.
+       */
+
+      if (pwm <= low || pwm >= high)
+        {
+          state->mode_switch_high = pwm >= high;
+          state->mode_initialized = true;
+        }
+
+      return false;
+    }
+
+  if (pwm <= low)
+    {
+      state->mode_switch_high = false;
+      return false;
+    }
+
+  if (pwm >= high && !state->mode_switch_high)
+    {
+      state->mode_switch_high = true;
+      state->mode_current = !state->mode_current;
+      return true;
+    }
+
+  return false;
+}
+
 bool router_config_valid(const struct router_config_s *config)
 {
   uint8_t maps[5];
@@ -132,7 +167,6 @@ void router_policy_step(const struct router_config_s *config,
   bool mode_changed = false;
   bool arm_initialized = false;
   bool old_source;
-  bool old_mode;
   float selected_motor = 0.0f;
   float selected_steering = 0.0f;
   float arm_motor_fraction = 0.0f;
@@ -200,6 +234,7 @@ void router_policy_step(const struct router_config_s *config,
       state->arm_holding = false;
       state->arm_high = false;
       state->arm_low_seen = false;
+      state->mode_initialized = false;
       output->source = state->source_auto ? ROUTER_SOURCE_AUTO
                                           : ROUTER_SOURCE_RC;
       output->mode = state->mode_current ? ROUTER_MODE_CURRENT
@@ -209,16 +244,14 @@ void router_policy_step(const struct router_config_s *config,
     }
 
   old_source = state->source_auto;
-  old_mode = state->mode_current;
   switch_update(input->rc_channel[config->map_source - 1],
                 config->switch_low, config->switch_high,
                 &state->source_auto, &state->source_initialized);
-  switch_update(input->rc_channel[config->map_mode - 1],
-                config->switch_low, config->switch_high,
-                &state->mode_current, &state->mode_initialized);
+  mode_changed = toggle_update(input->rc_channel[config->map_mode - 1],
+                               config->switch_low, config->switch_high,
+                               state);
   source_changed = state->source_initialized &&
                    old_source != state->source_auto;
-  mode_changed = state->mode_initialized && old_mode != state->mode_current;
 
   switch_update(input->rc_channel[config->map_arm - 1],
                 config->switch_low, config->switch_high,

@@ -111,7 +111,7 @@ static const struct param_def_s g_params[] =
   { "RC_MAP_SOURCE", PARAM_TYPE_INT32, I32(5), I32(1), I32(18),
     "RC manual/auto switch channel", PARAM_RANGE_ENUM },
   { "RC_MAP_MODE", PARAM_TYPE_INT32, I32(6), I32(1), I32(18),
-    "RC duty/current switch channel", PARAM_RANGE_ENUM },
+    "RC duty/current momentary toggle channel", PARAM_RANGE_ENUM },
   { "RC_MAP_ARM", PARAM_TYPE_INT32, I32(7), I32(1), I32(18),
     "RC arm/disarm switch channel", PARAM_RANGE_ENUM },
 

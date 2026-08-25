@@ -140,7 +140,7 @@ static void test_arm_requires_low_and_neutral(void)
   assert(!out.request_arm);
 }
 
-static void test_mode_and_hysteresis(void)
+static void test_mode_toggle_and_hysteresis(void)
 {
   struct router_config_s c = config_default();
   struct router_state_s s;
@@ -149,7 +149,7 @@ static void test_mode_and_hysteresis(void)
 
   router_state_init(&s);
   arm_manual(&c, &s, &in, &out);
-  in.rc_channel[5] = 2000;             /* current */
+  in.rc_channel[5] = 2000;             /* rising edge: current */
   in.rc_channel[2] = 2000;
   in.now_us += 1000;
   step(&c, &s, &in, &out);
@@ -160,6 +160,38 @@ static void test_mode_and_hysteresis(void)
   assert(fabsf(out.motor - 20.0f) < 1e-6f);
 
   in.rc_channel[5] = 1500;             /* hysteresis retains current */
+  in.now_us += 1000;
+  step(&c, &s, &in, &out);
+  assert(out.mode == ROUTER_MODE_CURRENT);
+
+  in.rc_channel[5] = 1000;             /* release does not change mode */
+  in.now_us += 1000;
+  step(&c, &s, &in, &out);
+  assert(out.mode == ROUTER_MODE_CURRENT);
+
+  in.rc_channel[5] = 2000;             /* next rising edge: duty */
+  in.now_us += 1000;
+  step(&c, &s, &in, &out);
+  assert(out.mode == ROUTER_MODE_DUTY);
+  assert(out.reason == ROUTER_REASON_SOURCE_HOLD);
+}
+
+static void test_mode_boot_high_does_not_toggle(void)
+{
+  struct router_config_s c = config_default();
+  struct router_state_s s;
+  struct router_input_s in = input_default(3500000);
+  struct router_output_s out;
+
+  router_state_init(&s);
+  in.rc_channel[5] = 2000;
+  step(&c, &s, &in, &out);
+  assert(out.mode == ROUTER_MODE_DUTY);
+
+  in.rc_channel[5] = 1000;
+  in.now_us += 1000;
+  step(&c, &s, &in, &out);
+  in.rc_channel[5] = 2000;
   in.now_us += 1000;
   step(&c, &s, &in, &out);
   assert(out.mode == ROUTER_MODE_CURRENT);
@@ -270,7 +302,8 @@ int main(void)
   assert(router_config_valid(&c));
   test_mapping_and_reversal();
   test_arm_requires_low_and_neutral();
-  test_mode_and_hysteresis();
+  test_mode_toggle_and_hysteresis();
+  test_mode_boot_high_does_not_toggle();
   test_auto_and_source_hold();
   test_rc_loss_disarms_and_requires_recycle();
   test_rc_safety_overrides_external_arm();

@@ -83,6 +83,7 @@ struct router_state_s
 {
   bool source_auto;
   bool mode_current;
+  bool mode_switch_high;
   bool source_initialized;
   bool mode_initialized;
   bool arm_low_seen;
