@@ -1,0 +1,9 @@
+############################################################################
+# apps/companion/Make.defs
+#
+# SPDX-License-Identifier: Apache-2.0
+############################################################################
+
+ifneq ($(CONFIG_XXCAR_COMPANION),)
+CONFIGURED_APPS += $(APPDIR)/xxcar/companion
+endif

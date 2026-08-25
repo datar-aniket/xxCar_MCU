@@ -1,0 +1,35 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config XXCAR_COMPANION
+	tristate "companion: companion computer link"
+	default n
+	depends on UORB
+	select XXCAR_PARAM
+	select XXCAR_SERIAL
+	select XXCAR_UORB_MSGS
+	---help---
+		Owns the serial port whose SER_*_FUNC is 6 and routes framed
+		packets to uORB topics by message id, publishing external_pose.
+		The estimator pose is sent back at EXT_TX_RATE Hz.
+
+		The router knows nothing about navigation: adding a message is a
+		row in the routing table plus a topic, not a new code path.
+
+if XXCAR_COMPANION
+
+config XXCAR_COMPANION_PROGNAME
+	string "Program name"
+	default "companion"
+
+config XXCAR_COMPANION_PRIORITY
+	int "command priority"
+	default 100
+
+config XXCAR_COMPANION_STACKSIZE
+	int "command stack size"
+	default 2560
+
+endif
