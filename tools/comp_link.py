@@ -220,6 +220,9 @@ class Link(threading.Thread):
         self.ser = serial.Serial(port, baud, timeout=0.05)
         self.out = out
         self.stop_flag = threading.Event()
+        # read() runs on this thread and send() is called from Tk's. pyserial
+        # does not promise those are safe together.
+        self._tx_lock = threading.Lock()
         self.parser = Parser()
         self.bytes_in = 0
         self.bytes_out = 0
@@ -227,7 +230,8 @@ class Link(threading.Thread):
 
     def send(self, frame: bytes):
         try:
-            self.ser.write(frame)
+            with self._tx_lock:
+                self.ser.write(frame)
             self.bytes_out += len(frame)
             self.tx_frames += 1
         except Exception as exc:

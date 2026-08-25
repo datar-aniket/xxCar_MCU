@@ -44,7 +44,22 @@ static void print_status(void)
       return;
     }
 
-  printf("companion: running on %s at %" PRIu32 " baud\n", s.port, s.baud);
+  if (s.waiting_for_host)
+    {
+      printf("companion: on %s, WAITING for a host to attach\n", s.port);
+      return;
+    }
+
+  if (s.baud > 0)
+    {
+      printf("companion: running on %s at %" PRIu32 " baud\n",
+             s.port, s.baud);
+    }
+  else
+    {
+      printf("companion: running on %s (the host sets the line coding)\n",
+             s.port);
+    }
   printf("  in   %" PRIu64 " bytes  frames %" PRIu32
          "  pose %" PRIu32 "\n",
          s.bytes_in, s.parser.frames, s.rx_pose);
@@ -61,6 +76,22 @@ static void print_status(void)
          "  bad_length %" PRIu32 "  publish %" PRIu32 "\n",
          s.parser.crc_errors, s.parser.unknown_id, s.parser.bad_length,
          s.rx_publish_errors);
+
+  /* Silence on the companion's screen has two very different causes, and
+   * without these there is no way to tell them apart: either the estimator
+   * is not producing (est 0) or it is and the port will not take the bytes
+   * (tx errors climbing).
+   */
+
+  printf("  estimator  states %" PRIu32 "  nothing-new %" PRIu32 "%s\n",
+         s.est_seen, s.tx_no_state,
+         s.est_seen == 0 ? "   <- ekf3 is not publishing" : "");
+
+  if (s.connects > 1 || s.disconnects > 0)
+    {
+      printf("  host       connects %" PRIu32 "  disconnects %" PRIu32 "\n",
+             s.connects, s.disconnects);
+    }
 }
 
 int main(int argc, FAR char *argv[])

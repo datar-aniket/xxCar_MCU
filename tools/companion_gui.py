@@ -205,6 +205,18 @@ class App(tk.Tk):
     # ---- pump -----------------------------------------------------------
 
     def _drain(self):
+        try:
+            self._pump()
+        except Exception as exc:                       # noqa: BLE001
+            # Never let one bad frame kill the pump. An exception escaping
+            # here means the after() below never runs, the GUI stops sending
+            # AND receiving, and nothing says why - which is indistinguishable
+            # from the link having died.
+            self.state_lbl.configure(text=f"pump: {exc}"[:44], fg=BAD)
+
+        self.after(100, self._drain)
+
+    def _pump(self):
         now = time.time()
 
         while True:
@@ -225,7 +237,6 @@ class App(tk.Tk):
             self._send()
 
         self._stats(now)
-        self.after(100, self._drain)
 
     def _show(self, pose):
         roll, pitch, yaw = quaternion_to_euler(pose["quaternion"])

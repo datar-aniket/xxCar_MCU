@@ -87,21 +87,81 @@ static int comp_open(FAR const struct serial_port_s *p, uint32_t baud)
       return -errno;
     }
 
-  if (tcgetattr(fd, &tio) == 0)
-    {
-      /* Raw, both directions. Canonical mode would buffer by line, echo
-       * would feed our own frames back to us, and CR/LF translation would
-       * corrupt any frame containing 0x0d - which a float payload does
-       * routinely. The cal protocol makes the same argument.
-       */
+  /* Raw mode is REQUIRED, not best-effort.
+   *
+   * Canonical mode would buffer by line, echo would feed our own frames back
+   * to us, and CR/LF translation would corrupt any frame containing 0x0d -
+   * which a float payload does routinely. cal_raw_mode() fails the session
+   * rather than continuing without it, and so does this: a link that looks
+   * open while mangling every frame is worse than one that refused.
+   */
 
-      cfmakeraw(&tio);
+  if (tcgetattr(fd, &tio) < 0)
+    {
+      int err = -errno;
+
+      close(fd);
+      return err;
+    }
+
+  cfmakeraw(&tio);
+
+  /* Baud only where it means something. The USB CDC port has no baud
+   * parameter at all - the host owns the line coding and the device ignores
+   * it - and serial_port_s carries NULL there. Reading that NULL as a
+   * parameter name is what crashed this daemon on USB.
+   */
+
+  if (baud > 0)
+    {
       cfsetispeed(&tio, baud);
       cfsetospeed(&tio, baud);
-      tcsetattr(fd, TCSANOW, &tio);
+    }
+
+  if (tcsetattr(fd, TCSANOW, &tio) < 0)
+    {
+      int err = -errno;
+
+      close(fd);
+      return err;
     }
 
   return fd;
+}
+
+/* Write a whole frame, or report that it could not be.
+ *
+ * write() on a non-blocking port may take only part of a frame. Abandoning
+ * the rest puts half a frame on the wire: the far end resynchronises on the
+ * next sync byte and drops it on CRC, so it is not fatal, but at rate it is
+ * constant corruption. Push the remainder instead, and give up only when the
+ * far end is genuinely not draining.
+ */
+
+static int comp_write_all(int fd, FAR const uint8_t *data, size_t len)
+{
+  size_t sent = 0;
+  int attempts = 0;
+
+  while (sent < len && attempts++ < 8)
+    {
+      ssize_t n = write(fd, data + sent, len - sent);
+
+      if (n > 0)
+        {
+          sent += (size_t)n;
+          continue;
+        }
+
+      if (n < 0 && errno != EAGAIN && errno != EINTR)
+        {
+          return -errno;
+        }
+
+      usleep(1000);
+    }
+
+  return sent == len ? OK : -EAGAIN;
 }
 
 /* Route one decoded frame. Adding a message means adding a case and a topic;
@@ -154,8 +214,16 @@ static void comp_transmit(int fd, int est_sub,
 
   if (orb_copy(ORB_ID(estimator_state), est_sub, &est) < 0)
     {
+      /* No new estimator state since the last read. Counted separately from
+       * a write failure: "the companion sees nothing" has two very different
+       * causes and the status line has to tell them apart.
+       */
+
+      s->tx_no_state++;
       return;
     }
+
+  s->est_seen++;
 
   memset(&wire, 0, sizeof(wire));
   wire.timestamp_us = est.timestamp_sample;
@@ -174,7 +242,7 @@ static void comp_transmit(int fd, int est_sub,
       return;
     }
 
-  if (write(fd, frame, (size_t)n) != n)
+  if (comp_write_all(fd, frame, (size_t)n) < 0)
     {
       /* A companion that stopped reading backs the port up. Count it and
        * carry on: dropping a pose is correct, blocking the daemon is not.
@@ -186,6 +254,88 @@ static void comp_transmit(int fd, int est_sub,
 
   s->bytes_out += (uint64_t)n;
   s->tx_frames++;
+}
+
+/* Service one connected port until it goes away or we are asked to stop.
+ *
+ * Returns false when g_should_stop was set, true when the port failed and
+ * the caller should go back for another host. Separating the two is the
+ * whole point: on a removable port a read error is a cable, not a fault.
+ */
+
+static bool comp_service(int fd, FAR struct pollfd *pfd, int est_sub,
+                         int pose_pub, FAR uint64_t *next_tx,
+                         uint64_t tx_interval,
+                         FAR struct companion_status_s *status)
+{
+  while (!g_should_stop)
+    {
+      uint8_t buf[COMP_READ_MAX];
+      uint64_t now;
+      ssize_t got;
+      int ready = poll(pfd, 1, 20);
+
+      if (ready < 0 && errno != EINTR)
+        {
+          return true;
+        }
+
+      /* On a removable port these mean the host went away, not a fault. */
+
+      if ((pfd->revents & (POLLHUP | POLLERR)) != 0)
+        {
+          return true;
+        }
+
+      if ((pfd->revents & POLLIN) != 0)
+        {
+          got = read(fd, buf, sizeof(buf));
+
+          if (got > 0)
+            {
+              ssize_t i;
+
+              status->bytes_in += (uint64_t)got;
+
+              for (i = 0; i < got; i++)
+                {
+                  int id = comp_parser_byte(&status->parser, buf[i]);
+
+                  if (id != 0)
+                    {
+                      comp_route(id, &status->parser, pose_pub, status);
+                    }
+                }
+            }
+          else if (got == 0 || (errno != EAGAIN && errno != EINTR))
+            {
+              return true;        /* cable pulled */
+            }
+        }
+
+      now = comp_now_us();
+
+      if (est_sub >= 0 && now >= *next_tx)
+        {
+          comp_transmit(fd, est_sub, status);
+
+          /* Advance from the deadline, not from now, so the rate does not
+           * drift with scheduling. Resynchronise after a long stall rather
+           * than bursting to catch up.
+           */
+
+          *next_tx += tx_interval;
+
+          if (*next_tx < now)
+            {
+              *next_tx = now + tx_interval;
+            }
+        }
+
+      status_publish(status);
+    }
+
+  return false;
 }
 
 static int companion_daemon(int argc, FAR char *argv[])
@@ -212,19 +362,16 @@ static int companion_daemon(int argc, FAR char *argv[])
     }
 
   strncpy(status.port, port->name, sizeof(status.port) - 1);
-  status.baud = (uint32_t)param_i32(port->baud_param);
+  /* NULL for the USB CDC port, which has no baud parameter at all. Passing
+   * that to param_i32() reaches strcmp(name, NULL) and dereferences it -
+   * which is exactly how this daemon crashed on USB.
+   */
+
+  status.baud = port->baud_param != NULL ?
+                (uint32_t)param_i32(port->baud_param) : 0;
   status.tx_rate_hz = (uint32_t)param_i32("EXT_TX_RATE");
   tx_interval = 1000000ull / (status.tx_rate_hz > 0 ?
                               status.tx_rate_hz : 1);
-
-  fd = comp_open(port, status.baud);
-
-  if (fd < 0)
-    {
-      syslog(LOG_ERR, "[companion] cannot open %s: %d\n",
-             port->devpath, -fd);
-      goto out;
-    }
 
   pose_pub = external_pose_advertise();
 
@@ -241,74 +388,115 @@ static int companion_daemon(int argc, FAR char *argv[])
 
   est_sub = orb_subscribe(ORB_ID(estimator_state));
 
-  pfd.fd = fd;
-  pfd.events = POLLIN;
-  next_tx = comp_now_us();
-
   g_running = true;
   status.running = true;
   status_publish(&status);
 
-  syslog(LOG_INFO, "[companion] %s at %" PRIu32 " baud, pose out at "
-                   "%" PRIu32 " Hz\n",
-         port->name, status.baud, status.tx_rate_hz);
+  if (status.baud > 0)
+    {
+      syslog(LOG_INFO, "[companion] %s at %" PRIu32 " baud, pose out at "
+                       "%" PRIu32 " Hz\n",
+             port->name, status.baud, status.tx_rate_hz);
+    }
+  else
+    {
+      syslog(LOG_INFO, "[companion] %s (host sets the line coding), pose "
+                       "out at %" PRIu32 " Hz\n",
+             port->name, status.tx_rate_hz);
+    }
+
+  /* Outer loop: acquire the port, service it, and go back for it if it goes
+   * away.
+   *
+   * A removable port - the USB CDC one, and only that one - does not exist
+   * until a host attaches, and dies when the cable is pulled. Opening once at
+   * boot would fail with ENOTCONN and give up before anyone plugged in, and
+   * an unplug would end the daemon for good. serial.c's NSH path makes the
+   * same argument and waits the same way.
+   */
 
   while (!g_should_stop)
     {
-      uint8_t buf[COMP_READ_MAX];
-      uint64_t now;
-      ssize_t got;
-      int ready = poll(&pfd, 1, 20);
+      bool waiting = false;
 
-      if (ready < 0 && errno != EINTR)
+      while (!g_should_stop)
+        {
+          fd = comp_open(port, status.baud);
+
+          if (fd >= 0)
+            {
+              break;
+            }
+
+          /* ONLY "no host attached" is worth waiting on. A missing device or
+           * a port that will not go raw is a real fault, and retrying it
+           * forever would leave a task that looks alive and does nothing.
+           */
+
+          if (!port->removable || (fd != -ENOTCONN && fd != -ENODEV))
+            {
+              syslog(LOG_ERR, "[companion] cannot open %s: %d\n",
+                     port->devpath, -fd);
+              goto out;
+            }
+
+          if (!waiting)
+            {
+              syslog(LOG_INFO,
+                     "[companion] waiting for a host on %s\n",
+                     port->devpath);
+              waiting = true;
+              status.waiting_for_host = true;
+              status_publish(&status);
+            }
+
+          usleep(250000);
+        }
+
+      if (g_should_stop)
         {
           break;
         }
 
-      if ((pfd.revents & POLLIN) != 0)
-        {
-          got = read(fd, buf, sizeof(buf));
+      status.waiting_for_host = false;
+      status.connects++;
 
-          if (got > 0)
-            {
-              ssize_t i;
+      /* A fresh host has seen none of the previous stream, so a half-frame
+       * left over from the last connection would be its first bytes.
+       */
 
-              status.bytes_in += (uint64_t)got;
-
-              for (i = 0; i < got; i++)
-                {
-                  int id = comp_parser_byte(&status.parser, buf[i]);
-
-                  if (id != 0)
-                    {
-                      comp_route(id, &status.parser, pose_pub, &status);
-                    }
-                }
-            }
-        }
-
-      now = comp_now_us();
-
-      if (est_sub >= 0 && now >= next_tx)
-        {
-          comp_transmit(fd, est_sub, &status);
-
-          /* Advance from the deadline, not from now, so the rate does not
-           * drift with scheduling. Resynchronise after a long stall rather
-           * than bursting to catch up.
-           */
-
-          next_tx += tx_interval;
-
-          if (next_tx < now)
-            {
-              next_tx = now + tx_interval;
-            }
-        }
-
+      comp_parser_init(&status.parser);
       status_publish(&status);
+
+      pfd.fd = fd;
+      pfd.events = POLLIN;
+      next_tx = comp_now_us();
+
+      if (!comp_service(fd, &pfd, est_sub, pose_pub, &next_tx, tx_interval,
+                        &status))
+        {
+          break;                    /* asked to stop */
+        }
+
+      /* The port went away. Close it and go round for the next host. */
+
+      close(fd);
+      fd = -1;
+      status.disconnects++;
+      status_publish(&status);
+
+      if (!port->removable)
+        {
+          syslog(LOG_ERR, "[companion] %s failed and is not removable\n",
+                 port->devpath);
+          goto out;
+        }
+
+      syslog(LOG_INFO, "[companion] host detached from %s\n",
+             port->devpath);
     }
 
+done:
   result = EXIT_SUCCESS;
 
 out:
