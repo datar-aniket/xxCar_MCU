@@ -38,6 +38,7 @@
 #define EKF_IMU_RING_SIZE        48
 #define EKF_MAG_QUEUE_SIZE        8
 #define EKF_BARO_QUEUE_SIZE       4
+#define EKF_EXTNAV_QUEUE_SIZE     4
 
 struct ekf_baro_sample_s
 {
@@ -51,6 +52,25 @@ struct ekf_mag_sample_s
   uint64_t timestamp_sample;
   float    field[3];        /* Gauss, body frame */
   bool     calibrated;
+};
+
+/* An absolute pose from the companion computer.
+ *
+ * pos_sigma and yaw_sigma are the source's OWN reported standard deviations,
+ * already square-rooted from the covariance diagonal. Zero means the source
+ * supplied no estimate; the parameter floor applies either way.
+ */
+
+struct ekf_extnav_sample_s
+{
+  uint64_t timestamp_sample;
+  float    x;
+  float    y;
+  float    yaw;
+  float    pos_sigma[2];    /* x, y */
+  float    yaw_sigma;
+  uint8_t  reset_counter;   /* the SOURCE's frame-reset generation */
+  bool     valid;
 };
 
 struct ekf_delay_s
@@ -73,6 +93,11 @@ struct ekf_delay_s
   uint32_t imu_overflow_count;   /* unconsumed sample overwritten */
   uint32_t baro_overflow_count;
   uint32_t mag_overflow_count;
+
+  struct ekf_extnav_sample_s extnav[EKF_EXTNAV_QUEUE_SIZE];
+  uint16_t extnav_head;
+  uint16_t extnav_count;
+  uint32_t extnav_overflow_count;
 };
 
 /* horizon_ms is clamped to EKF_DELAY_MAX_MS. */
@@ -124,6 +149,11 @@ bool ekf_delay_next_baro(FAR struct ekf_delay_s *d, uint64_t horizon_time,
 bool ekf_delay_next_mag(FAR struct ekf_delay_s *d, uint64_t horizon_time,
                         uint64_t max_age_us,
                         FAR struct ekf_mag_sample_s *out);
+bool ekf_delay_push_extnav(FAR struct ekf_delay_s *d,
+                           FAR const struct ekf_extnav_sample_s *sample);
+bool ekf_delay_next_extnav(FAR struct ekf_delay_s *d, uint64_t horizon_time,
+                           uint64_t max_age_us,
+                           FAR struct ekf_extnav_sample_s *out);
 
 /* The samples the filter has not consumed: what the output predictor replays
  * to get from the horizon state to the present. index 0 is the oldest.

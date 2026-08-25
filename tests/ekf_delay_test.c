@@ -261,6 +261,62 @@ static void test_null_is_refused(void)
   (void)out;
 }
 
+/* External navigation arrives slowly and matters a lot, so the queue is
+ * short and dropping the OLDEST is right - a stale absolute fix is worth
+ * less than a fresh one.
+ */
+
+static void test_extnav_queue(void)
+{
+  struct ekf_extnav_sample_s out;
+  struct ekf_extnav_sample_s s;
+  int i;
+
+  ekf_delay_init(&g_delay, 0);
+
+  for (i = 0; i < EKF_EXTNAV_QUEUE_SIZE + 2; i++)
+    {
+      memset(&s, 0, sizeof(s));
+      s.timestamp_sample = (uint64_t)(i + 1) * 20000;
+      s.x = (float)i;
+      s.valid = true;
+      ekf_delay_push_extnav(&g_delay, &s);
+    }
+
+  assert(g_delay.extnav_overflow_count == 2);
+  assert(ekf_delay_next_extnav(&g_delay, 10000000, 10000000, &out));
+  assert(out.timestamp_sample == 3 * 20000);   /* first two dropped */
+  assert(out.valid);
+}
+
+static void test_extnav_respects_the_horizon_and_age(void)
+{
+  struct ekf_extnav_sample_s out;
+  struct ekf_extnav_sample_s old;
+  struct ekf_extnav_sample_s fresh;
+
+  memset(&old, 0, sizeof(old));
+  memset(&fresh, 0, sizeof(fresh));
+  old.timestamp_sample = 1000;
+  fresh.timestamp_sample = 900000;
+
+  ekf_delay_init(&g_delay, 0);
+  assert(ekf_delay_push_extnav(&g_delay, &old));
+  assert(ekf_delay_push_extnav(&g_delay, &fresh));
+
+  /* Nothing is due before the horizon reaches it. */
+
+  assert(!ekf_delay_next_extnav(&g_delay, 500, 500000, &out));
+
+  /* The 1000 sample is 999 ms old at a horizon of 1000000 - past the bound,
+   * so it is discarded rather than fused where the filter now is.
+   */
+
+  assert(ekf_delay_next_extnav(&g_delay, 1000000, 500000, &out));
+  assert(out.timestamp_sample == 900000);
+  assert(!ekf_delay_next_extnav(&g_delay, 1000000, 500000, &out));
+}
+
 int main(void)
 {
   test_zero_horizon_is_passthrough();
@@ -272,6 +328,8 @@ int main(void)
   test_stale_measurement_discarded();
   test_future_measurement_waits();
   test_mag_queue();
+  test_extnav_queue();
+  test_extnav_respects_the_horizon_and_age();
   test_null_is_refused();
 
   puts("ekf_delay: horizon, ring ordering and overflow verified - OK");

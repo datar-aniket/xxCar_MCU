@@ -260,3 +260,65 @@ FAR const struct ekf_imu_sample_s *
                      index) % EKF_IMU_RING_SIZE);
   return &d->imu[slot];
 }
+
+bool ekf_delay_push_extnav(FAR struct ekf_delay_s *d,
+                           FAR const struct ekf_extnav_sample_s *sample)
+{
+  bool lost = false;
+
+  if (d == NULL || sample == NULL)
+    {
+      return false;
+    }
+
+  /* The queue is short and the OLDEST goes: a stale absolute fix is worth
+   * less than a fresh one.
+   */
+
+  if (d->extnav_count == EKF_EXTNAV_QUEUE_SIZE)
+    {
+      d->extnav_overflow_count++;
+      d->extnav_count--;
+      lost = true;
+    }
+
+  d->extnav[d->extnav_head] = *sample;
+  d->extnav_head = (uint16_t)((d->extnav_head + 1) %
+                              EKF_EXTNAV_QUEUE_SIZE);
+  d->extnav_count++;
+  return !lost;
+}
+
+bool ekf_delay_next_extnav(FAR struct ekf_delay_s *d, uint64_t horizon_time,
+                           uint64_t max_age_us,
+                           FAR struct ekf_extnav_sample_s *out)
+{
+  if (d == NULL || out == NULL)
+    {
+      return false;
+    }
+
+  while (d->extnav_count > 0)
+    {
+      uint16_t index = ring_oldest(d->extnav_head, d->extnav_count,
+                                   EKF_EXTNAV_QUEUE_SIZE);
+      uint64_t stamp = d->extnav[index].timestamp_sample;
+
+      if (stamp > horizon_time)
+        {
+          return false;
+        }
+
+      d->extnav_count--;
+
+      if (horizon_time - stamp <= max_age_us)
+        {
+          *out = d->extnav[index];
+          return true;
+        }
+
+      /* Too old to fuse where the filter now is. Drop and look at the next. */
+    }
+
+  return false;
+}
