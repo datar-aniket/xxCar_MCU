@@ -818,11 +818,12 @@ struct actuator_command_s
 };
 ```
 
-The pad is SEVEN bytes. The `uint64_t` gives this struct eight-byte
-alignment, so a three-byte pad would leave four further bytes that the
-compiler inserts and `o_format` knows nothing about — and uORB walks the
-format string stepping by each conversion's size with no alignment applied.
-The result is `uorb_listener` printing garbage without failing.
+The pad is SEVEN bytes so the struct's real 24-byte size is visible in the
+source. `pad[3]` would compile to a byte-identical struct — the `uint64_t`
+forces eight-byte alignment either way — so this is legibility, not
+correctness. What the asserts actually guard is the absence of *internal*
+padding, since uORB walks `o_format` stepping by each conversion's size with
+no alignment applied.
 
 Add the declaration next to the others:
 
@@ -904,14 +905,26 @@ here — they fail the build if the layout drifts.
 
 - [ ] **Step 6: Prove the layout asserts work**
 
-Temporarily change `uint8_t pad[7];` to `uint8_t pad[3];` and rebuild.
-Expected: build fails on `static_assert(sizeof(...) == 24, "layout")`,
-because the compiler pads the struct back to 24 while `pad[3]` accounts for
-only 20. Restore the 7.
+Do NOT try this with `pad[3]`. The `uint64_t` forces eight-byte alignment, so
+`pad[3]` and `pad[7]` compile to byte-identical 24-byte structs and every
+assert passes. The seven is for the reader, not the compiler.
 
-This matters more than it looks: `pad[3]` compiles to the same 24-byte struct,
-so without the `sizeof` assert the mistake is invisible until `uorb_listener`
-prints nonsense.
+The asserts guard something real but different: the absence of INTERNAL
+padding. Move `mode` above `steering`:
+
+```c
+  float    motor;
+  uint8_t  mode;
+  float    steering;
+```
+
+Rebuild. Expected: three `static assertion failed: "layout"` errors, because
+`steering` is now at 16 rather than 12 and the struct grew. Restore the
+original order.
+
+That gap is the failure worth guarding: `o_format` lists the fields in order
+and uORB steps the read offset by each conversion's size with no alignment
+applied, so `uorb_listener` would print garbage without failing.
 
 - [ ] **Step 7: Commit**
 

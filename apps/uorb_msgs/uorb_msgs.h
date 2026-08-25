@@ -227,6 +227,56 @@ struct vesc_status_s
   uint8_t  pad[3];                /* 29 */
 };
 
+/* A command for the actuators: one drive motor and one steering servo.
+ *
+ * Steering is a NORMALISED authority fraction, not microseconds and not
+ * radians.
+ *
+ * Not microseconds, because that hard-codes one servo's geometry into every
+ * publisher and turns a linkage change into a controller change. The daemon
+ * owns the mapping through VESC_STEER_MIN / _TRIM / _MAX.
+ *
+ * Not radians, because that claims a calibrated road-wheel angle.
+ * vesc_status deliberately publishes the steering ADC as raw volts rather
+ * than an angle, since the conversion is a calibration with its own zero and
+ * scale. A command in radians would make exactly the claim the other
+ * direction that was refused on the way in.
+ *
+ * Positive steering is LEFT, matching the body FLU and nav ENU convention
+ * the estimator uses, so a positive yaw-rate demand and a positive steering
+ * command agree in sign.
+ *
+ * `mode` travels in the message rather than in a parameter because duty and
+ * current are different physical quantities carried in different CAN frames.
+ * As a parameter, a publisher asking for 0.2 duty could silently be asking
+ * for 0.2 amps, and neither end would notice.
+ *
+ * The pad is SEVEN bytes so that the struct's real 24-byte size is visible
+ * in the source. The uint64_t forces eight-byte alignment, so pad[3] would
+ * compile to a byte-identical struct with four bytes of padding the reader
+ * cannot see - it is a legibility choice, not a correctness one, and no
+ * assert can tell the two apart.
+ *
+ * What IS load-bearing is that the four fields are naturally aligned, so
+ * there is no INTERNAL padding. uORB prints a topic by walking o_format and
+ * stepping the offset by each conversion's size, applying no alignment, so a
+ * gap between fields makes uorb_listener print garbage without failing. The
+ * offsetof asserts in uorb_msgs.c are what hold that: reordering mode above
+ * steering opens a gap and fails the build.
+ */
+
+#define ACTUATOR_MODE_DUTY     0    /* motor is a duty ratio, -1..+1 */
+#define ACTUATOR_MODE_CURRENT  1    /* motor is amps */
+
+struct actuator_command_s
+{
+  uint64_t timestamp;             /*  0: us */
+  float    motor;                 /*  8: duty ratio or amps, per mode */
+  float    steering;              /* 12: normalised -1..+1, left positive */
+  uint8_t  mode;                  /* 16: ACTUATOR_MODE_* */
+  uint8_t  pad[7];                /* 17 */
+};
+
 /* Calibrated body-frame increments for strapdown propagation. Unlike the
  * corrected controller topics above, this path bypasses every configurable
  * software LPF/notch. The hardware anti-alias filters remain part of the
@@ -326,6 +376,7 @@ ORB_DECLARE(vehicle_mag);
 ORB_DECLARE(vehicle_baro);
 ORB_DECLARE(external_pose);
 ORB_DECLARE(vesc_status);
+ORB_DECLARE(actuator_command);
 ORB_DECLARE(vehicle_imu);
 ORB_DECLARE(estimator_state);
 
@@ -356,6 +407,10 @@ int external_pose_publish(int fd, FAR const struct external_pose_s *msg);
 
 int vesc_status_advertise(void);
 int vesc_status_publish(int fd, FAR const struct vesc_status_s *msg);
+
+int actuator_command_advertise(void);
+int actuator_command_publish(int fd,
+                             FAR const struct actuator_command_s *msg);
 
 int vehicle_imu_advertise(void);
 int vehicle_imu_publish(int fd, FAR const struct vehicle_imu_s *msg);

@@ -59,6 +59,7 @@ ORB_NAME_FITS("vehicle_mag");
 ORB_NAME_FITS("vehicle_baro");
 ORB_NAME_FITS("external_pose");
 ORB_NAME_FITS("vesc_status");
+ORB_NAME_FITS("actuator_command");
 ORB_NAME_FITS("vehicle_imu");
 ORB_NAME_FITS("estimator_state");
 
@@ -133,6 +134,12 @@ static_assert(offsetof(struct vesc_status_s, current_a)        == 20, "layout");
 static_assert(offsetof(struct vesc_status_s, adc_volts)        == 24, "layout");
 static_assert(offsetof(struct vesc_status_s, controller_id)    == 28, "layout");
 static_assert(sizeof(struct vesc_status_s)                     == 32, "layout");
+
+static_assert(offsetof(struct actuator_command_s, timestamp) ==  0, "layout");
+static_assert(offsetof(struct actuator_command_s, motor)     ==  8, "layout");
+static_assert(offsetof(struct actuator_command_s, steering)  == 12, "layout");
+static_assert(offsetof(struct actuator_command_s, mode)      == 16, "layout");
+static_assert(sizeof(struct actuator_command_s)              == 24, "layout");
 
 static_assert(offsetof(struct vehicle_imu_s, timestamp)         ==  0, "layout");
 static_assert(offsetof(struct vehicle_imu_s, timestamp_sample)  ==  8, "layout");
@@ -220,6 +227,11 @@ static const char vesc_status_format[] =
   ",current_a:%hf,adc_volts:%hf"
   ",controller_id:%hhu";
 
+static const char actuator_command_format[] =
+  "timestamp:%" PRIu64
+  ",motor:%hf,steering:%hf"
+  ",mode:%hhu";
+
 static const char vehicle_imu_format[] =
   "timestamp:%" PRIu64
   ",timestamp_sample:%" PRIu64
@@ -262,6 +274,8 @@ ORB_DEFINE(vehicle_mag, struct vehicle_mag_s, vehicle_mag_format);
 ORB_DEFINE(vehicle_baro, struct vehicle_baro_s, vehicle_baro_format);
 ORB_DEFINE(external_pose, struct external_pose_s, external_pose_format);
 ORB_DEFINE(vesc_status, struct vesc_status_s, vesc_status_format);
+ORB_DEFINE(actuator_command, struct actuator_command_s,
+           actuator_command_format);
 ORB_DEFINE(vehicle_imu, struct vehicle_imu_s, vehicle_imu_format);
 ORB_DEFINE(estimator_state, struct estimator_state_s,
            estimator_state_format);
@@ -388,6 +402,22 @@ int vesc_status_publish(int fd, FAR const struct vesc_status_s *msg)
     }
 
   return orb_publish(ORB_ID(vesc_status), fd, msg);
+}
+
+int actuator_command_advertise(void)
+{
+  return orb_advertise(ORB_ID(actuator_command), NULL);
+}
+
+int actuator_command_publish(int fd,
+                             FAR const struct actuator_command_s *msg)
+{
+  if (fd < 0 || msg == NULL)
+    {
+      return -EINVAL;
+    }
+
+  return orb_publish(ORB_ID(actuator_command), fd, msg);
 }
 
 int vehicle_imu_advertise(void)
