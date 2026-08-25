@@ -254,6 +254,15 @@
 
 #define STM32_RCC_D3CCIPR_ADCSRC     RCC_D3CCIPR_ADCSEL_PLL2
 
+/* FDCAN1 on the CAN1 connector.
+ *
+ * PD0/PD1 is the fmu-v6c assignment PX4 uses. The FDCAN kernel clock is
+ * already selected as HSE just below; these pins were the missing piece.
+ */
+
+#define GPIO_CAN1_RX  GPIO_CAN1_RX_3   /* PD0 */
+#define GPIO_CAN1_TX  GPIO_CAN1_TX_3   /* PD1 */
+
 /* FDCAN 1 2 clock source - HSE (16 MHz) */
 
 #define STM32_RCC_D2CCIP1R_FDCANSEL  RCC_D2CCIP1R_FDCANSEL_HSE

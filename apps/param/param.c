@@ -379,6 +379,25 @@ static const struct param_def_s g_params[] =
   { "EK3_EXT_TIMEOUT", PARAM_TYPE_INT32, I32(1000), I32(100), I32(10000),
     "External nav dropout before position is dropped (ms)" },
 
+  /* ---- VESC CAN link ----------------------------------------------------
+   * VESC_EN is OFF by default. A new driver touching a new peripheral does
+   * not belong in the boot path until it has run at least once.
+   *
+   * VESC_CAN_ID 0 means accept ANY controller id, which is what makes the
+   * first run a discovery rather than a guess. Setting it to the id that
+   * turns up narrows the HARDWARE filter, which matters more than it looks:
+   * an unfiltered 1 Mbit/s bus can deliver over 8000 frames a second, and
+   * discarding them in a task means waking up 8000 times a second to throw
+   * work away.
+   */
+
+  { "VESC_EN", PARAM_TYPE_INT32, I32(0), I32(0), I32(1),
+    "Start the VESC CAN link at boot" },
+  { "VESC_CAN_ID", PARAM_TYPE_INT32, I32(0), I32(0), I32(255),
+    "VESC controller id to accept (0 = any)" },
+  { "VESC_BITRATE", PARAM_TYPE_INT32, I32(1000000), I32(125000),
+    I32(1000000), "CAN bitrate (bit/s)" },
+
   /* ---- Logging (on request only; these choose WHAT gets logged) ---------- */
 
   { "LOG_ENABLE", PARAM_TYPE_INT32, I32(0), I32(0), I32(1),

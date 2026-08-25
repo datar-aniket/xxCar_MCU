@@ -430,6 +430,59 @@ static void test_companion_parameters(void)
     }
 }
 
+/* The VESC link parameters.
+ *
+ * VESC_EN defaults OFF. A new driver touching a new peripheral does not
+ * belong in the boot path until it has run at least once.
+ *
+ * VESC_CAN_ID defaults to 0 meaning accept-any, which is what makes the
+ * first run a discovery rather than a guess.
+ */
+
+static void test_vesc_parameters(void)
+{
+  int32_t v;
+
+  if (param_find("VESC_EN") < 0 ||
+      param_find("VESC_CAN_ID") < 0 ||
+      param_find("VESC_BITRATE") < 0)
+    {
+      fail("VESC schema is incomplete");
+      return;
+    }
+
+  if (param_get_i32("VESC_EN", &v) < 0 || v != 0)
+    {
+      fail("VESC_EN does not default to off");
+    }
+
+  if (param_get_i32("VESC_CAN_ID", &v) < 0 || v != 0)
+    {
+      fail("VESC_CAN_ID does not default to accept-any");
+    }
+
+  if (param_get_i32("VESC_BITRATE", &v) < 0 || v != 1000000)
+    {
+      fail("VESC_BITRATE does not default to 1 Mbit/s");
+    }
+
+  /* A controller id is one byte on the wire. 256 cannot be expressed and
+   * must be refused rather than truncated to 0, which would silently become
+   * accept-any.
+   */
+
+  if (param_set_i32("VESC_CAN_ID", 256) != -ERANGE ||
+      param_get_i32("VESC_CAN_ID", &v) < 0 || v != 255)
+    {
+      fail("VESC_CAN_ID did not clamp to a single byte");
+    }
+
+  if (param_set_i32("VESC_CAN_ID", 0) < 0)
+    {
+      fail("could not restore VESC_CAN_ID");
+    }
+}
+
 int main(void)
 {
   param_init();
@@ -444,6 +497,7 @@ int main(void)
   test_estimator_horizon_and_baro_bounds();
   test_magnetic_heading_bounds();
   test_companion_parameters();
+  test_vesc_parameters();
 
   if (g_fail != 0)
     {

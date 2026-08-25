@@ -242,6 +242,20 @@ CONFIG_USART6_RXDMA=y
 # split across a buffer wrap. Rounded up to a multiple of the 32-byte cache line.
 CONFIG_STM32H7_SERIAL_RXDMA_BUFFER_SIZE=128
 
+# NOTE: CONFIG_STM32H7_FDCAN1 is deliberately NOT set.
+#
+# That symbol exists only to build NuttX's stm32_fdcan_sock.c, which is a
+# SocketCAN driver and does not compile without CONFIG_NET - enabling it
+# alone fails on arm_netinitialize and NET_LL_CAN. Our driver needs nothing
+# from it: boards/fmuv6c/src/fdcan.c enables the peripheral clock, configures
+# the pins and touches the registers itself, and the FDCAN kernel clock is
+# already selected from STM32_RCC_D2CCIP1R_FDCANSEL in board.h regardless of
+# any CONFIG symbol.
+#
+# PX4 arrives at the same place on this silicon: their fmu-v6c has no
+# CONFIG_NET, no NET_CAN and no CAN, and drives FDCAN directly.
+
+
 # RTC clocked from HSE, matching PX4's own fmu-v6c configuration.
 #
 # NOT LSE. board.h defines STM32_LSE_FREQUENCY, but that is a frequency
