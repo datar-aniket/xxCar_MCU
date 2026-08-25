@@ -183,6 +183,194 @@ static void test_status5_null_guards(void)
   assert(!vesc_decode_status5(data, VESC_STATUS_5_DLC, NULL));
 }
 
+/* Command encoding. Every constant below is hand-computed from
+ * docs/can_packet.md, big-endian, and chosen so a byte swap or a wrong
+ * scale factor cannot accidentally produce the right answer.
+ */
+
+static void test_can_id_build(void)
+{
+  assert(vesc_can_id(VESC_PACKET_SET_CURRENT_SERVO, 0x4a) == 0x454a);
+  assert(vesc_can_id(VESC_PACKET_SET_DUTY_SERVO, 0x00) == 0x4600);
+  assert(vesc_can_id(0xff, 0xff) == 0xffff);
+
+  /* Round trip against the split used on the receive path. */
+
+  assert(vesc_packet_id(vesc_can_id(0x1b, 0x4a)) == 0x1b);
+  assert(vesc_controller_id(vesc_can_id(0x1b, 0x4a)) == 0x4a);
+}
+
+/*   5.0 A  x 1000 = 5000   = 0x00001388
+ *   1500 us               = 0x05DC
+ */
+
+static void test_encode_current_positive(void)
+{
+  uint8_t out[VESC_CMD_SERVO_DLC];
+
+  assert(vesc_encode_current_servo(5.0f, 1500, out));
+  assert(out[0] == 0x00 && out[1] == 0x00 &&
+         out[2] == 0x13 && out[3] == 0x88);
+  assert(out[4] == 0x05 && out[5] == 0xdc);
+}
+
+/*  -3.25 A x 1000 = -3250  = 0xFFFFF34E
+ *   800 us                = 0x0320
+ *
+ * Negative is where a lost sign extension hides: it survives every positive
+ * case and then commands the motor the wrong way.
+ */
+
+static void test_encode_current_negative(void)
+{
+  uint8_t out[VESC_CMD_SERVO_DLC];
+
+  assert(vesc_encode_current_servo(-3.25f, 800, out));
+  assert(out[0] == 0xff && out[1] == 0xff &&
+         out[2] == 0xf3 && out[3] == 0x4e);
+  assert(out[4] == 0x03 && out[5] == 0x20);
+}
+
+/*  0.53 duty x 100000 = 53000 = 0x0000CF08
+ *  2200 us                    = 0x0898
+ *
+ * THIS TEST IS ABOUT ROUNDING, and the value is not arbitrary. The nearest
+ * float to 0.53 is 0.52999997138977, and 0.53f * 100000.0f lands on the
+ * float below 53000, so a truncating cast ships 52999 while rounding ships
+ * 53000.
+ *
+ * Most values do NOT expose this. 0.29f * 100000.0f, for instance, rounds
+ * up to exactly 29000.0f during the multiply, so truncation gets the right
+ * answer there. The value had to be searched for rather than guessed - and
+ * the bug it catches is a 1-count error that appears at some duty settings
+ * and not others, which is the hardest kind to notice on a bench.
+ */
+
+static void test_encode_duty_rounds(void)
+{
+  uint8_t out[VESC_CMD_SERVO_DLC];
+
+  assert(vesc_encode_duty_servo(0.53f, 2200, out));
+  assert(out[0] == 0x00 && out[1] == 0x00 &&
+         out[2] == 0xcf && out[3] == 0x08);
+  assert(out[4] == 0x08 && out[5] == 0x98);
+}
+
+/*  8.03 A x 1000 = 8030 = 0x00001F5E
+ *
+ * The same trap on the current scale, which has its own factor and so its
+ * own set of values that expose it.
+ */
+
+static void test_encode_current_rounds(void)
+{
+  uint8_t out[VESC_CMD_SERVO_DLC];
+
+  assert(vesc_encode_current_servo(8.03f, 1500, out));
+  assert(out[0] == 0x00 && out[1] == 0x00 &&
+         out[2] == 0x1f && out[3] == 0x5e);
+}
+
+/*  -0.30 duty x 100000 = -30000 = 0xFFFF8AD0 */
+
+static void test_encode_duty_negative(void)
+{
+  uint8_t out[VESC_CMD_SERVO_DLC];
+
+  assert(vesc_encode_duty_servo(-0.30f, 1500, out));
+  assert(out[0] == 0xff && out[1] == 0xff &&
+         out[2] == 0x8a && out[3] == 0xd0);
+  assert(out[4] == 0x05 && out[5] == 0xdc);
+}
+
+/* The same number means different things in the two frames: current is
+ * x1000 and duty is x100000. Feeding both the identical 0.05 makes a
+ * copy-pasted scale factor fail immediately.
+ *
+ *   0.05 A    x 1000   = 50    = 0x00000032
+ *   0.05 duty x 100000 = 5000  = 0x00001388
+ */
+
+static void test_encode_scales_differ(void)
+{
+  uint8_t cur[VESC_CMD_SERVO_DLC];
+  uint8_t dut[VESC_CMD_SERVO_DLC];
+
+  assert(vesc_encode_current_servo(0.05f, 1500, cur));
+  assert(vesc_encode_duty_servo(0.05f, 1500, dut));
+
+  assert(cur[2] == 0x00 && cur[3] == 0x32);
+  assert(dut[2] == 0x13 && dut[3] == 0x88);
+}
+
+static void test_encode_neutral(void)
+{
+  uint8_t out[VESC_CMD_SERVO_DLC];
+
+  assert(vesc_encode_current_servo(0.0f, 1500, out));
+  assert(out[0] == 0 && out[1] == 0 && out[2] == 0 && out[3] == 0);
+  assert(out[4] == 0x05 && out[5] == 0xdc);
+
+  assert(vesc_encode_duty_servo(0.0f, 1500, out));
+  assert(out[0] == 0 && out[1] == 0 && out[2] == 0 && out[3] == 0);
+  assert(out[4] == 0x05 && out[5] == 0xdc);
+}
+
+/* A non-finite motor value must not reach the wire. The cast of a NaN to
+ * int32_t is undefined, and in practice produces whatever the FPU had; on a
+ * motor controller that is a random torque command.
+ */
+
+static void test_encode_rejects_non_finite(void)
+{
+  uint8_t out[VESC_CMD_SERVO_DLC];
+
+  assert(!vesc_encode_current_servo(NAN, 1500, out));
+  assert(out[0] == 0 && out[1] == 0 && out[2] == 0 && out[3] == 0);
+  assert(out[4] == 0x05 && out[5] == 0xdc);
+
+  assert(!vesc_encode_duty_servo(INFINITY, 1500, out));
+  assert(out[0] == 0 && out[1] == 0 && out[2] == 0 && out[3] == 0);
+
+  assert(!vesc_encode_duty_servo(-INFINITY, 1500, out));
+  assert(out[0] == 0 && out[1] == 0 && out[2] == 0 && out[3] == 0);
+}
+
+/* Clamping is the last line of defence, not the policy. The daemon clamps to
+ * the parameter limits first; these are the limits the PROTOCOL cannot
+ * exceed.
+ *
+ *   200 A  x 1000   = 200000 = 0x00030D40
+ *   1.0 duty x 1e5  = 100000 = 0x000186A0
+ */
+
+static void test_encode_clamps(void)
+{
+  uint8_t out[VESC_CMD_SERVO_DLC];
+
+  assert(vesc_encode_current_servo(1.0e6f, 1500, out));
+  assert(out[0] == 0x00 && out[1] == 0x03 &&
+         out[2] == 0x0d && out[3] == 0x40);
+
+  assert(vesc_encode_duty_servo(5.0f, 1500, out));
+  assert(out[0] == 0x00 && out[1] == 0x01 &&
+         out[2] == 0x86 && out[3] == 0xa0);
+
+  /* Servo microseconds clamp to the range can_packet.md gives. */
+
+  assert(vesc_encode_duty_servo(0.0f, 100, out));
+  assert(out[4] == 0x03 && out[5] == 0x20);      /* 800 */
+
+  assert(vesc_encode_duty_servo(0.0f, 5000, out));
+  assert(out[4] == 0x08 && out[5] == 0x98);      /* 2200 */
+}
+
+static void test_encode_null(void)
+{
+  assert(!vesc_encode_current_servo(1.0f, 1500, NULL));
+  assert(!vesc_encode_duty_servo(1.0f, 1500, NULL));
+}
+
 int main(void)
 {
   test_id_split();
@@ -194,6 +382,18 @@ int main(void)
   test_status5_wrong_dlc();
   test_status5_null_guards();
 
-  puts("vesc_proto: big-endian decode, sign extension and DLC verified - OK");
+  test_can_id_build();
+  test_encode_current_positive();
+  test_encode_current_negative();
+  test_encode_duty_rounds();
+  test_encode_current_rounds();
+  test_encode_duty_negative();
+  test_encode_scales_differ();
+  test_encode_neutral();
+  test_encode_rejects_non_finite();
+  test_encode_clamps();
+  test_encode_null();
+
+  puts("vesc_proto: decode and encode, byte order, scaling, sign - OK");
   return 0;
 }

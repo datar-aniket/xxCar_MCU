@@ -29,8 +29,11 @@ a 50 Hz clock.
   no alignment applied, so a padding byte the format string does not know
   about makes `uorb_listener` print garbage without failing.
 - **Parameter names:** at most 16 characters (`PARAM_NAME_MAX`).
-- **Rounding, not truncation,** on every float-to-integer scale. `0.29f`
-  times `100000` is `28999.999`, and truncation ships `28999`.
+- **Rounding, not truncation,** on every float-to-integer scale. Whether a
+  given value exposes this depends on where the float product lands: `0.53f`
+  times `100000` truncates to `52999`, while `0.29f` rounds up to exactly
+  `29000.0f` during the multiply and truncates correctly. Exposing values
+  must be searched for, not guessed.
 - **Range checks are written `!(x >= lo && x <= hi)`.** NaN compares false
   against everything, so `x < lo || x > hi` passes it through to an
   undefined cast.
@@ -148,23 +151,40 @@ static void test_encode_current_negative(void)
   assert(out[4] == 0x03 && out[5] == 0x20);
 }
 
-/*  0.29 duty x 100000 = 29000 = 0x00007148
+/*  0.53 duty x 100000 = 53000 = 0x0000CF08
  *  2200 us                    = 0x0898
  *
- * THIS TEST IS ABOUT ROUNDING. The nearest float to 0.29 is
- * 0.28999999165..., so 0.29f * 100000.0f is 28999.999 and truncation ships
- * 28999 (0x7147). Every other duty value in this file would pass with a
- * truncating cast; this one will not.
+ * THIS TEST IS ABOUT ROUNDING, and the value is not arbitrary. The nearest
+ * float to 0.53 is 0.52999997138977, and 0.53f * 100000.0f lands on the
+ * float below 53000, so a truncating cast ships 52999 while rounding ships
+ * 53000.
+ *
+ * Most values do NOT expose this. 0.29f * 100000.0f rounds up to exactly
+ * 29000.0f during the multiply, so truncation gets the right answer there.
+ * The value had to be searched for rather than guessed.
  */
 
 static void test_encode_duty_rounds(void)
 {
   uint8_t out[VESC_CMD_SERVO_DLC];
 
-  assert(vesc_encode_duty_servo(0.29f, 2200, out));
+  assert(vesc_encode_duty_servo(0.53f, 2200, out));
   assert(out[0] == 0x00 && out[1] == 0x00 &&
-         out[2] == 0x71 && out[3] == 0x48);
+         out[2] == 0xcf && out[3] == 0x08);
   assert(out[4] == 0x08 && out[5] == 0x98);
+}
+
+/*  8.03 A x 1000 = 8030 = 0x00001F5E - the same trap on the current scale,
+ *  which has its own factor and so its own exposing values.
+ */
+
+static void test_encode_current_rounds(void)
+{
+  uint8_t out[VESC_CMD_SERVO_DLC];
+
+  assert(vesc_encode_current_servo(8.03f, 1500, out));
+  assert(out[0] == 0x00 && out[1] == 0x00 &&
+         out[2] == 0x1f && out[3] == 0x5e);
 }
 
 /*  -0.30 duty x 100000 = -30000 = 0xFFFF8AD0 */
@@ -275,6 +295,7 @@ Add the calls inside `main`, after the existing ones:
   test_encode_current_positive();
   test_encode_current_negative();
   test_encode_duty_rounds();
+  test_encode_current_rounds();
   test_encode_duty_negative();
   test_encode_scales_differ();
   test_encode_neutral();
