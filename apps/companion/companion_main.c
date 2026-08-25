@@ -83,6 +83,16 @@ static void print_status(void)
    * (tx errors climbing).
    */
 
+  if (s.utc_from_rtc)
+    {
+      /* Second resolution: the RTC restores the right SECOND across a
+       * reboot, not the right microsecond within it.
+       */
+
+      printf("  clock      UTC from the RTC (+/- 1 s) - sync for the "
+             "sub-second phase\n");
+    }
+
   if (s.timesync_replies > 0 || s.timesync_expected > 0)
     {
       printf("  timesync   replies %" PRIu32 "/%" PRIu32 "\n",

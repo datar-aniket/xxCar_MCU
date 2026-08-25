@@ -37,11 +37,23 @@ static volatile bool g_running;
 static volatile bool g_should_stop;
 static struct companion_status_s g_status;
 
-/* Board monotonic + this = UTC. Zero until a sync has happened, which is
- * also what "not synced" means at the conversion sites below.
+/* Board monotonic + this = UTC.
+ *
+ * g_utc_valid is a separate flag rather than testing the offset against
+ * zero: an offset that genuinely IS zero is possible, and would then read as
+ * "no reference" for ever.
  */
 
 static int64_t g_utc_offset_us;
+static bool    g_utc_valid;
+
+/* Anything before this cannot be a real UTC time on this vehicle, so it is a
+ * clock that was never set rather than one that is merely wrong. NuttX reads
+ * an unset RTC as its build epoch, which looks like a perfectly plausible
+ * date and would make every wire timestamp confidently wrong.
+ */
+
+#define COMP_UTC_PLAUSIBLE_S  1700000000ll   /* 2023-11-14 */
 
 static uint64_t comp_now_us(void)
 {
@@ -49,6 +61,38 @@ static uint64_t comp_now_us(void)
 
   clock_gettime(CLOCK_MONOTONIC, &t);
   return (uint64_t)t.tv_sec * 1000000ull + (uint64_t)t.tv_nsec / 1000ull;
+}
+
+/* Take UTC from the battery-backed RTC, if it is holding a time somebody set.
+ *
+ * This is what makes the sync a ONE-TIME act rather than a per-boot ritual:
+ * the RTC keeps running on VBAT, so after a power cycle the board already
+ * knows what time it is and the wire conversion works before the companion
+ * has said anything.
+ *
+ * It is a SECOND-resolution recovery, though - the H7's RTC is a calendar,
+ * not a tick counter - so the phase within that second is lost across a
+ * reboot. A fresh sync recovers it, and a PPS input would hold it.
+ */
+
+static void comp_seed_utc_from_rtc(FAR struct companion_status_s *s)
+{
+  struct timespec rt;
+
+  if (clock_gettime(CLOCK_REALTIME, &rt) != 0 ||
+      (int64_t)rt.tv_sec < COMP_UTC_PLAUSIBLE_S)
+    {
+      return;
+    }
+
+  g_utc_offset_us = ((int64_t)rt.tv_sec * 1000000ll +
+                     (int64_t)rt.tv_nsec / 1000ll) -
+                    (int64_t)comp_now_us();
+  g_utc_valid = true;
+  s->utc_from_rtc = true;
+
+  syslog(LOG_INFO, "[companion] UTC from the RTC; sync to recover the "
+                   "sub-second phase\n");
 }
 
 static void status_publish(FAR const struct companion_status_s *s)
@@ -197,7 +241,7 @@ static void comp_route(int id, FAR const struct comp_parser_s *parser,
        * larger than anything the horizon expects.
        */
 
-      if (wire.timestamp_us == 0 || g_utc_offset_us == 0)
+      if (wire.timestamp_us == 0 || !g_utc_valid)
         {
           out.timestamp_sample = 0;
 
@@ -253,6 +297,8 @@ static void comp_route(int id, FAR const struct comp_parser_s *parser,
           int64_t now_utc = (int64_t)comp_now_us() + end.utc_offset_us;
 
           g_utc_offset_us = end.utc_offset_us;
+          g_utc_valid = true;
+          s->utc_from_rtc = false;
 
           /* Set the wall clock too, so `date`, log filenames and anything
            * else reading CLOCK_REALTIME agree with the companion. This is
@@ -334,7 +380,7 @@ static void comp_transmit(int fd, int est_sub,
    * raw monotonic time, which is all there is to give.
    */
 
-  wire.timestamp_us = g_utc_offset_us != 0 ?
+  wire.timestamp_us = g_utc_valid ?
                       (uint64_t)((int64_t)est.timestamp_sample +
                                  g_utc_offset_us) :
                       est.timestamp_sample;
@@ -469,6 +515,7 @@ static int companion_daemon(int argc, FAR char *argv[])
 
   memset(&status, 0, sizeof(status));
   comp_parser_init(&status.parser);
+  comp_seed_utc_from_rtc(&status);
 
   if (comp_find_port(&port) < 0)
     {

@@ -242,6 +242,34 @@ CONFIG_USART6_RXDMA=y
 # split across a buffer wrap. Rounded up to a multiple of the 32-byte cache line.
 CONFIG_STM32H7_SERIAL_RXDMA_BUFFER_SIZE=128
 
+# Battery-backed RTC, so UTC survives a reboot and the clock is synced once
+# rather than on every power-up.
+#
+# LSE: the 32.768 kHz crystal the board populates (STM32_LSE_FREQUENCY in
+# board.h). The RTC lives in the backup domain and keeps running on VBAT, so
+# a power cycle does not lose the time the companion set.
+#
+# DATETIME rather than HIRES because the H7's RTC is a CALENDAR - it counts
+# in BCD date and time, not in ticks - so restoring gives ONE SECOND of
+# resolution. That is coarse next to a sub-millisecond timesync, and is the
+# point at which a PPS input earns its keep: the RTC gets you the right
+# second across a reboot, and PPS would get you the right microsecond within
+# it. Until then the companion re-syncs after boot to recover the phase.
+#
+# MAGIC_REG is a backup register NuttX stamps once the RTC has actually been
+# set. Without it a cold RTC reads as a plausible-looking date that was never
+# true, and every wire timestamp would be confidently wrong.
+# The RTC lives in the backup domain, and PWR is what unlocks write access
+# to it. The driver refuses to compile without it rather than silently
+# failing to keep time.
+CONFIG_STM32H7_PWR=y
+CONFIG_STM32H7_RTC=y
+CONFIG_STM32H7_RTC_LSECLOCK=y
+CONFIG_RTC=y
+CONFIG_RTC_DATETIME=y
+CONFIG_RTC_DRIVER=y
+
+
 # RX DMA on the TELEM ports the companion link can be assigned to.
 #
 # The companion sends 53-byte frames and the board answers with 61-byte ones.
