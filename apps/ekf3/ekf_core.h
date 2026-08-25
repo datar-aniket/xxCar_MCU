@@ -121,6 +121,20 @@ struct ekf_core_s
   uint32_t baro_reject_count;
   uint32_t baro_consecutive_rejects;
 
+  bool     extnav_datum_set;
+  bool     have_extnav_reset;
+  uint8_t  extnav_source_reset;    /* last seen source reset generation */
+  float    last_extnav_innov[2];   /* m, x and y */
+  float    last_extnav_nis[2];
+  float    last_extnav_noise;      /* m, AFTER the floor was applied */
+  uint64_t last_extnav_timestamp;  /* filter time of the last acceptance */
+  uint32_t extnav_timeout_us;      /* EK3_EXT_TIMEOUT, via the setter */
+
+  uint32_t extnav_accept_count;
+  uint32_t extnav_reject_count;
+  uint32_t extnav_consecutive_rejects;
+  uint32_t extnav_datum_count;
+
   uint32_t input_count;
   uint32_t predict_count;
   uint32_t covariance_count;
@@ -179,6 +193,58 @@ struct ekf_output_s
 #define EKF_MAG_FIELD_TOLERANCE     0.30f
 #define EKF_MAG_MAX_AGE_US       500000ull
 #define EKF_MAG_REJECT_RUN_MAX       20u
+
+/* A rejection run this long means the filter and the source disagree about
+ * where the vehicle IS, not that one reading was bad. Re-datum rather than
+ * going on rejecting every pose for ever - ArduPilot's ResetPositionNE().
+ */
+
+#define EKF_EXTNAV_REJECT_RUN_MAX    20u
+
+/* An absolute pose from the companion computer.
+ *
+ * pos_sigma and yaw_sigma are the source's OWN reported standard deviations,
+ * already square-rooted from the covariance diagonal. Zero means the source
+ * supplied no estimate; the parameter floor applies either way.
+ */
+
+struct ekf_extnav_sample_s
+{
+  uint64_t timestamp_sample;
+  float    x;
+  float    y;
+  float    yaw;
+  float    pos_sigma[2];    /* x, y */
+  float    yaw_sigma;
+  uint8_t  reset_counter;   /* the SOURCE's frame-reset generation */
+  bool     valid;
+};
+
+/* Dropout after which horizontal validity is withdrawn. A setter rather than
+ * a parameter read inside the core, matching ekf_core_set_mag_config: the
+ * core reads no parameters, which is what keeps it testable without one.
+ */
+
+void ekf_core_set_extnav_config(FAR struct ekf_core_s *ekf,
+                                uint32_t timeout_us);
+
+/* Fuse an absolute pose from the companion computer.
+ *
+ * Returns 1 accepted, 0 gated, -1 rejected as unusable, and -2 when this
+ * sample BECAME the datum and the filter was set rather than corrected.
+ *
+ * pos_noise_floor and yaw_noise_floor are FLOORS under whatever the source
+ * reported, not defaults - the fused noise is the larger of the two. A
+ * source claiming millimetre accuracy must not be able to talk the filter
+ * into trusting it more than the operator configured. ArduPilot does the
+ * same with posErr.
+ */
+
+int ekf_core_fuse_extnav(FAR struct ekf_core_s *ekf,
+                         FAR const struct ekf_extnav_sample_s *s,
+                         float pos_noise_floor, float pos_gate,
+                         float yaw_noise_floor, float yaw_gate,
+                         bool want_position, bool want_yaw);
 
 /* Tilt-compensated magnetic heading, radians, from a body-frame field.
  *

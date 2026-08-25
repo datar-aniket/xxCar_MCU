@@ -393,6 +393,12 @@ static void restart_alignment(FAR struct ekf_core_s *ekf)
   ekf->baro_reference_hpa = 0.0f;
   ekf->baro_have_reference = false;
   ekf->baro_consecutive_rejects = 0;
+
+  /* The local frame is gone, so map coordinates for it would be a lie. */
+
+  ekf->extnav_datum_set = false;
+  ekf->have_extnav_reset = false;
+  ekf->extnav_consecutive_rejects = 0;
   ekf->last_baro_height = 0.0f;
 
   /* The heading datum goes with the alignment that established it. Keeping
@@ -931,6 +937,58 @@ static bool covariance_reset_attitude(FAR struct ekf_core_s *ekf,
     }
 
   return true;
+}
+
+/* Reset the horizontal position states and their covariance.
+ *
+ * Zeroing the row AND column, not just the diagonal: a cross-covariance to
+ * velocity or attitude describes a correlation with the OLD position, and
+ * keeping it would let the next update correct velocity through a
+ * relationship that no longer exists.
+ */
+
+static void covariance_reset_position_xy(FAR struct ekf_core_s *ekf,
+                                         float variance)
+{
+  int axis;
+  int i;
+
+  for (axis = 6; axis <= 7; axis++)
+    {
+      for (i = 0; i < EKF_STATE_DIM; i++)
+        {
+          ekf->covariance[EKF_P_INDEX(axis, i)] = 0.0f;
+          ekf->covariance[EKF_P_INDEX(i, axis)] = 0.0f;
+        }
+
+      ekf->covariance[EKF_P_INDEX(axis, axis)] = variance;
+    }
+}
+
+/* Reset yaw to an absolute value, and its covariance with it.
+ *
+ * NOT covariance_reset_attitude: that linearises about a SMALL correction,
+ * and a datum yaw is a finite rotation. Roll and pitch are preserved exactly
+ * - they come from gravity, and the external source says nothing about them.
+ */
+
+static void reset_yaw_absolute(FAR struct ekf_core_s *ekf, float yaw,
+                               float variance)
+{
+  float euler[3];
+  int i;
+
+  ekf_core_euler(ekf, euler);
+  quaternion_from_euler(euler[0], euler[1], yaw, ekf->quaternion);
+  quaternion_normalize(ekf->quaternion);
+
+  for (i = 0; i < EKF_STATE_DIM; i++)
+    {
+      ekf->covariance[EKF_P_INDEX(2, i)] = 0.0f;
+      ekf->covariance[EKF_P_INDEX(i, 2)] = 0.0f;
+    }
+
+  ekf->covariance[EKF_P_INDEX(2, 2)] = variance;
 }
 
 static void constrain_biases(FAR struct ekf_core_s *ekf)
@@ -2040,9 +2098,22 @@ uint8_t ekf_core_solution_status(FAR const struct ekf_core_s *ekf)
       status |= EKF_SOLUTION_POSITION_VERT | EKF_SOLUTION_VELOCITY_VERT;
     }
 
-  /* Nothing in this stage makes horizontal position or velocity observable.
-   * Claiming them would be worse than claiming nothing.
+  /* Horizontal validity is a claim about external navigation actually
+   * CORRECTING, not about it being selected. A sustained rejection run
+   * withdraws it, and so does silence: a source that simply stopped talking
+   * leaves no rejections behind, so without the age check the claim would
+   * stand for ever on a dead link.
    */
+
+  if (ekf->extnav_datum_set && ekf->extnav_accept_count > 0 &&
+      ekf->extnav_consecutive_rejects < EKF_EXTNAV_REJECT_RUN_MAX &&
+      ekf->extnav_timeout_us > 0 &&
+      ekf->last_timestamp_sample >= ekf->last_extnav_timestamp &&
+      ekf->last_timestamp_sample - ekf->last_extnav_timestamp <
+        (uint64_t)ekf->extnav_timeout_us)
+    {
+      status |= EKF_SOLUTION_POSITION_HORIZ | EKF_SOLUTION_VELOCITY_HORIZ;
+    }
 
   return status;
 }
@@ -2117,3 +2188,219 @@ int ekf_core_test_update_3d(FAR struct ekf_core_s *ekf,
 }
 
 #endif
+
+void ekf_core_set_extnav_config(FAR struct ekf_core_s *ekf,
+                                uint32_t timeout_us)
+{
+  if (ekf != NULL)
+    {
+      ekf->extnav_timeout_us = timeout_us;
+    }
+}
+
+static void extnav_set_datum(FAR struct ekf_core_s *ekf,
+                             FAR const struct ekf_extnav_sample_s *s,
+                             float pos_noise, float yaw_noise,
+                             bool want_position, bool want_yaw)
+{
+  if (want_position)
+    {
+      ekf->position[0] = s->x;
+      ekf->position[1] = s->y;
+      covariance_reset_position_xy(ekf, pos_noise * pos_noise);
+    }
+
+  if (want_yaw)
+    {
+      reset_yaw_absolute(ekf, s->yaw, yaw_noise * yaw_noise);
+      ekf->yaw_absolute = true;
+    }
+
+  ekf->extnav_datum_set = true;
+  ekf->extnav_datum_count++;
+  ekf->extnav_consecutive_rejects = 0;
+  ekf->last_extnav_noise = pos_noise;
+  ekf->last_extnav_timestamp = ekf->last_timestamp_sample;
+}
+
+int ekf_core_fuse_extnav(FAR struct ekf_core_s *ekf,
+                         FAR const struct ekf_extnav_sample_s *s,
+                         float pos_noise_floor, float pos_gate,
+                         float yaw_noise_floor, float yaw_gate,
+                         bool want_position, bool want_yaw)
+{
+  float pos_noise;
+  float yaw_noise;
+  float h[EKF_STATE_DIM];
+  int accepted = 0;
+  int gated = 0;
+  int axis;
+
+  if (ekf == NULL || s == NULL || !ekf->initialized || !s->valid ||
+      !isfinite(s->x) || !isfinite(s->y) || !isfinite(s->yaw) ||
+      !isfinite(pos_noise_floor) || pos_noise_floor <= 0.0f ||
+      !isfinite(yaw_noise_floor) || yaw_noise_floor <= 0.0f)
+    {
+      return -1;
+    }
+
+  /* The parameter is a FLOOR under whatever the source reported, not a
+   * default. ArduPilot does the same with posErr: a source claiming
+   * millimetre accuracy must not talk the filter into trusting it more than
+   * the operator configured.
+   */
+
+  pos_noise = pos_noise_floor;
+
+  for (axis = 0; axis < 2; axis++)
+    {
+      if (isfinite(s->pos_sigma[axis]) && s->pos_sigma[axis] > pos_noise)
+        {
+          pos_noise = s->pos_sigma[axis];
+        }
+    }
+
+  yaw_noise = isfinite(s->yaw_sigma) && s->yaw_sigma > yaw_noise_floor ?
+              s->yaw_sigma : yaw_noise_floor;
+
+  /* The source relocalised. That is worth more than twenty gated
+   * innovations telling us the same thing more slowly.
+   */
+
+  if (!ekf->have_extnav_reset)
+    {
+      ekf->extnav_source_reset = s->reset_counter;
+      ekf->have_extnav_reset = true;
+    }
+  else if (s->reset_counter != ekf->extnav_source_reset)
+    {
+      ekf->extnav_source_reset = s->reset_counter;
+      extnav_set_datum(ekf, s, pos_noise, yaw_noise, want_position,
+                       want_yaw);
+      return -2;
+    }
+
+  if (!ekf->extnav_datum_set ||
+      ekf->extnav_consecutive_rejects >= EKF_EXTNAV_REJECT_RUN_MAX)
+    {
+      extnav_set_datum(ekf, s, pos_noise, yaw_noise, want_position,
+                       want_yaw);
+      return -2;
+    }
+
+  ekf->last_extnav_noise = pos_noise;
+
+  /* East and north are gated TOGETHER and fused together, or neither.
+   *
+   * Gating them independently lets one axis mask the other: a pose 500 m
+   * wrong in x but unchanged in y has y accepted, so the pose as a whole
+   * reports accepted, the rejection run never accumulates and the re-datum
+   * that recovers from a dropout never fires.
+   *
+   * ArduPilot forms one posTestRatio from both horizontal axes for exactly
+   * this reason. The fusion itself stays sequential and scalar, ignoring the
+   * measurement cross-covariance, which is also what FuseVelPosNED does.
+   */
+
+  if (want_position)
+    {
+      const float measured[2] = {s->x, s->y};
+      float innovation_sq = 0.0f;
+      float variance_sum = 0.0f;
+      float ratio;
+
+      for (axis = 0; axis < 2; axis++)
+        {
+          float innovation = measured[axis] - ekf->position[axis];
+          float variance = ekf->covariance[EKF_P_INDEX(6 + axis,
+                                                       6 + axis)] +
+                           pos_noise * pos_noise;
+
+          ekf->last_extnav_innov[axis] = innovation;
+          innovation_sq += innovation * innovation;
+          variance_sum += variance;
+          ekf->last_extnav_nis[axis] = variance > 0.0f ?
+                                       innovation * innovation / variance :
+                                       0.0f;
+        }
+
+      if (!isfinite(innovation_sq) || !isfinite(variance_sum) ||
+          variance_sum <= 0.0f)
+        {
+          return -1;
+        }
+
+      ratio = innovation_sq / (pos_gate * pos_gate * variance_sum);
+
+      if (ratio >= 1.0f)
+        {
+          gated++;
+        }
+      else
+        {
+          for (axis = 0; axis < 2; axis++)
+            {
+              int result;
+
+              memset(h, 0, sizeof(h));
+              h[6 + axis] = 1.0f;
+
+              /* The joint gate above is authoritative, so the scalar update
+               * is left permissive - a second, per-axis gate here could
+               * reject half of a pose the combined test just accepted.
+               */
+
+              result = measurement_update_1d(ekf, h,
+                                             measured[axis] -
+                                             ekf->position[axis],
+                                             pos_noise * pos_noise, 1.0e6f,
+                                             &ekf->last_extnav_nis[axis]);
+
+              if (result < 0)
+                {
+                  return -1;
+                }
+
+              accepted++;
+            }
+        }
+    }
+
+  if (want_yaw)
+    {
+      float nis = 0.0f;
+      int result = fuse_yaw(ekf, s->yaw, yaw_noise, yaw_gate, &nis);
+
+      if (result < 0)
+        {
+          return -1;
+        }
+
+      if (result == 0)
+        {
+          gated++;
+        }
+      else
+        {
+          accepted++;
+          ekf->yaw_absolute = true;
+        }
+    }
+
+  if (accepted > 0)
+    {
+      ekf->extnav_accept_count++;
+      ekf->extnav_consecutive_rejects = 0;
+      ekf->last_extnav_timestamp = ekf->last_timestamp_sample;
+      return 1;
+    }
+
+  if (gated > 0)
+    {
+      ekf->extnav_reject_count++;
+      ekf->extnav_consecutive_rejects++;
+      return 0;
+    }
+
+  return -1;
+}

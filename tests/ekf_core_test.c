@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "ekf_core.h"
+#include "ekf_delay.h"
 
 #define TEST_DT       0.0025f
 #define TEST_DT_US    2500ull
@@ -461,6 +462,273 @@ static void test_update_1d_reduces_variance(void)
   assert_covariance_positive_definite(&ekf);
 }
 
+
+static struct ekf_extnav_sample_s extnav_at(float x, float y, float yaw)
+{
+  struct ekf_extnav_sample_s s;
+
+  memset(&s, 0, sizeof(s));
+  s.x = x;
+  s.y = y;
+  s.yaw = yaw;
+  s.valid = true;
+  return s;
+}
+
+static void extnav_align(struct ekf_core_s *ekf, uint64_t *timestamp)
+{
+  const float zero_gyro[3] = {0.0f, 0.0f, 0.0f};
+
+  *timestamp = 1000000ull;
+  ekf_core_init(ekf);
+  ekf_core_set_extnav_config(ekf, 1000000u);
+  initialize_tilted(ekf, timestamp, 0.0f, 0.0f, zero_gyro);
+}
+
+/* The first pose SETS the filter rather than correcting it.
+ *
+ * The map origin may be tens of metres from where the filter aligned. Fusing
+ * would make the first innovation enormous, the gate would reject it, and it
+ * would go on rejecting every pose after it for ever.
+ */
+
+static void test_extnav_first_pose_sets_the_datum(void)
+{
+  struct ekf_core_s ekf;
+  uint64_t timestamp;
+  struct ekf_extnav_sample_s s = extnav_at(120.0f, -45.0f, 0.7f);
+  float euler[3];
+
+  extnav_align(&ekf, &timestamp);
+
+  assert(!ekf.extnav_datum_set);
+  assert(ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f,
+                              true, true) == -2);
+  assert(ekf.extnav_datum_set);
+  assert(ekf.extnav_datum_count == 1);
+
+  assert_near(ekf.position[0], 120.0f, 1.0e-4f);
+  assert_near(ekf.position[1], -45.0f, 1.0e-4f);
+  ekf_core_euler(&ekf, euler);
+  assert_near(euler[2], 0.7f, 1.0e-4f);
+
+  /* Horizontal only. Height belongs to the barometer, roll and pitch to
+   * gravity, and the external source says nothing about either.
+   */
+
+  assert_near(ekf.position[2], 0.0f, 1.0e-6f);
+  assert_near(euler[0], 0.0f, 1.0e-3f);
+  assert_near(euler[1], 0.0f, 1.0e-3f);
+  assert(ekf.extnav_accept_count == 0);
+}
+
+static void test_extnav_fuses_after_the_datum(void)
+{
+  struct ekf_core_s ekf;
+  uint64_t timestamp;
+  struct ekf_extnav_sample_s s = extnav_at(10.0f, 5.0f, 0.0f);
+  float before;
+
+  extnav_align(&ekf, &timestamp);
+  assert(ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f,
+                              true, true) == -2);
+
+  before = ekf.covariance[EKF_P_INDEX(6, 6)];
+  s.x = 10.05f;
+  assert(ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f,
+                              true, true) == 1);
+  assert(ekf.extnav_accept_count == 1);
+  assert(ekf.covariance[EKF_P_INDEX(6, 6)] < before);
+  assert_covariance_positive_definite(&ekf);
+}
+
+/* The parameter is a FLOOR. A source claiming 1 mm is fused at the
+ * configured 0.1 m, not at what it claimed.
+ */
+
+static void test_extnav_noise_floor_wins(void)
+{
+  struct ekf_core_s ekf;
+  uint64_t timestamp;
+  struct ekf_extnav_sample_s s = extnav_at(0.0f, 0.0f, 0.0f);
+
+  extnav_align(&ekf, &timestamp);
+  s.pos_sigma[0] = 0.001f;
+  s.pos_sigma[1] = 0.001f;
+
+  assert(ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f,
+                              true, false) == -2);
+  assert(ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f,
+                              true, false) == 1);
+  assert_near(ekf.last_extnav_noise, 0.1f, 1.0e-6f);
+}
+
+/* A source reporting WORSE than the floor is believed - it is a minimum,
+ * not a fixed value.
+ */
+
+static void test_extnav_honours_a_worse_reported_sigma(void)
+{
+  struct ekf_core_s ekf;
+  uint64_t timestamp;
+  struct ekf_extnav_sample_s s = extnav_at(0.0f, 0.0f, 0.0f);
+
+  extnav_align(&ekf, &timestamp);
+  s.pos_sigma[0] = 2.0f;
+  s.pos_sigma[1] = 2.0f;
+
+  assert(ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f,
+                              true, false) == -2);
+  assert(ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f,
+                              true, false) == 1);
+  assert_near(ekf.last_extnav_noise, 2.0f, 1.0e-6f);
+}
+
+static void test_extnav_refuses_an_invalid_pose(void)
+{
+  struct ekf_core_s ekf;
+  uint64_t timestamp;
+  struct ekf_extnav_sample_s s = extnav_at(1.0f, 2.0f, 0.0f);
+
+  extnav_align(&ekf, &timestamp);
+  s.valid = false;
+
+  assert(ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f,
+                              true, true) == -1);
+  assert(!ekf.extnav_datum_set);
+}
+
+/* A sustained rejection run re-datums rather than rejecting for ever.
+ *
+ * After a dropout the filter has drifted, so every incoming pose looks
+ * impossible and the gate rejects it. Only a reset recovers - ArduPilot's
+ * ResetPositionNE().
+ */
+
+static void test_extnav_rejection_run_forces_a_redatum(void)
+{
+  struct ekf_core_s ekf;
+  uint64_t timestamp;
+  struct ekf_extnav_sample_s s = extnav_at(0.0f, 0.0f, 0.0f);
+  unsigned i;
+
+  extnav_align(&ekf, &timestamp);
+  assert(ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f,
+                              true, false) == -2);
+
+  /* Tighten the position variance so a distant pose is genuinely outside
+   * the gate rather than merely surprising.
+   */
+
+  for (i = 0; i < 40; i++)
+    {
+      ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f, true, false);
+    }
+
+  s.x = 500.0f;
+
+  for (i = 0; i < EKF_EXTNAV_REJECT_RUN_MAX; i++)
+    {
+      assert(ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f,
+                                  true, false) == 0);
+    }
+
+  assert(ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f,
+                              true, false) == -2);
+  assert_near(ekf.position[0], 500.0f, 1.0e-3f);
+  assert(ekf.extnav_datum_count == 2);
+  assert(ekf.extnav_consecutive_rejects == 0);
+}
+
+/* The source telling us it relocalised is worth more than twenty gated
+ * innovations saying the same thing more slowly.
+ */
+
+static void test_extnav_source_reset_forces_a_redatum(void)
+{
+  struct ekf_core_s ekf;
+  uint64_t timestamp;
+  struct ekf_extnav_sample_s s = extnav_at(0.0f, 0.0f, 0.0f);
+
+  extnav_align(&ekf, &timestamp);
+  assert(ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f,
+                              true, false) == -2);
+
+  s.reset_counter = 1;
+  s.x = 77.0f;
+  assert(ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f,
+                              true, false) == -2);
+  assert_near(ekf.position[0], 77.0f, 1.0e-3f);
+  assert(ekf.extnav_datum_count == 2);
+}
+
+/* Silence withdraws horizontal validity.
+ *
+ * A source that simply stops talking leaves no rejections behind, so without
+ * an age check the claim would stand for ever on a dead link - the worst
+ * kind of stale, because everything downstream still believes it.
+ */
+
+static void test_extnav_timeout_drops_horizontal_validity(void)
+{
+  const float zero_gyro[3] = {0.0f, 0.0f, 0.0f};
+  struct ekf_core_s ekf;
+  uint64_t timestamp;
+  struct ekf_extnav_sample_s s = extnav_at(1.0f, 2.0f, 0.0f);
+  struct ekf_imu_sample_s sample;
+  float accel[3];
+  int i;
+
+  extnav_align(&ekf, &timestamp);
+
+  assert(ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f,
+                              true, false) == -2);
+  assert(ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f,
+                              true, false) == 1);
+  assert((ekf_core_solution_status(&ekf) &
+          EKF_SOLUTION_POSITION_HORIZ) != 0);
+
+  rest_accel(0.0f, 0.0f, accel);
+
+  for (i = 0; i < 800; i++)          /* two seconds of silence */
+    {
+      timestamp += TEST_DT_US;
+      make_sample(&sample, timestamp, accel, zero_gyro);
+      ekf_core_process(&ekf, &sample);
+    }
+
+  assert((ekf_core_solution_status(&ekf) &
+          EKF_SOLUTION_POSITION_HORIZ) == 0);
+  assert((ekf_core_solution_status(&ekf) & EKF_SOLUTION_ATTITUDE) != 0);
+}
+
+/* An alignment restart discards the datum. The local frame is gone, so
+ * claiming map coordinates for it would be a lie.
+ */
+
+static void test_extnav_datum_clears_on_restart(void)
+{
+  const float zero_gyro[3] = {0.0f, 0.0f, 0.0f};
+  struct ekf_core_s ekf;
+  uint64_t timestamp;
+  struct ekf_extnav_sample_s s = extnav_at(3.0f, 4.0f, 0.0f);
+  struct ekf_imu_sample_s sample;
+  float accel[3];
+
+  extnav_align(&ekf, &timestamp);
+  assert(ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f,
+                              true, false) == -2);
+  assert(ekf.extnav_datum_set);
+
+  rest_accel(0.0f, 0.0f, accel);
+  timestamp += TEST_DT_US;
+  make_sample(&sample, timestamp, accel, zero_gyro);
+  sample.accel_calibrated = false;
+  ekf_core_process(&ekf, &sample);
+
+  assert(!ekf.extnav_datum_set);
+}
+
 int main(void)
 {
   test_initialization_and_static_prediction();
@@ -471,6 +739,15 @@ int main(void)
   test_update_1d_matches_3d();
   test_update_1d_gate_rejects_cleanly();
   test_update_1d_reduces_variance();
+  test_extnav_first_pose_sets_the_datum();
+  test_extnav_fuses_after_the_datum();
+  test_extnav_noise_floor_wins();
+  test_extnav_honours_a_worse_reported_sigma();
+  test_extnav_refuses_an_invalid_pose();
+  test_extnav_rejection_run_forces_a_redatum();
+  test_extnav_source_reset_forces_a_redatum();
+  test_extnav_timeout_drops_horizontal_validity();
+  test_extnav_datum_clears_on_restart();
   puts("ekf core tests: PASS");
   return 0;
 }

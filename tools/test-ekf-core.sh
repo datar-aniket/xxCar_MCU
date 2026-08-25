@@ -10,7 +10,7 @@ cc -std=c11 -O2 -Wall -Wextra -Werror \
    -I"$REPO/apps/ekf3" \
    -o "$OUT/ekf-core-test" \
    "$REPO/tests/ekf_core_test.c" \
-   "$REPO/apps/ekf3/ekf_core.c" -lm
+   "$REPO/apps/ekf3/ekf_core.c" "$REPO/apps/ekf3/ekf_delay.c" -lm
 
 "$OUT/ekf-core-test"
 
@@ -20,6 +20,6 @@ cc -std=c11 -O1 -g -Wall -Wextra -Werror \
    -I"$REPO/apps/ekf3" \
    -o "$OUT/ekf-core-ubsan" \
    "$REPO/tests/ekf_core_test.c" \
-   "$REPO/apps/ekf3/ekf_core.c" -lm
+   "$REPO/apps/ekf3/ekf_core.c" "$REPO/apps/ekf3/ekf_delay.c" -lm
 
 "$OUT/ekf-core-ubsan"

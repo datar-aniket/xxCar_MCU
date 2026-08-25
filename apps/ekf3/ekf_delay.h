@@ -54,25 +54,6 @@ struct ekf_mag_sample_s
   bool     calibrated;
 };
 
-/* An absolute pose from the companion computer.
- *
- * pos_sigma and yaw_sigma are the source's OWN reported standard deviations,
- * already square-rooted from the covariance diagonal. Zero means the source
- * supplied no estimate; the parameter floor applies either way.
- */
-
-struct ekf_extnav_sample_s
-{
-  uint64_t timestamp_sample;
-  float    x;
-  float    y;
-  float    yaw;
-  float    pos_sigma[2];    /* x, y */
-  float    yaw_sigma;
-  uint8_t  reset_counter;   /* the SOURCE's frame-reset generation */
-  bool     valid;
-};
-
 struct ekf_delay_s
 {
   struct ekf_imu_sample_s imu[EKF_IMU_RING_SIZE];
