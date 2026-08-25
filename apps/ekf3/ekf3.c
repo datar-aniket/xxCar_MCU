@@ -232,6 +232,25 @@ static void drain_extnav(int sub, FAR struct ekf3_status_s *status)
 
       now = now_us();
 
+      /* ZERO means "not timestamped": the source has no shared clock yet and
+       * is saying so rather than inventing a time. Stamp it on arrival.
+       *
+       * It has to be a distinct case. The age check below measures against
+       * the board's monotonic clock, so a zero would read as "older than the
+       * board has been running" and every pose from an untimed source would
+       * be refused as stale - which is exactly what happened.
+       *
+       * Counted separately, so a timesync that IS working is never silently
+       * replaced by arrival stamping. Arrival time carries the whole link
+       * latency as position error, which is the cost this buys.
+       */
+
+      if (message.timestamp_sample == 0)
+        {
+          message.timestamp_sample = now;
+          status->extnav_untimed++;
+        }
+
       /* The canary for a timesync that is not working. A clock grossly wrong
        * would otherwise corrupt position silently, which is the worst
        * failure available here.
@@ -242,9 +261,9 @@ static void drain_extnav(int sub, FAR struct ekf3_status_s *status)
        * timesync is wrong, full stop.
        */
 
-      if (message.timestamp_sample > now + EKF3_EXT_MAX_AGE_US ||
-          (now > message.timestamp_sample &&
-           now - message.timestamp_sample > EKF3_EXT_MAX_AGE_US))
+      else if (message.timestamp_sample > now + EKF3_EXT_MAX_AGE_US ||
+               (now > message.timestamp_sample &&
+                now - message.timestamp_sample > EKF3_EXT_MAX_AGE_US))
         {
           status->extnav_bad_time++;
           continue;

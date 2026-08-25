@@ -39,6 +39,7 @@ struct ekf3_status_s
   uint32_t extnav_in;         /* external_pose messages queued */
   uint32_t extnav_overflow;
   uint32_t extnav_bad_time;   /* refused on the timestamp check */
+  uint32_t extnav_untimed;    /* arrival-stamped: source sent zero */
   bool     extnav_available;  /* external_pose subscribed */
   float    ext_noise;         /* EK3_EXT_M_NSE as read at start */
   float    ext_gate;

@@ -57,7 +57,12 @@
 
 struct comp_external_pose_s
 {
-  uint64_t timestamp_us;    /*  0: board timebase, per the operator's sync */
+  uint64_t timestamp_us;    /*  0: board timebase, per the operator's sync.
+                             *     ZERO means "not timestamped" and the board
+                             *     stamps it on arrival - which costs the
+                             *     whole link latency as position error, and
+                             *     is counted separately so a working
+                             *     timesync is never silently replaced. */
   float    x;               /*  8: m, map frame */
   float    y;               /* 12 */
   float    yaw;             /* 16: rad, map frame */

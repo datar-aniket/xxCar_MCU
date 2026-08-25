@@ -148,11 +148,23 @@ static void print_status(void)
              core->extnav_accept_count, core->extnav_reject_count,
              core->extnav_consecutive_rejects, core->extnav_datum_count,
              (double)core->last_extnav_noise);
+
+      if (status.extnav_untimed > 0)
+        {
+          printf("    arrival-stamped %" PRIu32 " (source sent no "
+                 "timestamp)\n", status.extnav_untimed);
+        }
     }
   else
     {
       printf("  extnav no datum yet (queued %" PRIu32 ", bad time %" PRIu32
-             ")\n", status.extnav_in, status.extnav_bad_time);
+             ", untimed %" PRIu32 ")%s\n",
+             status.extnav_in, status.extnav_bad_time,
+             status.extnav_untimed,
+             status.extnav_in > 0 &&
+             status.sources.set[status.sources.active_set].position_xy !=
+               EKF_SOURCE_EXTERNAL_NAV ?
+               "   <- EK3_SRC1_POSXY is not 6" : "");
     }
 
   printf("  aiding in  mag %" PRIu32 " (%s)  baro %" PRIu32 " (%s)\n",

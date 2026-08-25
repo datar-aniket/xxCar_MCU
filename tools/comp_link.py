@@ -79,6 +79,11 @@ def encode_external_pose(x, y, yaw, cov=None, valid=True, reset_counter=0,
     A zero covariance means "no estimate supplied"; the board falls back to
     EK3_EXT_M_NSE, which is a FLOOR rather than a default - a reported sigma
     below it is raised to it.
+
+    A zero timestamp means "not timestamped": the board stamps it on arrival
+    rather than measuring its age against a clock the source does not share.
+    That costs the link latency as position error, so send a real one once
+    there is a timesync.
     """
     cov = tuple(cov) if cov else (0.0,) * 6
     body = EXTERNAL_POSE.pack(int(timestamp_us), float(x), float(y),
