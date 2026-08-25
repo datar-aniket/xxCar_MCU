@@ -340,6 +340,96 @@ static void test_magnetic_heading_bounds(void)
     }
 }
 
+/* The companion port and the external-navigation parameters.
+ *
+ * SER_*_FUNC's range has to grow with the enum. PARAM_RANGE_ENUM means an
+ * out-of-range value is REFUSED rather than clamped to a neighbouring
+ * function - which is the whole reason that range exists - so a maximum left
+ * at 5 makes the companion function indistinguishable from a typo.
+ */
+
+static void test_companion_parameters(void)
+{
+  float value;
+  int32_t v;
+
+  if (param_find("EXT_TX_RATE") < 0 ||
+      param_find("EK3_EXT_M_NSE") < 0 ||
+      param_find("EK3_EXT_I_GATE") < 0 ||
+      param_find("EK3_EXT_YAW_NSE") < 0 ||
+      param_find("EK3_EXT_TIMEOUT") < 0)
+    {
+      fail("external navigation schema is incomplete");
+      return;
+    }
+
+  /* EVERY port, not one. The maxima are widened by hand and missing one is
+   * silent: that port simply refuses the companion function with a range
+   * error that reads exactly like a typo at the shell. Two were in fact
+   * missed the first time this was written, and a single-port check passed
+   * anyway.
+   */
+
+  {
+    static const char *const ports[] =
+    {
+      "SER_TEL1_FUNC", "SER_TEL2_FUNC", "SER_TEL3_FUNC", "SER_GPS1_FUNC",
+      "SER_GPS2_FUNC", "SER_DBG_FUNC",  "SER_USB_FUNC"
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof(ports) / sizeof(ports[0]); i++)
+      {
+        int32_t saved;
+
+        if (param_get_i32(ports[i], &saved) < 0)
+          {
+            fail(ports[i]);
+            continue;
+          }
+
+        if (param_set_i32(ports[i], SER_FUNC_COMPANION) < 0 ||
+            param_get_i32(ports[i], &v) < 0 || v != SER_FUNC_COMPANION)
+          {
+            printf("FAIL %s does not accept the companion function\n",
+                   ports[i]);
+            g_fail++;
+          }
+
+        if (param_set_i32(ports[i], SER_FUNC_COMPANION + 1) >= 0)
+          {
+            printf("FAIL %s accepted a function that does not exist\n",
+                   ports[i]);
+            g_fail++;
+          }
+
+        param_set_i32(ports[i], saved);
+      }
+  }
+
+  if (param_get_i32("EXT_TX_RATE", &v) < 0 || v != 50)
+    {
+      fail("EXT_TX_RATE does not default to 50 Hz");
+    }
+
+  if (param_get_f32("EK3_EXT_M_NSE", &value) < 0 ||
+      fabsf(value - 0.10f) > 1.0e-6f)
+    {
+      fail("external position noise floor is not 0.10 m");
+    }
+
+  if (param_get_f32("EK3_EXT_YAW_NSE", &value) < 0 ||
+      fabsf(value - 0.05f) > 1.0e-6f)
+    {
+      fail("external yaw noise floor is not 0.05 rad");
+    }
+
+  if (param_get_i32("EK3_EXT_TIMEOUT", &v) < 0 || v != 1000)
+    {
+      fail("external navigation timeout is not 1000 ms");
+    }
+}
+
 int main(void)
 {
   param_init();
@@ -353,6 +443,7 @@ int main(void)
   test_extrinsic_parameter_bounds();
   test_estimator_horizon_and_baro_bounds();
   test_magnetic_heading_bounds();
+  test_companion_parameters();
 
   if (g_fail != 0)
     {

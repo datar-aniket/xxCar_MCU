@@ -63,6 +63,14 @@
 
 #define SER_FUNC_CAL      5
 
+/* Reserve the port for the companion computer link. Like SER_FUNC_CAL this
+ * starts nothing at boot - `companion start` opens it - and for the same
+ * reason: a shell here would sit blocked in read() stealing the link's
+ * input.
+ */
+
+#define SER_FUNC_COMPANION 6
+
 /* RC protocol (RC_PROT). Auto only spans the two UART protocols; PPM is a
  * pulse train on a timer-capture pin, so it must be selected explicitly.
  */

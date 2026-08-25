@@ -50,27 +50,27 @@ static const struct param_def_s g_params[] =
    * USART6 is likewise absent; it IS the link to PX4IO.
    */
 
-  { "SER_TEL1_FUNC", PARAM_TYPE_INT32, I32(SER_FUNC_NSH),      I32(0), I32(5),
-    "TELEM1 func (0=off 1=NSH 2=MAVLink 3=GPS 4=RC 5=CAL)", PARAM_RANGE_ENUM },
+  { "SER_TEL1_FUNC", PARAM_TYPE_INT32, I32(SER_FUNC_NSH),      I32(0), I32(6),
+    "TELEM1 func (0=off 1=NSH 2=MAVLink 3=GPS 4=RC 5=CAL 6=COMP)", PARAM_RANGE_ENUM },
   { "SER_TEL1_BAUD", PARAM_TYPE_INT32, I32(115200), I32(1200), I32(3000000),
     "TELEM1 baud rate" },
-  { "SER_TEL2_FUNC", PARAM_TYPE_INT32, I32(SER_FUNC_DISABLED), I32(0), I32(5),
+  { "SER_TEL2_FUNC", PARAM_TYPE_INT32, I32(SER_FUNC_DISABLED), I32(0), I32(6),
     "TELEM2 function", PARAM_RANGE_ENUM },
   { "SER_TEL2_BAUD", PARAM_TYPE_INT32, I32(57600),  I32(1200), I32(3000000),
     "TELEM2 baud rate" },
-  { "SER_TEL3_FUNC", PARAM_TYPE_INT32, I32(SER_FUNC_DISABLED), I32(0), I32(5),
+  { "SER_TEL3_FUNC", PARAM_TYPE_INT32, I32(SER_FUNC_DISABLED), I32(0), I32(6),
     "TELEM3 function", PARAM_RANGE_ENUM },
   { "SER_TEL3_BAUD", PARAM_TYPE_INT32, I32(57600),  I32(1200), I32(3000000),
     "TELEM3 baud rate" },
-  { "SER_GPS1_FUNC", PARAM_TYPE_INT32, I32(SER_FUNC_DISABLED), I32(0), I32(5),
+  { "SER_GPS1_FUNC", PARAM_TYPE_INT32, I32(SER_FUNC_DISABLED), I32(0), I32(6),
     "GPS1 function", PARAM_RANGE_ENUM },
   { "SER_GPS1_BAUD", PARAM_TYPE_INT32, I32(38400),  I32(1200), I32(3000000),
     "GPS1 baud rate" },
-  { "SER_GPS2_FUNC", PARAM_TYPE_INT32, I32(SER_FUNC_DISABLED), I32(0), I32(5),
+  { "SER_GPS2_FUNC", PARAM_TYPE_INT32, I32(SER_FUNC_DISABLED), I32(0), I32(6),
     "GPS2 function", PARAM_RANGE_ENUM },
   { "SER_GPS2_BAUD", PARAM_TYPE_INT32, I32(38400),  I32(1200), I32(3000000),
     "GPS2 baud rate" },
-  { "SER_DBG_FUNC",  PARAM_TYPE_INT32, I32(SER_FUNC_DISABLED), I32(0), I32(5),
+  { "SER_DBG_FUNC",  PARAM_TYPE_INT32, I32(SER_FUNC_DISABLED), I32(0), I32(6),
     "FMU DEBUG connector function", PARAM_RANGE_ENUM },
   { "SER_DBG_BAUD",  PARAM_TYPE_INT32, I32(115200), I32(1200), I32(3000000),
     "FMU DEBUG baud rate" },
@@ -80,7 +80,7 @@ static const struct param_def_s g_params[] =
    * NSH by default - plug a cable in and you get a shell.
    */
 
-  { "SER_USB_FUNC",  PARAM_TYPE_INT32, I32(SER_FUNC_NSH), I32(0), I32(5),
+  { "SER_USB_FUNC",  PARAM_TYPE_INT32, I32(SER_FUNC_NSH), I32(0), I32(6),
     "USB (/dev/ttyACM0) function - no baud, the host sets it",
     PARAM_RANGE_ENUM },
 
@@ -359,6 +359,24 @@ static const struct param_def_s g_params[] =
     "Yaw measurement noise (rad)" },
   { "EK3_YAW_I_GATE", PARAM_TYPE_FLOAT, F32(5.0f), F32(1.0f), F32(100.0f),
     "Yaw innovation gate (sigma)" },
+
+  /* ---- External navigation ----------------------------------------------
+   * EK3_EXT_M_NSE and EK3_EXT_YAW_NSE are FLOORS, not defaults. The fused
+   * noise is max(what the source reported, this) - which is what ArduPilot
+   * does with posErr. A source claiming millimetre accuracy must not be able
+   * to talk the filter into trusting it more than the operator configured.
+   */
+
+  { "EXT_TX_RATE", PARAM_TYPE_INT32, I32(50), I32(1), I32(400),
+    "Companion pose transmit rate (Hz)" },
+  { "EK3_EXT_M_NSE", PARAM_TYPE_FLOAT, F32(0.10f), F32(0.01f), F32(10.0f),
+    "External position measurement noise floor (m)" },
+  { "EK3_EXT_I_GATE", PARAM_TYPE_FLOAT, F32(5.0f), F32(1.0f), F32(100.0f),
+    "External position innovation gate (sigma)" },
+  { "EK3_EXT_YAW_NSE", PARAM_TYPE_FLOAT, F32(0.05f), F32(0.01f), F32(1.5f),
+    "External yaw measurement noise floor (rad)" },
+  { "EK3_EXT_TIMEOUT", PARAM_TYPE_INT32, I32(1000), I32(100), I32(10000),
+    "External nav dropout before position is dropped (ms)" },
 
   /* ---- Logging (on request only; these choose WHAT gets logged) ---------- */
 

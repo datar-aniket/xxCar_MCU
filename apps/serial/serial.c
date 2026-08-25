@@ -604,6 +604,19 @@ int serial_manager_start(void)
                    p->name, p->devpath);
             break;
 
+          case SER_FUNC_COMPANION:
+
+            /* Deliberately starts nothing, exactly as SER_FUNC_CAL does. The
+             * link needs the port to itself and a shell here would sit
+             * blocked in read() stealing its input. `companion start` opens
+             * it on demand.
+             */
+
+            syslog(LOG_INFO,
+                   "serial: %s (%s) reserved for the companion link - "
+                   "no shell\n", p->name, p->devpath);
+            break;
+
           default:
             syslog(LOG_ERR, "serial: %s: unknown function %" PRId32 "\n",
                    p->name, func);
