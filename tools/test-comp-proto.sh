@@ -19,3 +19,8 @@ cc -std=c11 -Wall -Wextra -Werror -DFAR= \
    -o "$OUT/test-san" "$REPO/tests/comp_proto_test.c" \
    "$REPO/apps/companion/comp_proto.c"
 "$OUT/test-san"
+
+# Two implementations of one wire format is worth being nervous about: a CRC
+# or a layout that disagrees produces frames the far end silently drops, with
+# no indication of which end is wrong. Compare the bytes directly.
+python3 "$REPO/tests/comp_proto_cross_test.py"
