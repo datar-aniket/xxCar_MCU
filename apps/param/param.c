@@ -398,6 +398,30 @@ static const struct param_def_s g_params[] =
   { "VESC_BITRATE", PARAM_TYPE_INT32, I32(1000000), I32(125000),
     I32(1000000), "CAN bitrate (bit/s)" },
 
+  /* Transmit. The two motor ceilings are deliberately timid: the first armed
+   * run happens on a bench with a vehicle that may be on its wheels. Raising
+   * them is a decision made with the hardware in front of you.
+   *
+   * VESC_STEER_MIN is allowed to exceed VESC_STEER_MAX. That is how a
+   * reversed linkage is expressed, and rejecting it would push the reversal
+   * into every controller that ever publishes a command.
+   */
+
+  { "VESC_TX_RATE", PARAM_TYPE_INT32, I32(50), I32(1), I32(200),
+    "Command frame rate (Hz)" },
+  { "VESC_CMD_TO_MS", PARAM_TYPE_INT32, I32(200), I32(20), I32(5000),
+    "Setpoint age before failsafe neutral (ms)" },
+  { "VESC_CUR_MAX", PARAM_TYPE_FLOAT, F32(20.0f), F32(0.0f), F32(200.0f),
+    "Motor current magnitude ceiling (A)" },
+  { "VESC_DUTY_MAX", PARAM_TYPE_FLOAT, F32(0.30f), F32(0.0f), F32(1.0f),
+    "Motor duty magnitude ceiling (0-1)" },
+  { "VESC_STEER_MIN", PARAM_TYPE_INT32, I32(1100), I32(800), I32(2200),
+    "Servo pulse at steering -1, full right (us)" },
+  { "VESC_STEER_TRIM", PARAM_TYPE_INT32, I32(1500), I32(800), I32(2200),
+    "Servo pulse at steering 0, straight (us)" },
+  { "VESC_STEER_MAX", PARAM_TYPE_INT32, I32(1900), I32(800), I32(2200),
+    "Servo pulse at steering +1, full left (us)" },
+
   /* ---- Logging (on request only; these choose WHAT gets logged) ---------- */
 
   { "LOG_ENABLE", PARAM_TYPE_INT32, I32(0), I32(0), I32(1),

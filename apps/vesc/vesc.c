@@ -6,6 +6,7 @@
 
 #include <nuttx/config.h>
 
+#include <assert.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <pthread.h>
@@ -21,6 +22,7 @@
 #include <uORB/uORB.h>
 
 #include "vesc.h"
+#include "vesc_cmd.h"
 #include "../param/param.h"
 #include "../uorb_msgs/uorb_msgs.h"
 
@@ -42,9 +44,31 @@
 
 #define VESC_DRAIN_MAX  32
 
+/* The two mode enumerations have to agree. They are declared separately
+ * because vesc_cmd.h must compile on a host without uORB, so this is the
+ * only place that can check them.
+ */
+
+static_assert(VESC_MODE_DUTY == ACTUATOR_MODE_DUTY, "mode mismatch");
+static_assert(VESC_MODE_CURRENT == ACTUATOR_MODE_CURRENT, "mode mismatch");
+
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static volatile bool g_running;
 static volatile bool g_should_stop;
+
+/* Written by vesc_arm() from a caller's thread, read by the daemon. A bool
+ * is a single-word store on this target and the daemon only ever reads it;
+ * the mutex protects the status copy, not this.
+ */
+
+static volatile bool g_armed;
+
+/* Read by vesc_arm(). Set once at start and never changed, but reading it
+ * out of g_status would mean reading a structure the daemon rewrites every
+ * 2 ms under a mutex, for a value that does not need one.
+ */
+
+static uint32_t g_cmd_timeout_ms;
 static struct vesc_daemon_status_s g_status;
 
 static uint64_t vesc_now_us(void)
@@ -147,16 +171,154 @@ static void vesc_handle(FAR const struct fdcan_frame_s *frame, int pub,
   s->decoded++;
 }
 
+/* The newest setpoint, kept whole. Its own struct rather than fields on the
+ * status so that resolving a command needs no lock: the daemon is the only
+ * writer and the only reader.
+ */
+
+struct vesc_setpoint_s
+{
+  bool     valid;
+  uint8_t  mode;
+  float    motor;
+  float    steering;
+  uint64_t stamp_us;
+};
+
+static struct vesc_setpoint_s g_setpoint;
+
+static void vesc_take_setpoints(int sub, FAR struct vesc_daemon_status_s *s)
+{
+  bool updated = false;
+  int drained = 0;
+
+  if (sub < 0 || orb_check(sub, &updated) < 0 || !updated)
+    {
+      return;
+    }
+
+  while (drained++ < VESC_DRAIN_MAX)
+    {
+      struct actuator_command_s message;
+      uint64_t now;
+
+      if (orb_copy(ORB_ID(actuator_command), sub, &message) < 0)
+        {
+          return;
+        }
+
+      now = vesc_now_us();
+
+      /* A zero or future timestamp is stamped on arrival rather than
+       * refused. Age is unsigned, and now - future underflows to something
+       * enormous, which would read as permanently stale.
+       */
+
+      if (message.timestamp == 0 || message.timestamp > now)
+        {
+          message.timestamp = now;
+        }
+
+      g_setpoint.valid = true;
+      g_setpoint.mode = message.mode;
+      g_setpoint.motor = message.motor;
+      g_setpoint.steering = message.steering;
+      g_setpoint.stamp_us = message.timestamp;
+      s->setpoints++;
+
+      if (orb_check(sub, &updated) < 0 || !updated)
+        {
+          return;
+        }
+    }
+}
+
+static void vesc_transmit(FAR struct vesc_daemon_status_s *s)
+{
+  struct vesc_cmd_out_s cmd;
+  struct fdcan_frame_s frame;
+  uint64_t now = vesc_now_us();
+  uint64_t age = 0;
+  bool ok;
+
+  if (g_setpoint.valid && now > g_setpoint.stamp_us)
+    {
+      age = now - g_setpoint.stamp_us;
+    }
+
+  vesc_cmd_resolve(g_armed, g_setpoint.valid, g_setpoint.mode,
+                   g_setpoint.motor, g_setpoint.steering,
+                   age, s->cmd_timeout_ms, &s->limits, &cmd);
+
+  if (cmd.reason < VESC_CMD_NREASON)
+    {
+      s->reason_count[cmd.reason]++;
+    }
+
+  s->last_reason = cmd.reason;
+  s->armed = g_armed;
+
+  if (cmd.clamped)
+    {
+      s->tx_clamped++;
+    }
+
+  memset(&frame, 0, sizeof(frame));
+  frame.id = vesc_can_id(cmd.packet_id, s->filter_id);
+  frame.dlc = VESC_CMD_SERVO_DLC;
+
+  if (cmd.packet_id == VESC_PACKET_SET_CURRENT_SERVO)
+    {
+      ok = vesc_encode_current_servo(cmd.motor, cmd.servo_us, frame.data);
+    }
+  else
+    {
+      ok = vesc_encode_duty_servo(cmd.motor, cmd.servo_us, frame.data);
+    }
+
+  /* The encoder refusing means it wrote a zero motor value, which is still
+   * safe to send - and sending it is better than skipping, because the VESC
+   * would otherwise see a gap it reads as a dropout.
+   */
+
+  if (!ok)
+    {
+      s->tx_clamped++;
+    }
+
+  s->last_motor = cmd.motor;
+  s->last_servo_us = cmd.servo_us;
+
+  if (fdcan_transmit(&frame) < 0)
+    {
+      s->tx_errors++;
+      return;
+    }
+
+  s->tx_sent++;
+}
+
 static int vesc_daemon(int argc, FAR char *argv[])
 {
   struct vesc_daemon_status_s status;
   int pub = -1;
+  int sub = -1;
   int result = EXIT_FAILURE;
+  uint64_t next_tx_us;
+  uint64_t tx_period_us;
   int ret;
 
   memset(&status, 0, sizeof(status));
   status.bitrate = (uint32_t)param_i32("VESC_BITRATE");
   status.filter_id = (uint8_t)param_i32("VESC_CAN_ID");
+  status.tx_rate = (uint32_t)param_i32("VESC_TX_RATE");
+  status.cmd_timeout_ms = (uint32_t)param_i32("VESC_CMD_TO_MS");
+  g_cmd_timeout_ms = status.cmd_timeout_ms;
+  status.limits.cur_max = param_f32("VESC_CUR_MAX");
+  status.limits.duty_max = param_f32("VESC_DUTY_MAX");
+  status.limits.steer_min = (uint16_t)param_i32("VESC_STEER_MIN");
+  status.limits.steer_trim = (uint16_t)param_i32("VESC_STEER_TRIM");
+  status.limits.steer_max = (uint16_t)param_i32("VESC_STEER_MAX");
 
   ret = fdcan_init(status.bitrate);
 
@@ -180,6 +342,18 @@ static int vesc_daemon(int argc, FAR char *argv[])
       syslog(LOG_ERR, "[vesc] cannot advertise vesc_status (%d)\n", errno);
       goto out;
     }
+
+  sub = orb_subscribe(ORB_ID(actuator_command));
+
+  if (sub < 0)
+    {
+      syslog(LOG_ERR, "[vesc] cannot subscribe actuator_command (%d)\n",
+             errno);
+      goto out;
+    }
+
+  tx_period_us = 1000000ull / status.tx_rate;
+  next_tx_us = vesc_now_us();
 
   g_running = true;
   status.running = true;
@@ -205,6 +379,29 @@ static int vesc_daemon(int argc, FAR char *argv[])
           vesc_handle(&frame, pub, &status);
         }
 
+      vesc_take_setpoints(sub, &status);
+
+      /* Transmit only once the controller id is known. VESC_CAN_ID at 0 is
+       * discovery mode, and there the id would be a guess - commanding a
+       * node picked at random is worse than not commanding at all.
+       */
+
+      if (status.filter_id != 0 && vesc_now_us() >= next_tx_us)
+        {
+          next_tx_us += tx_period_us;
+
+          /* If the loop fell behind, resynchronise rather than trying to
+           * catch up: a burst of stale commands is worse than a late one.
+           */
+
+          if (next_tx_us <= vesc_now_us())
+            {
+              next_tx_us = vesc_now_us() + tx_period_us;
+            }
+
+          vesc_transmit(&status);
+        }
+
       fdcan_stats(&status.bus);
       status_publish(&status);
       usleep(VESC_POLL_US);
@@ -216,11 +413,17 @@ out:
   status.running = false;
   status_publish(&status);
 
+  if (sub >= 0)
+    {
+      orb_unsubscribe(sub);
+    }
+
   if (pub >= 0)
     {
       orb_unadvertise(pub);
     }
 
+  g_armed = false;
   g_running = false;
   return result;
 }
@@ -236,6 +439,8 @@ int vesc_start(void)
     }
 
   g_should_stop = false;
+  g_armed = false;
+  memset(&g_setpoint, 0, sizeof(g_setpoint));
   task = task_create("vesc", VESC_PRIORITY, VESC_STACK, vesc_daemon, NULL);
 
   if (task < 0)
@@ -268,6 +473,43 @@ int vesc_stop(void)
     }
 
   return g_running ? -ETIMEDOUT : 0;
+}
+
+int vesc_arm(bool armed)
+{
+  uint64_t now;
+  uint64_t age = 0;
+
+  if (!g_running)
+    {
+      return -ESRCH;
+    }
+
+  if (!armed)
+    {
+      /* Disarming always succeeds. A refusal path here would be a way to
+       * fail to make the vehicle safe.
+       */
+
+      g_armed = false;
+      return 0;
+    }
+
+  now = vesc_now_us();
+
+  if (g_setpoint.valid && now > g_setpoint.stamp_us)
+    {
+      age = now - g_setpoint.stamp_us;
+    }
+
+  if (!vesc_cmd_may_arm(g_setpoint.valid, g_setpoint.motor, age,
+                        g_cmd_timeout_ms))
+    {
+      return -EPERM;
+    }
+
+  g_armed = true;
+  return 0;
 }
 
 void vesc_status(FAR struct vesc_daemon_status_s *out)

@@ -12,20 +12,39 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
 #include <string.h>
+#include <unistd.h>
+
+#include <uORB/uORB.h>
 
 #include "vesc.h"
+#include "../param/param.h"
+#include "../uorb_msgs/uorb_msgs.h"
 
 static void usage(void)
 {
-  printf("Usage: vesc start | stop | status\n"
+  printf("Usage: vesc start | stop | status | arm | disarm\n"
+         "       vesc set duty|current <motor> <steering> [seconds]\n"
          "\n"
          "  Receives VESC telemetry on FDCAN1 and publishes vesc_status.\n"
-         "  Receive only - nothing here commands a motor.\n"
+         "  Commands the motor and steering from actuator_command.\n"
          "\n"
-         "  VESC_CAN_ID   0 accepts any controller id (discovery)\n"
-         "  VESC_BITRATE  bus bitrate; only 1000000 is implemented\n"
-         "  VESC_EN       start at boot\n");
+         "  <motor>     duty ratio -1..+1, or amps, per mode\n"
+         "  <steering>  normalised -1..+1, POSITIVE IS LEFT\n"
+         "  [seconds]   how long to keep publishing; default 2, max 30\n"
+         "\n"
+         "  Transmit needs VESC_CAN_ID set to the real node id. At 0 the\n"
+         "  link is in discovery mode and sends nothing.\n"
+         "\n"
+         "  VESC_CAN_ID     0 accepts any controller id (discovery)\n"
+         "  VESC_BITRATE    bus bitrate; only 1000000 is implemented\n"
+         "  VESC_EN         start at boot\n"
+         "  VESC_TX_RATE    command frame rate, Hz\n"
+         "  VESC_CMD_TO_MS  setpoint age before failsafe neutral\n"
+         "  VESC_CUR_MAX    current ceiling, A\n"
+         "  VESC_DUTY_MAX   duty ceiling, 0-1\n"
+         "  VESC_STEER_*    MIN / TRIM / MAX servo pulse, us\n");
 }
 
 static FAR const char *vesc_packet_name(uint8_t id)
@@ -96,6 +115,128 @@ static void print_status(void)
 
   printf("  decoded %" PRIu32 "  bad_dlc %" PRIu32 "  publish_err %" PRIu32
          "\n", s.decoded, s.bad_dlc, s.publish_errors);
+
+  printf("  tx      %s  sent %" PRIu32 "  errors %" PRIu32
+         "  clamped %" PRIu32 "\n",
+         s.armed ? "ARMED" : "disarmed",
+         s.tx_sent, s.tx_errors, s.tx_clamped);
+
+  if (s.filter_id == 0)
+    {
+      printf("  tx      DISABLED - VESC_CAN_ID is 0 (discovery mode)\n");
+    }
+
+  printf("  tx      fifo_full %" PRIu32 "  last %s  motor %.3f  servo %u us"
+         "\n", s.bus.tx_full, vesc_cmd_reason_name(s.last_reason),
+         (double)s.last_motor, (unsigned)s.last_servo_us);
+
+  printf("  reasons armed %" PRIu32 "  disarmed %" PRIu32
+         "  no-setpoint %" PRIu32 "  stale %" PRIu32 "  bad-mode %" PRIu32
+         "\n",
+         s.reason_count[VESC_CMD_ARMED],
+         s.reason_count[VESC_CMD_DISARMED],
+         s.reason_count[VESC_CMD_NO_SETPOINT],
+         s.reason_count[VESC_CMD_STALE],
+         s.reason_count[VESC_CMD_BAD_MODE]);
+
+  printf("  setpts  %" PRIu32 "  limits cur %.1f A  duty %.2f  "
+         "steer %u/%u/%u us\n",
+         s.setpoints, (double)s.limits.cur_max, (double)s.limits.duty_max,
+         (unsigned)s.limits.steer_min, (unsigned)s.limits.steer_trim,
+         (unsigned)s.limits.steer_max);
+}
+
+/* Publish a setpoint at the daemon's own rate for a bounded time, then stop.
+ *
+ * Bounded on purpose. A one-shot publish goes stale in VESC_CMD_TO_MS and
+ * could never sweep a servo; an unbounded one would leave a vehicle driving
+ * after the command returned. Stopping also demonstrates the failsafe, which
+ * is the behaviour most worth seeing on a bench.
+ */
+
+static int do_set(int argc, FAR char *argv[])
+{
+  struct actuator_command_s message;
+  int32_t rate;
+  double seconds = 2.0;
+  int pub;
+  int period_us;
+  int ticks;
+  int i;
+
+  if (argc < 5)
+    {
+      usage();
+      return EXIT_FAILURE;
+    }
+
+  memset(&message, 0, sizeof(message));
+
+  if (strcmp(argv[2], "duty") == 0)
+    {
+      message.mode = ACTUATOR_MODE_DUTY;
+    }
+  else if (strcmp(argv[2], "current") == 0)
+    {
+      message.mode = ACTUATOR_MODE_CURRENT;
+    }
+  else
+    {
+      printf("vesc: mode must be duty or current\n");
+      return EXIT_FAILURE;
+    }
+
+  message.motor = strtof(argv[3], NULL);
+  message.steering = strtof(argv[4], NULL);
+
+  if (argc >= 6)
+    {
+      seconds = strtod(argv[5], NULL);
+    }
+
+  if (!(seconds > 0.0 && seconds <= 30.0))
+    {
+      printf("vesc: seconds must be in 0..30\n");
+      return EXIT_FAILURE;
+    }
+
+  if (!isfinite(message.motor) || !isfinite(message.steering))
+    {
+      printf("vesc: motor and steering must be finite\n");
+      return EXIT_FAILURE;
+    }
+
+  rate = param_i32("VESC_TX_RATE");
+
+  if (rate < 1)
+    {
+      rate = 50;
+    }
+
+  pub = actuator_command_advertise();
+
+  if (pub < 0)
+    {
+      printf("vesc: cannot advertise actuator_command (%d)\n", errno);
+      return EXIT_FAILURE;
+    }
+
+  period_us = 1000000 / (int)rate;
+  ticks = (int)(seconds * (double)rate);
+
+  printf("vesc: publishing %s %.3f steering %.3f for %.1f s\n",
+         argv[2], (double)message.motor, (double)message.steering, seconds);
+
+  for (i = 0; i < ticks; i++)
+    {
+      message.timestamp = 0;    /* the daemon stamps it on arrival */
+      actuator_command_publish(pub, &message);
+      usleep(period_us);
+    }
+
+  orb_unadvertise(pub);
+  printf("vesc: stopped publishing; failsafe takes over\n");
+  return EXIT_SUCCESS;
 }
 
 int main(int argc, FAR char *argv[])
@@ -146,6 +287,35 @@ int main(int argc, FAR char *argv[])
     {
       print_status();
       return EXIT_SUCCESS;
+    }
+
+  if (strcmp(argv[1], "arm") == 0 || strcmp(argv[1], "disarm") == 0)
+    {
+      bool want = strcmp(argv[1], "arm") == 0;
+
+      ret = vesc_arm(want);
+
+      if (ret == -ESRCH)
+        {
+          printf("vesc: not running\n");
+          return EXIT_FAILURE;
+        }
+
+      if (ret == -EPERM)
+        {
+          printf("vesc: refused - a live setpoint is commanding the motor.\n"
+                 "      Stop the publisher, or wait %" PRIi32 " ms for it to"
+                 " go stale.\n", param_i32("VESC_CMD_TO_MS"));
+          return EXIT_FAILURE;
+        }
+
+      printf("vesc: %s\n", want ? "ARMED" : "disarmed");
+      return EXIT_SUCCESS;
+    }
+
+  if (strcmp(argv[1], "set") == 0)
+    {
+      return do_set(argc, argv);
     }
 
   usage();
