@@ -10,9 +10,9 @@
  * carry two message types. PX4 reached the same conclusion on the same
  * silicon and drives the peripheral directly.
  *
- * RECEIVE ONLY. There is no transmit path here at all, which is deliberate:
- * a driver that can only listen cannot spin a motor while the bit timing is
- * still being proven.
+ * Receive plus a minimal transmit path. Transmit was deliberately left out
+ * of the first version so that a driver still proving its bit timing could
+ * not spin a motor; that timing is now confirmed on hardware.
  *
  * Classic CAN, 8-byte frames. CAN FD would change the message RAM element
  * size from four words to eighteen and invalidate the layout in fdcan.c.
@@ -40,6 +40,8 @@ struct fdcan_stats_s
   uint32_t rx;              /* frames handed out */
   uint32_t lost;            /* RX FIFO0 overruns - not drained fast enough */
   uint32_t rejected;        /* non-extended or remote frames */
+  uint32_t tx;              /* frames queued for transmission */
+  uint32_t tx_full;         /* dropped: Tx FIFO had no free element */
   uint8_t  last_error;      /* PSR LEC */
   bool     bus_off;
   bool     error_passive;
@@ -59,6 +61,22 @@ int fdcan_init(uint32_t bitrate);
  */
 
 int fdcan_receive(FAR struct fdcan_frame_s *frame);
+
+/* Queue one frame. Returns OK, -EAGAIN when the Tx FIFO is full, or -EINVAL
+ * before init.
+ *
+ * "Queued", not "sent": this returns as soon as the element is in the FIFO
+ * and the hardware has been told to send it.
+ *
+ * A FULL FIFO IS THE DIAGNOSTIC WORTH KNOWING. Classic CAN needs another
+ * node to acknowledge, and the hardware retries a frame that is never
+ * acknowledged for as long as it takes. So an absent VESC, or a missing bus
+ * terminator, fills all 32 elements in about 0.6 s at 50 Hz and every call
+ * after that returns -EAGAIN. That climbing tx_full is a precise symptom,
+ * and it is the first thing to look at when a bench run does nothing.
+ */
+
+int fdcan_transmit(FAR const struct fdcan_frame_s *frame);
 
 /* Narrow the HARDWARE filter to one controller id; 0 accepts any.
  *

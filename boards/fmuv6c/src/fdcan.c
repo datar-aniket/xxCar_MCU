@@ -64,6 +64,19 @@
 #define FDCAN_RX_XTD              (1u << 30)
 #define FDCAN_RX_RTR              (1u << 29)
 
+/* Tx element word 0 flags. Same bit positions as the Rx element, which is
+ * not a coincidence - the two share a layout.
+ */
+
+#define FDCAN_TX_XTD              (1u << 30)
+
+/* Tx element word 1: DLC occupies bits [19:16]. FDF and BRS stay clear;
+ * setting either would make this a CAN FD frame, which the four-word element
+ * size cannot hold.
+ */
+
+#define FDCAN_TX_DLC_SHIFT        (16u)
+
 /* GFC: reject everything that does not match, including remote frames.
  * ANFE/ANFS 3 = reject non-matching.
  */
@@ -257,6 +270,14 @@ int fdcan_init(uint32_t bitrate)
 
   putreg32(0, STM32_FDCAN1_RXESC);
 
+  /* TXESC 0: 8-byte data, matching RXESC. Explicit for the same reason - the
+   * reset value happens to be what the four-word element in fdcan_ram.h
+   * assumes, and leaning on a reset value for a number the RAM layout
+   * depends on is how the layout quietly stops being true.
+   */
+
+  putreg32(0, STM32_FDCAN1_TXESC);
+
   fdcan_write_filter(0);
 
   fdcan_leave_config();
@@ -330,6 +351,83 @@ int fdcan_receive(FAR struct fdcan_frame_s *frame)
     }
 
   g_stats.rx++;
+  return OK;
+}
+
+int fdcan_transmit(FAR const struct fdcan_frame_s *frame)
+{
+  uint32_t status;
+  uint32_t index;
+  uint32_t element;
+  uint32_t word;
+  uint32_t i;
+
+  if (!g_ready || frame == NULL || frame->dlc > 8)
+    {
+      return -EINVAL;
+    }
+
+  status = getreg32(STM32_FDCAN1_TXFQS);
+
+  if ((status & FDCAN_TXFQS_TFQF) != 0)
+    {
+      /* Nothing on the bus is acknowledging, so the hardware is still
+       * retrying frames queued up to 0.6 s ago. Dropping this one is right:
+       * at 50 Hz the next carries fresher intent than anything stuck in the
+       * queue.
+       */
+
+      g_stats.tx_full++;
+      return -EAGAIN;
+    }
+
+  index = (status & FDCAN_TXFQS_TFQPI_MASK) >> FDCAN_TXFQS_TFQPI_SHIFT;
+  element = FDCAN_RAM_TXF_OFF + (index * 4u);
+
+  putreg32(FDCAN_TX_XTD | (frame->id & 0x1fffffffu),
+           FDCAN_RAM_WORD(element));
+  putreg32((uint32_t)frame->dlc << FDCAN_TX_DLC_SHIFT,
+           FDCAN_RAM_WORD(element + 1));
+
+  /* Data words are packed least significant byte first WITHIN each word,
+   * while the CAN payload itself is big-endian. Those are two different
+   * things: the byte order on the wire was already decided by the encoder,
+   * and this only moves bytes into the message RAM in the order the
+   * peripheral reads them out.
+   */
+
+  for (i = 0; i < 8u; i += 4u)
+    {
+      word = 0;
+
+      if (i + 0u < frame->dlc)
+        {
+          word |= (uint32_t)frame->data[i + 0u];
+        }
+
+      if (i + 1u < frame->dlc)
+        {
+          word |= (uint32_t)frame->data[i + 1u] << 8;
+        }
+
+      if (i + 2u < frame->dlc)
+        {
+          word |= (uint32_t)frame->data[i + 2u] << 16;
+        }
+
+      if (i + 3u < frame->dlc)
+        {
+          word |= (uint32_t)frame->data[i + 3u] << 24;
+        }
+
+      putreg32(word, FDCAN_RAM_WORD(element + 2 + (i / 4u)));
+    }
+
+  /* Add request: one bit per element index. */
+
+  putreg32(1u << index, STM32_FDCAN1_TXBAR);
+
+  g_stats.tx++;
   return OK;
 }
 
