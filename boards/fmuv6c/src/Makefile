@@ -55,6 +55,12 @@ CSRCS += stm32_spi.c
 CSRCS += fmuv6c_sensor_probe.c
 endif
 
+# The VESC CAN link. Gated on the app that uses it rather than on
+# CONFIG_STM32H7_FDCAN1, which would drag in NuttX's SocketCAN driver.
+ifeq ($(CONFIG_XXCAR_VESC),y)
+CSRCS += fdcan.c
+endif
+
 ifeq ($(CONFIG_SENSORS),y)
 CSRCS += fmuv6c_sensors.c
 CSRCS += ms5611.c ms5611_comp.c
