@@ -180,6 +180,33 @@ struct vehicle_baro_s
   float    temperature;           /* 20: degrees C */
 };
 
+/* An absolute pose from the companion computer, in ITS map frame.
+ *
+ * Deliberately a separate type from the wire struct in comp_proto.h. They
+ * happen to carry the same fields today; tying the topic to the wire would
+ * mean every future format change was also a change to everything
+ * subscribed.
+ *
+ * Only x, y and yaw are fused - height stays with the barometer. cov is the
+ * upper triangle of the 3x3 for (x, y, yaw); a zero entry means the source
+ * supplied no estimate and the parameter is used instead.
+ */
+
+struct external_pose_s
+{
+  uint64_t timestamp;             /*  0: us, publication time */
+  uint64_t timestamp_sample;      /*  8: us, board timebase, from the source */
+  float    x;                     /* 16: m, map frame */
+  float    y;                     /* 20 */
+  float    yaw;                   /* 24: rad, map frame */
+  float    cov[6];                /* 28: xx xy xyaw yy yyaw yawyaw */
+  uint8_t  flags;                 /* 52: bit 0 = pose valid */
+  uint8_t  reset_counter;         /* 53: source's frame-reset generation */
+  uint8_t  pad[2];                /* 54 */
+};
+
+#define EXTERNAL_POSE_VALID (1u << 0)
+
 /* Calibrated body-frame increments for strapdown propagation. Unlike the
  * corrected controller topics above, this path bypasses every configurable
  * software LPF/notch. The hardware anti-alias filters remain part of the
@@ -276,6 +303,7 @@ ORB_DECLARE(vehicle_accel);
 ORB_DECLARE(vehicle_gyro);
 ORB_DECLARE(vehicle_mag);
 ORB_DECLARE(vehicle_baro);
+ORB_DECLARE(external_pose);
 ORB_DECLARE(vehicle_imu);
 ORB_DECLARE(estimator_state);
 
@@ -300,6 +328,9 @@ int vehicle_mag_publish(int fd, FAR const struct vehicle_mag_s *msg);
 
 int vehicle_baro_advertise(void);
 int vehicle_baro_publish(int fd, FAR const struct vehicle_baro_s *msg);
+
+int external_pose_advertise(void);
+int external_pose_publish(int fd, FAR const struct external_pose_s *msg);
 
 int vehicle_imu_advertise(void);
 int vehicle_imu_publish(int fd, FAR const struct vehicle_imu_s *msg);
