@@ -41,6 +41,7 @@
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static volatile bool g_running;
 static volatile bool g_should_stop;
+static volatile bool g_should_reset;
 static struct ekf3_status_s g_status;
 
 /* ~3 kB. A file-scope static, not a member of g_status and not on the stack:
@@ -385,6 +386,22 @@ static int ekf3_daemon(int argc, FAR char *argv[])
           break;
         }
 
+      /* Honour a commanded reset here, on the daemon's own thread, before
+       * anything is drained. The ring and the measurement queues go with it:
+       * everything buffered was sampled against the trajectory being
+       * abandoned, and replaying it afterwards would rebuild the state the
+       * reset was asked to discard.
+       */
+
+      if (g_should_reset)
+        {
+          ekf_core_reset(&status.core);
+          ekf_delay_init(&g_delay, status.horizon_ms);
+          status.reset_requests++;
+          g_should_reset = false;
+          status_publish(&status);
+        }
+
       drain_mag(mag_sub, &status);
       drain_baro(baro_sub, &status);
 
@@ -534,6 +551,7 @@ int ekf3_start(void)
     }
 
   g_should_stop = false;
+  g_should_reset = false;
   task = task_create("ekf3", EKF3_PRIORITY, EKF3_STACK,
                      ekf3_daemon, NULL);
 
@@ -548,6 +566,29 @@ int ekf3_start(void)
     }
 
   return g_running ? 0 : -EIO;
+}
+
+int ekf3_reset(void)
+{
+  int wait;
+
+  if (!g_running)
+    {
+      return -ESRCH;
+    }
+
+  g_should_reset = true;
+
+  /* Wait for the daemon to clear the flag, so the caller is told the reset
+   * HAPPENED rather than merely that it was asked for.
+   */
+
+  for (wait = 0; wait < 100 && g_should_reset; wait++)
+    {
+      usleep(10000);
+    }
+
+  return g_should_reset ? -ETIMEDOUT : 0;
 }
 
 int ekf3_stop(void)

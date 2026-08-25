@@ -27,6 +27,7 @@ struct ekf3_status_s
   uint32_t publish_count;
   uint32_t publish_errors;
   uint32_t stale_count;
+  uint32_t reset_requests;
   uint32_t horizon_ms;        /* EK3_DELAY_MS as read at start */
   float    alt_noise;         /* EK3_ALT_M_NSE as read at start */
   float    alt_gate;          /* EK3_ALT_I_GATE as read at start */
@@ -49,6 +50,18 @@ struct ekf3_status_s
 
 int ekf3_start(void);
 int ekf3_stop(void);
+
+/* Drop the filter back to alignment.
+ *
+ * Requests it; the daemon performs it on its own thread. Doing it from the
+ * caller's would race ekf_core_process() halfway through a propagation, and
+ * a half-reset filter is worse than either state.
+ *
+ * Returns 0 once the reset has been observed, -ESRCH when not running, and
+ * -ETIMEDOUT if the daemon did not act on it.
+ */
+
+int ekf3_reset(void);
 void ekf3_status(struct ekf3_status_s *status);
 
 #endif /* __APPS_EKF3_EKF3_H */

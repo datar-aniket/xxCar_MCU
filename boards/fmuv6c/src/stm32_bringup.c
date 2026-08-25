@@ -94,6 +94,14 @@
 #  include "../../../apps/px4io/px4io.h"
 #endif
 
+#ifdef CONFIG_XXCAR_IMU_DELTA
+#  include "../../../apps/imu_delta/imu_delta.h"
+#endif
+
+#ifdef CONFIG_XXCAR_EKF3
+#  include "../../../apps/ekf3/ekf3.h"
+#endif
+
 #ifdef CONFIG_XXCAR_LOGGER
 #  include "../../../apps/logger/logger.h"
 #endif
@@ -890,6 +898,46 @@ int stm32_bringup(void)
               fmuv6c_boot_required_failure(&boot);
             }
         }
+    }
+#endif
+
+  /* The estimator, in dependency order.
+   *
+   * ekf3 consumes vehicle_imu, which imu_delta publishes, so imu_delta has
+   * to be up first. There is no race to worry about: imu_delta_start() does
+   * not return until the daemon has advertised the topic and raised its
+   * running flag, so a successful return means vehicle_imu exists.
+   *
+   * Both are OPTIONAL failures. An estimator that will not start is a
+   * serious problem, but wedging the boot is a worse one - the board must
+   * still reach a shell, which is where it can be diagnosed.
+   *
+   * Aiding is deliberately NOT started here. `sensors aux` (magnetometer and
+   * barometer) and `companion` stay manual: ekf3 treats their absence as no
+   * aiding rather than as a failure, so it comes up either way.
+   */
+
+#ifdef CONFIG_XXCAR_IMU_DELTA
+  if (imu_delta_start() < 0)
+    {
+      syslog(LOG_ERR, "[imu-delta] boot start failed\n");
+      fmuv6c_boot_optional_failure(&boot);
+    }
+  else
+    {
+      syslog(LOG_INFO, "[imu-delta] started at boot\n");
+
+#ifdef CONFIG_XXCAR_EKF3
+      if (ekf3_start() < 0)
+        {
+          syslog(LOG_ERR, "[ekf3] boot start failed\n");
+          fmuv6c_boot_optional_failure(&boot);
+        }
+      else
+        {
+          syslog(LOG_INFO, "[ekf3] started at boot\n");
+        }
+#endif
     }
 #endif
 

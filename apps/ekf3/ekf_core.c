@@ -405,6 +405,29 @@ static void restart_alignment(FAR struct ekf_core_s *ekf)
   ekf->last_mag_timestamp = 0;
 }
 
+/* Drop the filter back to alignment on request.
+ *
+ * The same path a fault takes, plus the reset generation, so consumers see a
+ * commanded reset exactly as they see an automatic one - there is no second
+ * kind of discontinuity for them to learn about.
+ *
+ * Biases go with it. They were estimated against a trajectory that is being
+ * abandoned, and a bias carried across a reset is the one piece of state
+ * that could make the new alignment worse than a cold start.
+ */
+
+void ekf_core_reset(FAR struct ekf_core_s *ekf)
+{
+  if (ekf == NULL)
+    {
+      return;
+    }
+
+  ekf->reset_counter++;
+  ekf->commanded_reset_count++;
+  restart_alignment(ekf);
+}
+
 void ekf_core_init(FAR struct ekf_core_s *ekf)
 {
   memset(ekf, 0, sizeof(*ekf));

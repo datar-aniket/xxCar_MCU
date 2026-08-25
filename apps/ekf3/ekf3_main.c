@@ -6,6 +6,7 @@
 
 #include <nuttx/config.h>
 
+#include <errno.h>
 #include <inttypes.h>
 #include <math.h>
 #include <stdio.h>
@@ -17,7 +18,7 @@
 
 static void usage(void)
 {
-  printf("Usage: ekf3 start | stop | status\n"
+  printf("Usage: ekf3 start | stop | status | reset\n"
          "  Requires imu_delta. Runs 400 Hz 15-state prediction and\n"
          "  100 Hz covariance at a EK3_DELAY_MS fusion horizon.\n"
          "  Barometric height is fused when EK3_SRCn_POSZ selects it and\n"
@@ -112,6 +113,8 @@ static void print_status(void)
          " restarts %" PRIu32 "\n",
          (double)progress, core->align_samples,
          core->alignment_restart_count);
+  printf("  resets commanded %" PRIu32 "\n",
+         core->commanded_reset_count);
   {
     FAR const struct ekf_source_set_s *source =
       &status.sources.set[status.sources.active_set];
@@ -272,6 +275,26 @@ int main(int argc, FAR char *argv[])
         }
 
       print_status();
+      return EXIT_SUCCESS;
+    }
+
+  if (strcmp(argv[1], "reset") == 0)
+    {
+      result = ekf3_reset();
+
+      if (result == -ESRCH)
+        {
+          printf("ekf3: not running\n");
+          return EXIT_FAILURE;
+        }
+
+      if (result < 0)
+        {
+          printf("ekf3: reset was not acted on (%d)\n", result);
+          return EXIT_FAILURE;
+        }
+
+      printf("ekf3: reset - realigning, hold the vehicle still\n");
       return EXIT_SUCCESS;
     }
 

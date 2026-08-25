@@ -133,6 +133,7 @@ struct ekf_core_s
   uint32_t source_reset_count;
   uint32_t numerical_reset_count;
   uint32_t alignment_restart_count;
+  uint32_t commanded_reset_count;
   uint32_t low_dynamics_entry_count;
   uint32_t low_dynamics_exit_count;
   uint32_t gravity_accept_count;
@@ -234,6 +235,7 @@ int ekf_core_fuse_baro(FAR struct ekf_core_s *ekf, float pressure_hpa,
                        float noise, float gate_sigma);
 
 void ekf_core_init(FAR struct ekf_core_s *ekf);
+void ekf_core_reset(FAR struct ekf_core_s *ekf);
 
 /* Replay count samples forward from the filter state.
  *
