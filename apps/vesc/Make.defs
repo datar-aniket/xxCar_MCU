@@ -1,0 +1,9 @@
+############################################################################
+# apps/vesc/Make.defs
+#
+# SPDX-License-Identifier: Apache-2.0
+############################################################################
+
+ifneq ($(CONFIG_XXCAR_VESC),)
+CONFIGURED_APPS += $(APPDIR)/xxcar/vesc
+endif

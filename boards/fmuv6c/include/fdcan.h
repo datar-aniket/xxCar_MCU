@@ -1,5 +1,5 @@
 /****************************************************************************
- * boards/fmuv6c/src/fdcan.h
+ * boards/fmuv6c/include/fdcan.h
  *
  * SPDX-License-Identifier: Apache-2.0
  *
@@ -18,8 +18,8 @@
  * size from four words to eighteen and invalidate the layout in fdcan.c.
  ****************************************************************************/
 
-#ifndef __BOARDS_FMUV6C_SRC_FDCAN_H
-#define __BOARDS_FMUV6C_SRC_FDCAN_H
+#ifndef __BOARDS_FMUV6C_INCLUDE_FDCAN_H
+#define __BOARDS_FMUV6C_INCLUDE_FDCAN_H
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -71,4 +71,4 @@ int  fdcan_set_filter(uint8_t controller_id);
 
 void fdcan_stats(FAR struct fdcan_stats_s *out);
 
-#endif /* __BOARDS_FMUV6C_SRC_FDCAN_H */
+#endif /* __BOARDS_FMUV6C_INCLUDE_FDCAN_H */

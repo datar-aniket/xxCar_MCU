@@ -1,0 +1,41 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config XXCAR_VESC
+	tristate "vesc: VESC CAN telemetry"
+	default n
+	depends on UORB
+	select XXCAR_PARAM
+	select XXCAR_UORB_MSGS
+	---help---
+		Receives VESC telemetry on FDCAN1 and publishes vesc_status:
+		tachometer, filtered motor current, and the ADC1 voltage used as
+		steering feedback.
+
+		Receive only. Nothing here commands a motor or a servo.
+
+		With VESC_CAN_ID at 0 it accepts any controller id and `vesc
+		status` lists every packet id seen, which is how the node id and
+		the packet set are discovered in the first place.
+
+		Note this does NOT depend on STM32H7_FDCAN1. That symbol builds
+		NuttX's SocketCAN driver, which needs NET; the FDCAN1 register
+		driver in boards/fmuv6c/src is gated on this symbol instead.
+
+if XXCAR_VESC
+
+config XXCAR_VESC_PROGNAME
+	string "Program name"
+	default "vesc"
+
+config XXCAR_VESC_PRIORITY
+	int "command priority"
+	default 100
+
+config XXCAR_VESC_STACKSIZE
+	int "command stack size"
+	default 2048
+
+endif

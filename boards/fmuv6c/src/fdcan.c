@@ -18,7 +18,7 @@
 #include "hardware/stm32_fdcan.h"
 #include "hardware/stm32_rcc.h"
 
-#include "fdcan.h"
+#include <arch/board/fdcan.h>
 #include "fdcan_ram.h"
 
 /* NuttX's stm32_fdcan.h defines NTSEG1, NBRP and NSJW but NOT NTSEG2.
