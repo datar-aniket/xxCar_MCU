@@ -242,32 +242,37 @@ CONFIG_USART6_RXDMA=y
 # split across a buffer wrap. Rounded up to a multiple of the 32-byte cache line.
 CONFIG_STM32H7_SERIAL_RXDMA_BUFFER_SIZE=128
 
-# Battery-backed RTC, so UTC survives a reboot and the clock is synced once
-# rather than on every power-up.
+# RTC clocked from HSE, matching PX4's own fmu-v6c configuration.
 #
-# LSE: the 32.768 kHz crystal the board populates (STM32_LSE_FREQUENCY in
-# board.h). The RTC lives in the backup domain and keeps running on VBAT, so
-# a power cycle does not lose the time the companion set.
+# NOT LSE. board.h defines STM32_LSE_FREQUENCY, but that is a frequency
+# DECLARATION, not evidence of a part: this board does not populate the
+# 32.768 kHz crystal. Selecting LSECLOCK enables the oscillator, waits out
+# its bounded timeout, and then leaves the RTC clocked by something that
+# never starts - after which the first register read hard-faults with the
+# console not yet up, which is a silent brick. PX4 uses HSECLOCK here for
+# exactly this reason.
 #
-# DATETIME rather than HIRES because the H7's RTC is a CALENDAR - it counts
-# in BCD date and time, not in ticks - so restoring gives ONE SECOND of
-# resolution. That is coarse next to a sub-millisecond timesync, and is the
-# point at which a PPS input earns its keep: the RTC gets you the right
-# second across a reboot, and PPS would get you the right microsecond within
-# it. Until then the companion re-syncs after boot to recover the phase.
+# NuttX divides HSE down itself: HSE_DIVISOR is derived from
+# STM32_HSE_FREQUENCY (16 MHz -> /16 -> 1 MHz), so there is nothing to
+# configure in board.h.
 #
-# MAGIC_REG is a backup register NuttX stamps once the RTC has actually been
-# set. Without it a cold RTC reads as a plausible-looking date that was never
-# true, and every wire timestamp would be confidently wrong.
-# The RTC lives in the backup domain, and PWR is what unlocks write access
-# to it. The driver refuses to compile without it rather than silently
-# failing to keep time.
+# WHAT THIS COSTS: HSE is the main oscillator and does not run in VBAT mode.
+# The RTC therefore survives a warm reboot, where the backup domain is not
+# reset, but NOT a power cycle. "Sync once" means once per power-up, not
+# once ever. Only an LSE crystal with a backup cell gives the latter, and
+# this board has neither.
+#
+# MAGIC_REG=1 also follows PX4: a backup register NuttX stamps once the RTC
+# has actually been set, so a cold RTC is known to be unset rather than read
+# as a plausible-looking date that was never true.
 CONFIG_STM32H7_PWR=y
 CONFIG_STM32H7_RTC=y
-CONFIG_STM32H7_RTC_LSECLOCK=y
+CONFIG_STM32H7_RTC_HSECLOCK=y
+CONFIG_STM32H7_RTC_MAGIC_REG=1
 CONFIG_RTC=y
 CONFIG_RTC_DATETIME=y
 CONFIG_RTC_DRIVER=y
+
 
 
 # RX DMA on the TELEM ports the companion link can be assigned to.

@@ -70,9 +70,15 @@ static uint64_t comp_now_us(void)
  * knows what time it is and the wire conversion works before the companion
  * has said anything.
  *
- * It is a SECOND-resolution recovery, though - the H7's RTC is a calendar,
- * not a tick counter - so the phase within that second is lost across a
- * reboot. A fresh sync recovers it, and a PPS input would hold it.
+ * Two limits are worth knowing rather than discovering.
+ *
+ * It is a SECOND-resolution recovery - the H7's RTC is a calendar, not a
+ * tick counter - so the phase within that second is lost. A fresh sync
+ * recovers it, and a PPS input would hold it.
+ *
+ * And this board clocks the RTC from HSE, because it has no 32.768 kHz
+ * crystal (PX4's own fmu-v6c config does the same). HSE stops when main
+ * power does, so the time survives a warm reboot and NOT a power cycle.
  */
 
 static void comp_seed_utc_from_rtc(FAR struct companion_status_s *s)

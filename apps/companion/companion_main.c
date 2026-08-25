@@ -91,6 +91,8 @@ static void print_status(void)
 
       printf("  clock      UTC from the RTC (+/- 1 s) - sync for the "
              "sub-second phase\n");
+      printf("             (HSE-clocked: survives a reboot, not a power "
+             "cycle)\n");
     }
 
   if (s.timesync_replies > 0 || s.timesync_expected > 0)
