@@ -63,6 +63,10 @@ static void test_layout(void)
   assert(sizeof(struct comp_estimator_pose_s) == 56);
   assert(comp_payload_len(COMP_MSG_EXTERNAL_POSE) == 48);
   assert(comp_payload_len(COMP_MSG_ESTIMATOR_POSE) == 56);
+  assert(comp_payload_len(COMP_MSG_TIMESYNC_REQ) == 8);
+  assert(comp_payload_len(COMP_MSG_TIMESYNC_REP) == 24);
+  assert(sizeof(struct comp_timesync_req_s) == 8);
+  assert(sizeof(struct comp_timesync_rep_s) == 24);
   assert(comp_payload_len(200) == 0);
 }
 
@@ -200,6 +204,35 @@ static void test_back_to_back(void)
   assert(g_parser.frames == 2);
 }
 
+/* A reply must carry the request's own host_tx back untouched, or a
+ * companion with several requests in flight cannot tell which reply is
+ * which - and would pair a reply with the wrong send time, producing an
+ * offset that is confidently wrong.
+ */
+
+static void test_timesync_round_trip(void)
+{
+  struct comp_timesync_rep_s in;
+  struct comp_timesync_rep_s out;
+  uint8_t frame[COMP_MAX_PAYLOAD + COMP_FRAME_OVERHEAD];
+  int n;
+
+  memset(&in, 0, sizeof(in));
+  in.host_tx_us = 111111111111ull;
+  in.board_rx_us = 222222222222ull;
+  in.board_tx_us = 333333333333ull;
+
+  n = comp_encode(COMP_MSG_TIMESYNC_REP, &in, sizeof(in), frame,
+                  sizeof(frame));
+
+  comp_parser_init(&g_parser);
+  assert(feed(frame, (size_t)n) == COMP_MSG_TIMESYNC_REP);
+  memcpy(&out, g_parser.payload, sizeof(out));
+  assert(out.host_tx_us == in.host_tx_us);
+  assert(out.board_rx_us == in.board_rx_us);
+  assert(out.board_tx_us == in.board_tx_us);
+}
+
 static void test_encode_refuses_a_short_buffer(void)
 {
   struct comp_external_pose_s in = sample_pose();
@@ -219,6 +252,7 @@ int main(void)
   test_sync_byte_in_payload();
   test_unknown_id_versus_bad_length();
   test_back_to_back();
+  test_timesync_round_trip();
   test_encode_refuses_a_short_buffer();
 
   puts("comp_proto: framing, CRC, resync and length checks verified - OK");

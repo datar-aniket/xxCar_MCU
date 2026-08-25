@@ -54,6 +54,12 @@ uint8_t comp_payload_len(uint8_t id)
       case COMP_MSG_ESTIMATOR_POSE:
         return (uint8_t)sizeof(struct comp_estimator_pose_s);
 
+      case COMP_MSG_TIMESYNC_REQ:
+        return (uint8_t)sizeof(struct comp_timesync_req_s);
+
+      case COMP_MSG_TIMESYNC_REP:
+        return (uint8_t)sizeof(struct comp_timesync_rep_s);
+
       default:
         return 0;
     }

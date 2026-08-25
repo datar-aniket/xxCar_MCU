@@ -133,6 +133,25 @@ def main():
     _r, _p, yaw = comp_link.quaternion_to_euler(pose["quaternion"])
     assert abs(math.degrees(yaw) - 90.0) < 1e-3, math.degrees(yaw)
 
+    # Timesync solve, against a hand-computed exchange. The board is 4 ms
+    # ahead and the wire costs 0.2 ms; the board's own 0.1 ms of processing
+    # must NOT land in the offset, which is the whole reason board_tx is on
+    # the wire.
+    rep = {"host_tx_us": 1_000_000,
+           "board_rx_us": 1_004_100,
+           "board_tx_us": 1_004_200}
+    offset, trip = comp_link.timesync_solve(rep, host_rx_us=1_000_300)
+    assert offset == 4000, offset
+    assert trip == 200, trip
+
+    # A symmetric exchange with zero offset must report zero, not half the
+    # round trip - the classic sign of averaging the wrong pair.
+    rep = {"host_tx_us": 0, "board_rx_us": 500,
+           "board_tx_us": 600}
+    offset, trip = comp_link.timesync_solve(rep, host_rx_us=1100)
+    assert offset == 0, offset
+    assert trip == 1000, trip
+
     print("comp_proto cross-check: Python and C agree byte for byte - OK")
 
 

@@ -21,6 +21,7 @@ import math
 import queue
 import struct
 import threading
+import time
 
 import serial
 
@@ -30,8 +31,8 @@ FRAME_OVERHEAD = 5
 
 MSG_EXTERNAL_POSE = 1
 MSG_CONTROL_TRAJ = 2       # reserved
-MSG_TIMESYNC_REQ = 3       # reserved
-MSG_TIMESYNC_REP = 4       # reserved
+MSG_TIMESYNC_REQ = 3
+MSG_TIMESYNC_REP = 4
 MSG_ESTIMATOR_POSE = 16
 
 POSE_FLAG_VALID = 1 << 0
@@ -45,9 +46,18 @@ ESTIMATOR_POSE = struct.Struct("<Q3f4f3fBB6x")
 assert EXTERNAL_POSE.size == 48, EXTERNAL_POSE.size
 assert ESTIMATOR_POSE.size == 56, ESTIMATOR_POSE.size
 
+# struct comp_timesync_req_s / _rep_s
+TIMESYNC_REQ = struct.Struct("<Q")
+TIMESYNC_REP = struct.Struct("<QQQ")
+
+assert TIMESYNC_REQ.size == 8, TIMESYNC_REQ.size
+assert TIMESYNC_REP.size == 24, TIMESYNC_REP.size
+
 PAYLOAD_LEN = {
     MSG_EXTERNAL_POSE: EXTERNAL_POSE.size,
     MSG_ESTIMATOR_POSE: ESTIMATOR_POSE.size,
+    MSG_TIMESYNC_REQ: TIMESYNC_REQ.size,
+    MSG_TIMESYNC_REP: TIMESYNC_REP.size,
 }
 
 _CRC_TAB = (0x0000, 0x1021, 0x2042, 0x3063, 0x4084, 0x50A5, 0x60C6, 0x70E7,
@@ -91,6 +101,42 @@ def encode_external_pose(x, y, yaw, cov=None, valid=True, reset_counter=0,
                               POSE_FLAG_VALID if valid else 0,
                               int(reset_counter) & 0xFF)
     return encode(MSG_EXTERNAL_POSE, body)
+
+
+def host_now_us() -> int:
+    """The host clock the timesync exchange is measured against.
+
+    MONOTONIC, not wall time: the offset is meaningless the moment the clock
+    it was measured against steps, and NTP steps wall time whenever it feels
+    like it.
+    """
+    return int(time.monotonic() * 1e6)
+
+
+def encode_timesync_req(host_tx_us: int) -> bytes:
+    return encode(MSG_TIMESYNC_REQ, TIMESYNC_REQ.pack(int(host_tx_us)))
+
+
+def decode_timesync_rep(payload: bytes) -> dict:
+    host_tx, board_rx, board_tx = TIMESYNC_REP.unpack(payload)
+    return {"host_tx_us": host_tx, "board_rx_us": board_rx,
+            "board_tx_us": board_tx}
+
+
+def timesync_solve(rep: dict, host_rx_us: int):
+    """(offset, round_trip) in microseconds, from one exchange.
+
+    offset is what to ADD to a host timestamp to express it in board time.
+
+    Subtracting the board's own processing time is what makes this better
+    than a naive round-trip halving: without board_tx the board's delay is
+    indistinguishable from wire latency and lands entirely in the offset.
+    """
+    offset = ((rep["board_rx_us"] - rep["host_tx_us"]) +
+              (rep["board_tx_us"] - host_rx_us)) // 2
+    trip = ((host_rx_us - rep["host_tx_us"]) -
+            (rep["board_tx_us"] - rep["board_rx_us"]))
+    return offset, trip
 
 
 def decode_estimator_pose(payload: bytes) -> dict:

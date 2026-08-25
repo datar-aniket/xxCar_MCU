@@ -83,6 +83,11 @@ static void print_status(void)
    * (tx errors climbing).
    */
 
+  if (s.timesync_replies > 0)
+    {
+      printf("  timesync   replies %" PRIu32 "\n", s.timesync_replies);
+    }
+
   printf("  estimator  states %" PRIu32 "  nothing-new %" PRIu32 "%s\n",
          s.est_seen, s.tx_no_state,
          s.est_seen == 0 ? "   <- ekf3 is not publishing" : "");

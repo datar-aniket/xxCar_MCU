@@ -31,7 +31,8 @@ except ImportError:
 
 import comp_link
 from comp_link import Link, decode_estimator_pose, encode_external_pose
-from comp_link import quaternion_to_euler, solution_names
+from comp_link import (decode_timesync_rep, encode_timesync_req, host_now_us,
+                       quaternion_to_euler, solution_names, timesync_solve)
 
 BG, PANEL = "#0f1115", "#171b22"
 FG, MUTED, ACCENT = "#cdd6e0", "#7b8798", "#4c9aff"
@@ -51,6 +52,13 @@ class App(tk.Tk):
         self.link = None
         self.reset_counter = 0
         self.last_pose_us = 0.0
+
+        # None until a sync has been done. Until then poses go out with a
+        # zero timestamp, which the board reads as "stamp it on arrival".
+        self.clock_offset_us = None
+        self.clock_trip_us = None
+        self._sync_samples = []
+        self._sync_left = 0
 
         self._build(port, baud)
         self.after(50, self._drain)
@@ -102,8 +110,31 @@ class App(tk.Tk):
                                                               column=i * 2 + 1)
             self.entries[key] = var
 
+        # Per-channel measurement noise. Sigma rather than variance because
+        # that is the unit a person can judge - "10 cm" means something,
+        # "0.01 m^2" needs a moment - and the wire carries variance, so the
+        # square happens here.
+        self.sigmas = {}
+        for i, (key, text) in enumerate((("sx", "sigma x  (m)"),
+                                         ("sy", "sigma y  (m)"),
+                                         ("syaw", "sigma yaw  (deg)"))):
+            self._label(send, text).grid(row=1, column=i * 2, sticky="e",
+                                         padx=(0 if i == 0 else 14, 6),
+                                         pady=(8, 0))
+            var = tk.StringVar(value="0")
+            tk.Entry(send, textvariable=var, width=10, bg=BG, fg=FG,
+                     insertbackground=FG, relief="flat").grid(
+                         row=1, column=i * 2 + 1, pady=(8, 0))
+            self.sigmas[key] = var
+
+        self._label(send,
+                    "0 = no estimate, board uses EK3_EXT_*_NSE. That "
+                    "parameter is a FLOOR: a smaller sigma is raised to it.",
+                    size=8).grid(row=2, column=0, columnspan=6, sticky="w",
+                                 pady=(4, 0))
+
         row = tk.Frame(send, bg=PANEL)
-        row.grid(row=1, column=0, columnspan=6, sticky="w", pady=(10, 0))
+        row.grid(row=3, column=0, columnspan=6, sticky="w", pady=(10, 0))
 
         self.valid_var = tk.BooleanVar(value=True)
         tk.Checkbutton(row, text="valid", variable=self.valid_var, bg=PANEL,
@@ -126,6 +157,15 @@ class App(tk.Tk):
                   padx=10).pack(side="left", padx=10)
         self.reset_lbl = self._label(row, "reset_counter 0")
         self.reset_lbl.pack(side="left")
+
+        clock = tk.Frame(send, bg=PANEL)
+        clock.grid(row=4, column=0, columnspan=6, sticky="w", pady=(10, 0))
+
+        tk.Button(clock, text="sync clock", command=self._sync, bg=PANEL,
+                  fg=FG, relief="flat", padx=12).pack(side="left")
+        self.clock_lbl = self._label(clock,
+                                     "unsynced - poses arrive-stamped", BAD)
+        self.clock_lbl.pack(side="left", padx=10)
 
         # ---- receive ----------------------------------------------------
 
@@ -184,6 +224,45 @@ class App(tk.Tk):
         self.reset_counter = (self.reset_counter + 1) & 0xFF
         self.reset_lbl.configure(text=f"reset_counter {self.reset_counter}")
 
+    def _sync(self):
+        """Ten exchanges, then keep the least-delayed one.
+
+        Not an average. The offset is only as good as the path is
+        symmetric, and averaging lets one badly queued exchange drag the
+        estimate; the shortest round trip is the one with least room for
+        asymmetry to hide in.
+        """
+        if not self.link:
+            return
+
+        self._sync_samples = []
+        self._sync_left = 10
+        self.clock_lbl.configure(text="syncing...", fg=MUTED)
+        self._sync_step()
+
+    def _sync_step(self):
+        if not self.link or self._sync_left <= 0:
+            self._sync_finish()
+            return
+
+        self._sync_left -= 1
+        self.link.send(encode_timesync_req(host_now_us()))
+        self.after(40, self._sync_step)
+
+    def _sync_finish(self):
+        if not self._sync_samples:
+            self.clock_lbl.configure(text="sync failed - no reply", fg=BAD)
+            return
+
+        offset, trip = min(self._sync_samples, key=lambda s: s[1])
+        self.clock_offset_us = offset
+        self.clock_trip_us = trip
+        self.clock_lbl.configure(
+            text=(f"synced: offset {offset / 1000.0:+.2f} ms, "
+                  f"round trip {trip / 1000.0:.2f} ms "
+                  f"({len(self._sync_samples)}/10)"),
+            fg=GOOD)
+
     def _send(self):
         if not self.link:
             return
@@ -196,11 +275,28 @@ class App(tk.Tk):
             self.state_lbl.configure(text="bad number", fg=BAD)
             return
 
-        # The board timestamps against its own clock; with no timesync yet,
-        # zero is honest about that rather than inventing a time.
+        try:
+            sx = float(self.sigmas["sx"].get())
+            sy = float(self.sigmas["sy"].get())
+            syaw = float(self.sigmas["syaw"].get()) / DEG
+        except ValueError:
+            self.state_lbl.configure(text="bad sigma", fg=BAD)
+            return
+
+        # The wire carries VARIANCE; the fields are sigma because that is
+        # what a person can judge. Off-diagonals stay zero: the board fuses
+        # the diagonal only, as ArduPilot does.
+        cov = (sx * sx, 0.0, 0.0, sy * sy, 0.0, syaw * syaw)
+
+        # Once synced, stamp the pose in the BOARD's clock. Unsynced, send
+        # zero - which the board reads as "stamp it on arrival" and counts
+        # separately, rather than us inventing a time it cannot check.
+        stamp = (host_now_us() + self.clock_offset_us
+                 if self.clock_offset_us is not None else 0)
+
         self.link.send(encode_external_pose(
-            x, y, yaw, valid=self.valid_var.get(),
-            reset_counter=self.reset_counter, timestamp_us=0))
+            x, y, yaw, cov=cov, valid=self.valid_var.get(),
+            reset_counter=self.reset_counter, timestamp_us=stamp))
 
     # ---- pump -----------------------------------------------------------
 
@@ -230,6 +326,10 @@ class App(tk.Tk):
                 if msg_id == comp_link.MSG_ESTIMATOR_POSE:
                     self._show(decode_estimator_pose(body))
                     self.last_pose_us = now
+                elif msg_id == comp_link.MSG_TIMESYNC_REP:
+                    rep = decode_timesync_rep(body)
+                    self._sync_samples.append(
+                        timesync_solve(rep, host_now_us()))
             elif kind == "error":
                 self.state_lbl.configure(text=str(payload)[:44], fg=BAD)
 

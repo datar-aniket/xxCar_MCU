@@ -169,7 +169,8 @@ static int comp_write_all(int fd, FAR const uint8_t *data, size_t len)
  */
 
 static void comp_route(int id, FAR const struct comp_parser_s *parser,
-                       int pose_pub, FAR struct companion_status_s *s)
+                       int fd, uint64_t rx_us, int pose_pub,
+                       FAR struct companion_status_s *s)
 {
   if (id == COMP_MSG_EXTERNAL_POSE)
     {
@@ -198,9 +199,42 @@ static void comp_route(int id, FAR const struct comp_parser_s *parser,
       s->last_rx_us = out.timestamp;
     }
 
-  /* COMP_MSG_CONTROL_TRAJ and the timesync ids are reserved. The parser has
-   * already counted them as unknown; there is nothing to do here until they
-   * are defined.
+  else if (id == COMP_MSG_TIMESYNC_REQ)
+    {
+      struct comp_timesync_req_s req;
+      struct comp_timesync_rep_s rep;
+      uint8_t frame[COMP_MAX_PAYLOAD + COMP_FRAME_OVERHEAD];
+      int n;
+
+      memcpy(&req, parser->payload, sizeof(req));
+
+      /* rx_us was taken when the frame COMPLETED, not now. Everything
+       * between - routing, packing, the write - is board processing that
+       * board_tx_us accounts for separately, so it cannot leak into the
+       * offset the companion computes.
+       */
+
+      rep.host_tx_us = req.host_tx_us;
+      rep.board_rx_us = rx_us;
+      rep.board_tx_us = comp_now_us();
+
+      n = comp_encode(COMP_MSG_TIMESYNC_REP, &rep, sizeof(rep), frame,
+                      sizeof(frame));
+
+      if (n > 0 && comp_write_all(fd, frame, (size_t)n) == OK)
+        {
+          s->bytes_out += (uint64_t)n;
+          s->tx_frames++;
+          s->timesync_replies++;
+        }
+      else
+        {
+          s->tx_errors++;
+        }
+    }
+
+  /* COMP_MSG_CONTROL_TRAJ is reserved. The parser has already counted it as
+   * unknown; there is nothing to do here until it is defined.
    */
 }
 
@@ -303,7 +337,13 @@ static bool comp_service(int fd, FAR struct pollfd *pfd, int est_sub,
 
                   if (id != 0)
                     {
-                      comp_route(id, &status->parser, pose_pub, status);
+                      /* Stamp the moment the frame COMPLETED. Taking it
+                       * later would fold this loop's own work into the
+                       * companion's clock offset.
+                       */
+
+                      comp_route(id, &status->parser, fd, comp_now_us(),
+                                 pose_pub, status);
                     }
                 }
             }
@@ -496,7 +536,6 @@ static int companion_daemon(int argc, FAR char *argv[])
              port->devpath);
     }
 
-done:
   result = EXIT_SUCCESS;
 
 out:

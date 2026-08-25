@@ -37,11 +37,11 @@
 
 #define COMP_MSG_EXTERNAL_POSE   1
 #define COMP_MSG_CONTROL_TRAJ    2    /* reserved, not yet defined */
-#define COMP_MSG_TIMESYNC_REQ    3    /* reserved */
+#define COMP_MSG_TIMESYNC_REQ    3
 
 /* Outbound: board -> companion. */
 
-#define COMP_MSG_TIMESYNC_REP    4    /* reserved */
+#define COMP_MSG_TIMESYNC_REP    4
 #define COMP_MSG_ESTIMATOR_POSE 16
 
 /* Absolute pose in the companion's map frame. Only x, y and yaw are fused;
@@ -94,6 +94,36 @@ struct comp_estimator_pose_s
                              *     says. Declared, so the wire format is what
                              *     the struct says rather than what the
                              *     compiler decided. */
+};
+
+/* Clock synchronisation, request and reply.
+ *
+ * The ordinary ping-pong: the companion sends its own clock, the board
+ * echoes it and adds when it saw the request and when it sent the reply.
+ * The companion then has four timestamps and can solve for both the offset
+ * and the round trip:
+ *
+ *   offset     = ((board_rx - host_tx) + (board_tx - host_rx)) / 2
+ *   round_trip = (host_rx - host_tx) - (board_tx - board_rx)
+ *
+ * Both terms matter. Without board_tx the board's own processing delay is
+ * indistinguishable from wire latency and lands entirely in the offset.
+ *
+ * Sending several and keeping the one with the SMALLEST round trip is the
+ * standard move: the offset estimate is only as good as the path is
+ * symmetric, and the least-delayed exchange is the least asymmetric one.
+ */
+
+struct comp_timesync_req_s
+{
+  uint64_t host_tx_us;      /* 0: the companion's clock when it asked */
+};
+
+struct comp_timesync_rep_s
+{
+  uint64_t host_tx_us;      /*  0: echoed, so replies cannot be mismatched */
+  uint64_t board_rx_us;     /*  8: board clock when the request arrived */
+  uint64_t board_tx_us;     /* 16: board clock when this reply was sent */
 };
 
 enum comp_parse_state_e
