@@ -112,13 +112,33 @@ def encode_external_pose(x, y, yaw, cov=None, valid=True, reset_counter=0,
 
 
 def host_now_us() -> int:
-    """The host clock the timesync exchange is measured against.
+    """Host MONOTONIC microseconds - the timebase the exchange is measured in.
 
-    MONOTONIC, not wall time: the offset is meaningless the moment the clock
-    it was measured against steps, and NTP steps wall time whenever it feels
-    like it.
+    Not wall time. A round trip measured against a clock NTP can step is
+    meaningless the moment it steps, and the step would land in the offset
+    rather than showing up as an outlier the min-RTT pick could discard.
     """
     return int(time.monotonic() * 1e6)
+
+
+class UtcClock:
+    """UTC microseconds, advanced by the MONOTONIC clock.
+
+    The board is told UTC, but the burst that measures the link must not be
+    vulnerable to the wall clock stepping halfway through it. So UTC is
+    sampled ONCE and carried forward by the monotonic clock: absolute like
+    wall time, and as steady as monotonic between samples.
+    """
+
+    def __init__(self):
+        self.utc_base_us = int(time.time() * 1e6)
+        self.mono_base_us = host_now_us()
+
+    def now_us(self) -> int:
+        return self.utc_base_us + (host_now_us() - self.mono_base_us)
+
+    def to_utc(self, mono_us: int) -> int:
+        return self.utc_base_us + (mono_us - self.mono_base_us)
 
 
 def encode_timesync_req(host_tx_us: int) -> bytes:
@@ -129,9 +149,11 @@ def encode_timesync_start(count: int) -> bytes:
     return encode(MSG_TIMESYNC_START, TIMESYNC_START.pack(int(count), 0))
 
 
-def encode_timesync_end(offset_us: int, trip_us: int, samples: int) -> bytes:
+def encode_timesync_end(utc_offset_us: int, trip_us: int,
+                        samples: int) -> bytes:
+    """utc_offset_us: add to the board's MONOTONIC time to get UTC."""
     return encode(MSG_TIMESYNC_END,
-                  TIMESYNC_END.pack(int(offset_us), int(trip_us),
+                  TIMESYNC_END.pack(int(utc_offset_us), int(trip_us),
                                     int(samples)))
 
 
@@ -144,7 +166,8 @@ def decode_timesync_rep(payload: bytes) -> dict:
 def timesync_solve(rep: dict, host_rx_us: int):
     """(offset, round_trip) in microseconds, from one exchange.
 
-    offset is what to ADD to a host timestamp to express it in board time.
+    offset is what to ADD to a host timestamp to express it in board time;
+    negate it to get what the board adds to its own clock to reach ours.
 
     Subtracting the board's own processing time is what makes this better
     than a naive round-trip halving: without board_tx the board's delay is

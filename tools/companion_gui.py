@@ -13,6 +13,7 @@ checking gating, the datum reset and the noise floor.
 """
 
 import argparse
+import datetime
 import math
 import pathlib
 import queue
@@ -31,7 +32,7 @@ except ImportError:
 
 import comp_link
 from comp_link import Link, decode_estimator_pose, encode_external_pose
-from comp_link import (decode_timesync_rep, encode_timesync_end,
+from comp_link import (UtcClock, decode_timesync_rep, encode_timesync_end,
                        encode_timesync_req, encode_timesync_start,
                        host_now_us, quaternion_to_euler, solution_names,
                        timesync_solve)
@@ -57,8 +58,9 @@ class App(tk.Tk):
 
         # None until a sync has been done. Until then poses go out with a
         # zero timestamp, which the board reads as "stamp it on arrival".
-        self.clock_offset_us = None
+        self.clock_offset_us = None      # host mono -> board mono
         self.clock_trip_us = None
+        self.utc = UtcClock()
         self._sync_samples = []
         self._sync_left = 0
 
@@ -257,7 +259,7 @@ class App(tk.Tk):
             return
 
         self._sync_left -= 1
-        self.link.send(encode_timesync_req(host_now_us()))
+        self.link.send(encode_timesync_req(self.utc.now_us()))
         self.after(40, self._sync_step)
 
     def _sync_finish(self):
@@ -271,12 +273,14 @@ class App(tk.Tk):
         self.clock_offset_us = offset
         self.clock_trip_us = trip
 
+        # solve() gives "add to UTC to get board monotonic". The board needs
+        # the inverse: what to add to ITS clock to reach UTC.
         if self.link:
-            self.link.send(encode_timesync_end(offset, trip,
+            self.link.send(encode_timesync_end(-offset, trip,
                                                len(self._sync_samples)))
         self.clock_lbl.configure(
-            text=(f"synced: offset {offset / 1000.0:+.2f} ms, "
-                  f"round trip {trip / 1000.0:.2f} ms "
+            text=(f"synced to UTC: board is {-offset / 1000.0:+.2f} ms from "
+                  f"UTC, round trip {trip / 1000.0:.2f} ms "
                   f"({len(self._sync_samples)}/10)"),
             fg=GOOD)
 
@@ -305,11 +309,10 @@ class App(tk.Tk):
         # the diagonal only, as ArduPilot does.
         cov = (sx * sx, 0.0, 0.0, sy * sy, 0.0, syaw * syaw)
 
-        # Once synced, stamp the pose in the BOARD's clock. Unsynced, send
-        # zero - which the board reads as "stamp it on arrival" and counts
-        # separately, rather than us inventing a time it cannot check.
-        stamp = (host_now_us() + self.clock_offset_us
-                 if self.clock_offset_us is not None else 0)
+        # UTC once synced; the board converts it back to its own monotonic
+        # clock on arrival. Unsynced, send zero - "stamp it on arrival" -
+        # rather than a UTC the board has no offset to interpret.
+        stamp = self.utc.now_us() if self.clock_offset_us is not None else 0
 
         self.link.send(encode_external_pose(
             x, y, yaw, cov=cov, valid=self.valid_var.get(),
@@ -345,8 +348,11 @@ class App(tk.Tk):
                     self.last_pose_us = now
                 elif msg_id == comp_link.MSG_TIMESYNC_REP:
                     rep = decode_timesync_rep(body)
-                    # rx_us came off the reading thread, not from here.
-                    self._sync_samples.append(timesync_solve(rep, rx_us))
+                    # rx_us came off the reading thread, not from here, and
+                    # is converted to the same UTC basis the request was
+                    # sent in so both sides of the solve agree.
+                    self._sync_samples.append(
+                        timesync_solve(rep, self.utc.to_utc(rx_us)))
             elif kind == "error":
                 self.state_lbl.configure(text=str(payload)[:44], fg=BAD)
 
@@ -373,19 +379,23 @@ class App(tk.Tk):
         # The solution's own timestamp, and how stale it is by the time it
         # got here. Age needs the offset - it is the difference between two
         # different clocks - so it only means anything once synced.
-        stamp_s = pose["timestamp_us"] / 1e6
+        stamp_us = pose["timestamp_us"]
 
         if self.clock_offset_us is not None and rx_us is not None:
-            age_ms = (rx_us + self.clock_offset_us -
-                      pose["timestamp_us"]) / 1000.0
+            # Both are UTC now, so the age is a plain subtraction rather
+            # than an offset correction.
+            age_ms = (self.utc.to_utc(rx_us) - stamp_us) / 1000.0
+            shown = datetime.datetime.fromtimestamp(
+                stamp_us / 1e6,
+                datetime.timezone.utc).strftime("%H:%M:%S.%f")[:-3]
             self.time_lbl.configure(
-                text=(f"solution time {stamp_s:12.6f} s   "
+                text=(f"solution time {shown} UTC   "
                       f"age at arrival {age_ms:+.2f} ms"),
                 fg=BAD if abs(age_ms) > 100.0 else MUTED)
         else:
             self.time_lbl.configure(
-                text=(f"solution time {stamp_s:12.6f} s   "
-                      "(age needs a clock sync)"), fg=MUTED)
+                text=(f"solution time {stamp_us / 1e6:12.6f} s board "
+                      "monotonic   (sync for UTC and age)"), fg=MUTED)
 
     def _stats(self, now):
         if not self.link:

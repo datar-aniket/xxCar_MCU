@@ -96,11 +96,23 @@ static void print_status(void)
 
       if (s.timesync_synced)
         {
-          printf("             offset %+.3f ms  trip %.3f ms  "
-                 "samples %" PRIu32 "\n",
+          printf("             UTC offset %+.3f ms  trip %.3f ms  "
+                 "samples %" PRIu32 "%s\n",
                  (double)s.timesync_offset_us / 1000.0,
                  (double)s.timesync_trip_us / 1000.0,
-                 s.timesync_samples);
+                 s.timesync_samples,
+                 s.wall_clock_set ? "  wall clock set" : "");
+        }
+
+      /* A UTC stamp that arrived before a sync could not be converted to the
+       * board's monotonic clock, so it was arrival-stamped instead. Worth
+       * naming: it means poses were sent before the sync completed.
+       */
+
+      if (s.rx_unsynced_stamp > 0)
+        {
+          printf("             %" PRIu32 " pose(s) stamped before the sync\n",
+                 s.rx_unsynced_stamp);
         }
     }
 

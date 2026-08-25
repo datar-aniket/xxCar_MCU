@@ -37,6 +37,12 @@ static volatile bool g_running;
 static volatile bool g_should_stop;
 static struct companion_status_s g_status;
 
+/* Board monotonic + this = UTC. Zero until a sync has happened, which is
+ * also what "not synced" means at the conversion sites below.
+ */
+
+static int64_t g_utc_offset_us;
+
 static uint64_t comp_now_us(void)
 {
   struct timespec t;
@@ -181,7 +187,30 @@ static void comp_route(int id, FAR const struct comp_parser_s *parser,
       memset(&out, 0, sizeof(out));
 
       out.timestamp = comp_now_us();
-      out.timestamp_sample = wire.timestamp_us;
+
+      /* Back to the board's monotonic clock, which is the only timebase the
+       * estimator understands. Zero stays zero - it means "not timestamped"
+       * and the estimator stamps it on arrival.
+       *
+       * Unsynced, a supplied UTC cannot be converted at all, so it is turned
+       * into that same zero rather than fused as a number a thousand times
+       * larger than anything the horizon expects.
+       */
+
+      if (wire.timestamp_us == 0 || g_utc_offset_us == 0)
+        {
+          out.timestamp_sample = 0;
+
+          if (wire.timestamp_us != 0)
+            {
+              s->rx_unsynced_stamp++;
+            }
+        }
+      else
+        {
+          out.timestamp_sample =
+            (uint64_t)((int64_t)wire.timestamp_us - g_utc_offset_us);
+        }
       out.x = wire.x;
       out.y = wire.y;
       out.yaw = wire.yaw;
@@ -213,10 +242,32 @@ static void comp_route(int id, FAR const struct comp_parser_s *parser,
       struct comp_timesync_end_s end;
 
       memcpy(&end, parser->payload, sizeof(end));
-      s->timesync_offset_us = end.offset_us;
+      s->timesync_offset_us = end.utc_offset_us;
       s->timesync_trip_us = end.trip_us;
       s->timesync_samples = end.samples;
       s->timesync_synced = end.samples > 0;
+
+      if (s->timesync_synced)
+        {
+          struct timespec utc;
+          int64_t now_utc = (int64_t)comp_now_us() + end.utc_offset_us;
+
+          g_utc_offset_us = end.utc_offset_us;
+
+          /* Set the wall clock too, so `date`, log filenames and anything
+           * else reading CLOCK_REALTIME agree with the companion. This is
+           * the only clock that is SET; the monotonic one everything else
+           * is timed against is left exactly where it was.
+           */
+
+          utc.tv_sec = (time_t)(now_utc / 1000000);
+          utc.tv_nsec = (long)((now_utc % 1000000) * 1000);
+
+          if (clock_settime(CLOCK_REALTIME, &utc) == 0)
+            {
+              s->wall_clock_set = true;
+            }
+        }
     }
   else if (id == COMP_MSG_TIMESYNC_REQ)
     {
@@ -279,7 +330,14 @@ static void comp_transmit(int fd, int est_sub,
   s->est_seen++;
 
   memset(&wire, 0, sizeof(wire));
-  wire.timestamp_us = est.timestamp_sample;
+  /* UTC on the wire once synced. Before that the companion gets the board's
+   * raw monotonic time, which is all there is to give.
+   */
+
+  wire.timestamp_us = g_utc_offset_us != 0 ?
+                      (uint64_t)((int64_t)est.timestamp_sample +
+                                 g_utc_offset_us) :
+                      est.timestamp_sample;
   memcpy(wire.position, est.position, sizeof(wire.position));
   memcpy(wire.quaternion, est.quaternion, sizeof(wire.quaternion));
   memcpy(wire.velocity, est.velocity, sizeof(wire.velocity));

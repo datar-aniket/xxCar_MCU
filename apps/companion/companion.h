@@ -43,6 +43,8 @@ struct companion_status_s
   int64_t  timesync_offset_us;  /* what the companion settled on */
   uint32_t timesync_trip_us;
   bool     timesync_synced;
+  bool     wall_clock_set;      /* CLOCK_REALTIME set from companion UTC */
+  uint32_t rx_unsynced_stamp;   /* UTC arrived before a sync could use it */
   uint32_t est_seen;          /* estimator states actually read */
   uint32_t tx_no_state;       /* nothing new to send */
   uint32_t connects;          /* hosts attached */

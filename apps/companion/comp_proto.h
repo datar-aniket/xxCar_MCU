@@ -134,14 +134,29 @@ struct comp_timesync_start_s
 
 struct comp_timesync_end_s
 {
-  int64_t  offset_us;       /*  0: add to host time to get board time */
+  /* Add to the board's MONOTONIC microseconds to get UTC microseconds since
+   * the epoch. The companion computes it because only it sees all four
+   * timestamps of an exchange.
+   *
+   * The board does not adopt UTC as its own timebase, and must not. Every
+   * internal timestamp - IMU samples, the delay ring, the fusion horizon,
+   * every staleness check - is monotonic, and monotonic is the only clock
+   * that cannot step. Moving those to UTC would jump them from microseconds
+   * since boot to microseconds since 1970, at which point every buffered
+   * sample reads as impossibly old and the filter resets.
+   *
+   * So UTC is a WIRE format: converted on the way out, converted back on the
+   * way in, and never seen by the estimator.
+   */
+
+  int64_t  utc_offset_us;   /*  0: board monotonic + this = UTC */
   uint32_t trip_us;         /*  8: the round trip it was measured at */
   uint32_t samples;         /* 12: exchanges that came back */
 };
 
 struct comp_timesync_req_s
 {
-  uint64_t host_tx_us;      /* 0: the companion's clock when it asked */
+  uint64_t host_tx_us;      /* 0: companion UTC microseconds when asked */
 };
 
 struct comp_timesync_rep_s
