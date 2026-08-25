@@ -207,6 +207,26 @@ struct external_pose_s
 
 #define EXTERNAL_POSE_VALID (1u << 0)
 
+/* VESC telemetry, in RAW units.
+ *
+ * No steering angle: converting adc_volts to an angle is a calibration with
+ * its own zero and scale, and baking a guess into the topic is the mistake
+ * SENS_MAG0_ROT already made once in this tree.
+ *
+ * The tachometer is an accumulated POSITION count, not a rate.
+ */
+
+struct vesc_status_s
+{
+  uint64_t timestamp;             /*  0: us, publication time */
+  uint64_t timestamp_sample;      /*  8: us, when the frame was drained */
+  int32_t  tachometer;            /* 16: accumulated counts */
+  float    current_a;             /* 20: A, filtered total */
+  float    adc_volts;             /* 24: V, ADC1 - steering feedback */
+  uint8_t  controller_id;         /* 28: which VESC */
+  uint8_t  pad[3];                /* 29 */
+};
+
 /* Calibrated body-frame increments for strapdown propagation. Unlike the
  * corrected controller topics above, this path bypasses every configurable
  * software LPF/notch. The hardware anti-alias filters remain part of the
@@ -305,6 +325,7 @@ ORB_DECLARE(vehicle_gyro);
 ORB_DECLARE(vehicle_mag);
 ORB_DECLARE(vehicle_baro);
 ORB_DECLARE(external_pose);
+ORB_DECLARE(vesc_status);
 ORB_DECLARE(vehicle_imu);
 ORB_DECLARE(estimator_state);
 
@@ -332,6 +353,9 @@ int vehicle_baro_publish(int fd, FAR const struct vehicle_baro_s *msg);
 
 int external_pose_advertise(void);
 int external_pose_publish(int fd, FAR const struct external_pose_s *msg);
+
+int vesc_status_advertise(void);
+int vesc_status_publish(int fd, FAR const struct vesc_status_s *msg);
 
 int vehicle_imu_advertise(void);
 int vehicle_imu_publish(int fd, FAR const struct vehicle_imu_s *msg);

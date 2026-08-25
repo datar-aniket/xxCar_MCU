@@ -58,6 +58,7 @@ ORB_NAME_FITS("vehicle_gyro");
 ORB_NAME_FITS("vehicle_mag");
 ORB_NAME_FITS("vehicle_baro");
 ORB_NAME_FITS("external_pose");
+ORB_NAME_FITS("vesc_status");
 ORB_NAME_FITS("vehicle_imu");
 ORB_NAME_FITS("estimator_state");
 
@@ -124,6 +125,14 @@ static_assert(offsetof(struct external_pose_s, cov)              == 28, "layout"
 static_assert(offsetof(struct external_pose_s, flags)            == 52, "layout");
 static_assert(offsetof(struct external_pose_s, reset_counter)    == 53, "layout");
 static_assert(sizeof(struct external_pose_s)                     == 56, "layout");
+
+static_assert(offsetof(struct vesc_status_s, timestamp)        ==  0, "layout");
+static_assert(offsetof(struct vesc_status_s, timestamp_sample) ==  8, "layout");
+static_assert(offsetof(struct vesc_status_s, tachometer)       == 16, "layout");
+static_assert(offsetof(struct vesc_status_s, current_a)        == 20, "layout");
+static_assert(offsetof(struct vesc_status_s, adc_volts)        == 24, "layout");
+static_assert(offsetof(struct vesc_status_s, controller_id)    == 28, "layout");
+static_assert(sizeof(struct vesc_status_s)                     == 32, "layout");
 
 static_assert(offsetof(struct vehicle_imu_s, timestamp)         ==  0, "layout");
 static_assert(offsetof(struct vehicle_imu_s, timestamp_sample)  ==  8, "layout");
@@ -204,6 +213,13 @@ static const char external_pose_format[] =
   ",cov[3]:%hf,cov[4]:%hf,cov[5]:%hf"
   ",flags:%hhu,reset_counter:%hhu";
 
+static const char vesc_status_format[] =
+  "timestamp:%" PRIu64
+  ",timestamp_sample:%" PRIu64
+  ",tachometer:%" PRIi32
+  ",current_a:%hf,adc_volts:%hf"
+  ",controller_id:%hhu";
+
 static const char vehicle_imu_format[] =
   "timestamp:%" PRIu64
   ",timestamp_sample:%" PRIu64
@@ -245,6 +261,7 @@ ORB_DEFINE(vehicle_gyro, struct vehicle_gyro_s, vehicle_gyro_format);
 ORB_DEFINE(vehicle_mag, struct vehicle_mag_s, vehicle_mag_format);
 ORB_DEFINE(vehicle_baro, struct vehicle_baro_s, vehicle_baro_format);
 ORB_DEFINE(external_pose, struct external_pose_s, external_pose_format);
+ORB_DEFINE(vesc_status, struct vesc_status_s, vesc_status_format);
 ORB_DEFINE(vehicle_imu, struct vehicle_imu_s, vehicle_imu_format);
 ORB_DEFINE(estimator_state, struct estimator_state_s,
            estimator_state_format);
@@ -356,6 +373,21 @@ int external_pose_publish(int fd, FAR const struct external_pose_s *msg)
     }
 
   return orb_publish(ORB_ID(external_pose), fd, msg);
+}
+
+int vesc_status_advertise(void)
+{
+  return orb_advertise(ORB_ID(vesc_status), NULL);
+}
+
+int vesc_status_publish(int fd, FAR const struct vesc_status_s *msg)
+{
+  if (fd < 0 || msg == NULL)
+    {
+      return -EINVAL;
+    }
+
+  return orb_publish(ORB_ID(vesc_status), fd, msg);
 }
 
 int vehicle_imu_advertise(void)
