@@ -8,6 +8,7 @@
 
 #include <errno.h>
 #include <inttypes.h>
+#include <math.h>
 #include <poll.h>
 #include <pthread.h>
 #include <sched.h>
@@ -37,6 +38,7 @@
 
 #define EKF3_BARO_MAX_AGE_US  500000ull
 #define EKF3_MAG_MAX_AGE_US   500000ull
+#define EKF3_EXT_MAX_AGE_US   500000ull
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static volatile bool g_running;
@@ -208,6 +210,70 @@ static void drain_mag(int sub, FAR struct ekf3_status_s *status)
     }
 }
 
+static void drain_extnav(int sub, FAR struct ekf3_status_s *status)
+{
+  int drained = 0;
+
+  if (sub < 0)
+    {
+      return;
+    }
+
+  while (drained++ < EKF3_DRAIN_MAX)
+    {
+      struct external_pose_s message;
+      struct ekf_extnav_sample_s sample;
+      uint64_t now;
+
+      if (orb_copy(ORB_ID(external_pose), sub, &message) < 0)
+        {
+          return;
+        }
+
+      now = now_us();
+
+      /* The canary for a timesync that is not working. A clock grossly wrong
+       * would otherwise corrupt position silently, which is the worst
+       * failure available here.
+       *
+       * The two bounds do different jobs. The age bound is the queue's -
+       * past it the correction lands on the wrong part of the trajectory. A
+       * timestamp AHEAD of our own clock has no such excuse: it means the
+       * timesync is wrong, full stop.
+       */
+
+      if (message.timestamp_sample > now + EKF3_EXT_MAX_AGE_US ||
+          (now > message.timestamp_sample &&
+           now - message.timestamp_sample > EKF3_EXT_MAX_AGE_US))
+        {
+          status->extnav_bad_time++;
+          continue;
+        }
+
+      memset(&sample, 0, sizeof(sample));
+      sample.timestamp_sample = message.timestamp_sample;
+      sample.x = message.x;
+      sample.y = message.y;
+      sample.yaw = message.yaw;
+
+      /* cov holds VARIANCES; the sample carries sigmas. Zero means the
+       * source supplied no estimate, and the floor applies either way.
+       */
+
+      sample.pos_sigma[0] = message.cov[0] > 0.0f ?
+                            sqrtf(message.cov[0]) : 0.0f;
+      sample.pos_sigma[1] = message.cov[3] > 0.0f ?
+                            sqrtf(message.cov[3]) : 0.0f;
+      sample.yaw_sigma = message.cov[5] > 0.0f ?
+                         sqrtf(message.cov[5]) : 0.0f;
+      sample.reset_counter = message.reset_counter;
+      sample.valid = (message.flags & EXTERNAL_POSE_VALID) != 0;
+
+      ekf_delay_push_extnav(&g_delay, &sample);
+      status->extnav_in++;
+    }
+}
+
 static void drain_baro(int sub, FAR struct ekf3_status_s *status)
 {
   int drained = 0;
@@ -284,12 +350,13 @@ static void publish_output(int publisher, FAR struct ekf3_status_s *status,
 static int ekf3_daemon(int argc, FAR char *argv[])
 {
   struct ekf3_status_s status;
-  struct pollfd fds[3];
+  struct pollfd fds[4];   /* imu, mag, baro, extnav */
   char source_error[80];
   int nfds = 0;
   int subscriber = -1;
   int mag_sub = -1;
   int baro_sub = -1;
+  int extnav_sub = -1;
   int publisher = -1;
   int result = EXIT_FAILURE;
 
@@ -322,8 +389,10 @@ static int ekf3_daemon(int argc, FAR char *argv[])
 
   mag_sub = orb_subscribe(ORB_ID(vehicle_mag));
   baro_sub = orb_subscribe(ORB_ID(vehicle_baro));
+  extnav_sub = orb_subscribe(ORB_ID(external_pose));
   status.mag_available = mag_sub >= 0;
   status.baro_available = baro_sub >= 0;
+  status.extnav_available = extnav_sub >= 0;
 
   if (mag_sub < 0 || baro_sub < 0)
     {
@@ -337,6 +406,11 @@ static int ekf3_daemon(int argc, FAR char *argv[])
   status.horizon_ms = (uint32_t)param_i32("EK3_DELAY_MS");
   status.alt_noise = param_f32("EK3_ALT_M_NSE");
   status.alt_gate = param_f32("EK3_ALT_I_GATE");
+  status.ext_noise = param_f32("EK3_EXT_M_NSE");
+  status.ext_gate = param_f32("EK3_EXT_I_GATE");
+  status.ext_yaw_noise = param_f32("EK3_EXT_YAW_NSE");
+  status.ext_timeout_ms = (uint32_t)param_i32("EK3_EXT_TIMEOUT");
+  ekf_core_set_extnav_config(&status.core, status.ext_timeout_ms * 1000u);
   status.declination = param_f32("EK3_MAG_DEC") * 0.017453292519943295f;
   status.yaw_noise = param_f32("EK3_YAW_M_NSE");
   status.yaw_gate = param_f32("EK3_YAW_I_GATE");
@@ -362,6 +436,13 @@ static int ekf3_daemon(int argc, FAR char *argv[])
   if (baro_sub >= 0)
     {
       fds[nfds].fd = baro_sub;
+      fds[nfds].events = POLLIN;
+      nfds++;
+    }
+
+  if (extnav_sub >= 0)
+    {
+      fds[nfds].fd = extnav_sub;
       fds[nfds].events = POLLIN;
       nfds++;
     }
@@ -404,6 +485,7 @@ static int ekf3_daemon(int argc, FAR char *argv[])
 
       drain_mag(mag_sub, &status);
       drain_baro(baro_sub, &status);
+      drain_extnav(extnav_sub, &status);
 
       /* One packet in, at most one publication out, so estimator_state keeps
        * the input's rate and every publication carries a distinct sample
@@ -414,6 +496,7 @@ static int ekf3_daemon(int argc, FAR char *argv[])
         {
           status.imu_overflow = g_delay.imu_overflow_count;
           status.mag_overflow = g_delay.mag_overflow_count;
+          status.extnav_overflow = g_delay.extnav_overflow_count;
           status.baro_overflow = g_delay.baro_overflow_count;
           status_publish(&status);
           continue;
@@ -433,6 +516,7 @@ static int ekf3_daemon(int argc, FAR char *argv[])
             &status.sources.set[status.sources.active_set];
           struct ekf_baro_sample_s baro;
           struct ekf_mag_sample_s mag;
+          struct ekf_extnav_sample_s ext;
 
           if (ekf_core_process(&status.core, &sample) ==
               EKF_PROCESS_REJECTED)
@@ -485,6 +569,23 @@ static int ekf3_daemon(int argc, FAR char *argv[])
                                     status.yaw_noise, status.yaw_gate);
                 }
             }
+
+          while (ekf_delay_next_extnav(&g_delay, sample.timestamp_sample,
+                                       EKF3_EXT_MAX_AGE_US, &ext))
+            {
+              bool want_position =
+                source->position_xy == EKF_SOURCE_EXTERNAL_NAV;
+              bool want_yaw = source->yaw == EKF_SOURCE_EXTERNAL_NAV;
+
+              if (want_position || want_yaw)
+                {
+                  ekf_core_fuse_extnav(&status.core, &ext,
+                                       status.ext_noise, status.ext_gate,
+                                       status.ext_yaw_noise,
+                                       status.yaw_gate,
+                                       want_position, want_yaw);
+                }
+            }
         }
 
       /* Publish once per PACKET, not once per sample the horizon released.
@@ -529,6 +630,11 @@ out:
   if (baro_sub >= 0)
     {
       orb_unsubscribe(baro_sub);
+    }
+
+  if (extnav_sub >= 0)
+    {
+      orb_unsubscribe(extnav_sub);
     }
 
   if (publisher >= 0)

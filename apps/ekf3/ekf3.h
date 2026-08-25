@@ -36,6 +36,14 @@ struct ekf3_status_s
   float    yaw_gate;          /* EK3_YAW_I_GATE as read at start */
   float    mag_expected;      /* CAL_MAG0_FIELD, Gauss */
   uint32_t mag_align_used;    /* fields handed to alignment */
+  uint32_t extnav_in;         /* external_pose messages queued */
+  uint32_t extnav_overflow;
+  uint32_t extnav_bad_time;   /* refused on the timestamp check */
+  bool     extnav_available;  /* external_pose subscribed */
+  float    ext_noise;         /* EK3_EXT_M_NSE as read at start */
+  float    ext_gate;
+  float    ext_yaw_noise;
+  uint32_t ext_timeout_ms;
   uint32_t mag_in;            /* vehicle_mag messages queued */
   uint32_t baro_in;           /* vehicle_baro messages queued */
   uint32_t imu_overflow;      /* mirrored from the ring */

@@ -131,6 +131,30 @@ static void print_status(void)
          "\n",
          status.horizon_ms, status.output_replay,
          status.imu_overflow, status.mag_overflow, status.baro_overflow);
+  if (core->extnav_datum_set)
+    {
+      printf("  extnav datum set  innov %+.3f %+.3f m  NIS %.3f %.3f\n",
+             (double)core->last_extnav_innov[0],
+             (double)core->last_extnav_innov[1],
+             (double)core->last_extnav_nis[0],
+             (double)core->last_extnav_nis[1]);
+
+      /* The noise ACTUALLY used, after the floor. A source under-reporting
+       * its own error is invisible otherwise.
+       */
+
+      printf("    accept %" PRIu32 " reject %" PRIu32 " (run %" PRIu32
+             ")  redatum %" PRIu32 "  noise %.3f m\n",
+             core->extnav_accept_count, core->extnav_reject_count,
+             core->extnav_consecutive_rejects, core->extnav_datum_count,
+             (double)core->last_extnav_noise);
+    }
+  else
+    {
+      printf("  extnav no datum yet (queued %" PRIu32 ", bad time %" PRIu32
+             ")\n", status.extnav_in, status.extnav_bad_time);
+    }
+
   printf("  aiding in  mag %" PRIu32 " (%s)  baro %" PRIu32 " (%s)\n",
          status.mag_in, status.mag_available ? "subscribed" : "ABSENT",
          status.baro_in, status.baro_available ? "subscribed" : "ABSENT");
