@@ -38,6 +38,8 @@
 #define COMP_MSG_EXTERNAL_POSE   1
 #define COMP_MSG_CONTROL_TRAJ    2    /* reserved, not yet defined */
 #define COMP_MSG_TIMESYNC_REQ    3
+#define COMP_MSG_TIMESYNC_START  5
+#define COMP_MSG_TIMESYNC_END    6
 
 /* Outbound: board -> companion. */
 
@@ -113,6 +115,29 @@ struct comp_estimator_pose_s
  * standard move: the offset estimate is only as good as the path is
  * symmetric, and the least-delayed exchange is the least asymmetric one.
  */
+
+/* A sync burst is bracketed: START, then `count` exchanges, then END
+ * carrying the result the companion settled on.
+ *
+ * The bracket is not what makes the offset accurate - the exchanges do that.
+ * What it buys is that the BOARD knows a sync is in progress and what the
+ * companion concluded, so `companion status` can show the agreed offset
+ * instead of the board having no idea whether its peer thinks the clocks
+ * are aligned.
+ */
+
+struct comp_timesync_start_s
+{
+  uint32_t count;           /* 0: exchanges about to be sent */
+  uint32_t pad;             /* 4 */
+};
+
+struct comp_timesync_end_s
+{
+  int64_t  offset_us;       /*  0: add to host time to get board time */
+  uint32_t trip_us;         /*  8: the round trip it was measured at */
+  uint32_t samples;         /* 12: exchanges that came back */
+};
 
 struct comp_timesync_req_s
 {

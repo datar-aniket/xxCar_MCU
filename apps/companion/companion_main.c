@@ -83,9 +83,25 @@ static void print_status(void)
    * (tx errors climbing).
    */
 
-  if (s.timesync_replies > 0)
+  if (s.timesync_replies > 0 || s.timesync_expected > 0)
     {
-      printf("  timesync   replies %" PRIu32 "\n", s.timesync_replies);
+      printf("  timesync   replies %" PRIu32 "/%" PRIu32 "\n",
+             s.timesync_replies, s.timesync_expected);
+
+      /* The offset the COMPANION settled on, reported back by it. The board
+       * cannot derive this itself - only the companion sees all four
+       * timestamps - so without the END packet the board has no idea
+       * whether its peer thinks the clocks are aligned.
+       */
+
+      if (s.timesync_synced)
+        {
+          printf("             offset %+.3f ms  trip %.3f ms  "
+                 "samples %" PRIu32 "\n",
+                 (double)s.timesync_offset_us / 1000.0,
+                 (double)s.timesync_trip_us / 1000.0,
+                 s.timesync_samples);
+        }
     }
 
   printf("  estimator  states %" PRIu32 "  nothing-new %" PRIu32 "%s\n",

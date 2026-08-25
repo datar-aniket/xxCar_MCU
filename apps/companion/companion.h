@@ -38,6 +38,11 @@ struct companion_status_s
   uint32_t rx_pose;           /* EXTERNAL_POSE routed and published */
   uint32_t rx_publish_errors;
   uint32_t timesync_replies;
+  uint32_t timesync_expected;   /* the burst the companion announced */
+  uint32_t timesync_samples;    /* what came back, per the companion */
+  int64_t  timesync_offset_us;  /* what the companion settled on */
+  uint32_t timesync_trip_us;
+  bool     timesync_synced;
   uint32_t est_seen;          /* estimator states actually read */
   uint32_t tx_no_state;       /* nothing new to send */
   uint32_t connects;          /* hosts attached */

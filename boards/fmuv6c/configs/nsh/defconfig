@@ -242,6 +242,38 @@ CONFIG_USART6_RXDMA=y
 # split across a buffer wrap. Rounded up to a multiple of the 32-byte cache line.
 CONFIG_STM32H7_SERIAL_RXDMA_BUFFER_SIZE=128
 
+# RX DMA on the TELEM ports the companion link can be assigned to.
+#
+# The companion sends 53-byte frames and the board answers with 61-byte ones.
+# Interrupt-driven, each frame is several IRQs as the 8-deep FIFO fills, and
+# every one of them lands between the estimator's 400 Hz packets. That is not
+# a throughput problem - it is a JITTER problem, and jitter on this link turns
+# directly into position error once a pose carries a timestamp.
+#
+# With RX DMA the controller writes the whole frame to memory unaided and the
+# IDLE-line interrupt hands it over once, so a frame costs about two
+# interrupts instead of a dozen. Same mechanism as the PX4IO link above.
+#
+# TELEM1 is deliberately NOT included. It carries the boot console, and the
+# console is the thing you need working when something else is not - changing
+# how it takes bytes is not worth the risk for a port the companion does not
+# have to use. Add CONFIG_UART7_RXDMA=y if you want it there and are willing
+# to test the shell afterwards.
+#
+# TX is left interrupt-driven. The outgoing frame is 61 bytes, which the FIFO
+# absorbs in one go, so DMA would claim a stream per port for no measurable
+# gain - the same argument USART6 makes above.
+CONFIG_UART5_RXDMA=y
+CONFIG_USART2_RXDMA=y
+
+# Big enough that a whole frame plus slack never wraps mid-message. The RX DMA
+# buffer size is shared by every port that uses it.
+CONFIG_UART5_RXBUFSIZE=256
+CONFIG_UART5_TXBUFSIZE=256
+CONFIG_USART2_RXBUFSIZE=256
+CONFIG_USART2_TXBUFSIZE=256
+
+
 # The 8-deep RX FIFO is always enabled by the H7 driver; this only sets when it
 # raises an interrupt. 1/4 full (2 bytes) keeps latency low for the 4-byte packet
 # header, and with RX DMA doing the bulk transfer the threshold is not the thing

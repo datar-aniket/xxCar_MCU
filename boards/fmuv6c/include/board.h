@@ -486,6 +486,26 @@
 #define GPIO_USART6_RX    (GPIO_USART6_RX_1 | GPIO_SPEED_100MHz) /* PC7 */
 #define GPIO_USART6_TX    (GPIO_USART6_TX_1 | GPIO_SPEED_100MHz) /* PC6 */
 
+/* TELEM2 (UART5) and TELEM3 (USART2) receive by DMA, so the companion link
+ * costs about two interrupts per frame instead of one per FIFO threshold
+ * crossing. That is a jitter argument rather than a throughput one: every
+ * one of those interrupts lands between the estimator's 400 Hz packets.
+ *
+ * On DMA2, deliberately. DMA1 already carries seven of its eight streams -
+ * SPI1 both ways for the internal IMU bus, SPI3 both ways, USART3 RX and
+ * USART6 RX and TX for the PX4IO link. Taking two more there would leave
+ * one stream for everything else, and starving the 2 kHz IMU bus of DMA to
+ * save a few interrupts on a 10 Hz pose link would be a bad trade in the
+ * wrong direction. DMA2 carries only USART3_TX today.
+ *
+ * TX stays interrupt-driven: the outgoing frame is 61 bytes, which the
+ * 8-deep FIFO absorbs in one go, so DMA would claim a stream per port for
+ * no measurable gain - the same argument USART6 makes below.
+ */
+
+#define DMAMAP_USART2_RX  DMAMAP_DMA12_USART2RX_1  /* DMA2 - TELEM3 */
+#define DMAMAP_UART5_RX   DMAMAP_DMA12_UART5RX_1   /* DMA2 - TELEM2 */
+
 #define DMAMAP_USART6_RX  DMAMAP_DMA12_USART6RX_0  /* DMA1:71 */
 #define DMAMAP_USART6_TX  DMAMAP_DMA12_USART6TX_0  /* DMA1:72 */
 

@@ -31,8 +31,10 @@ except ImportError:
 
 import comp_link
 from comp_link import Link, decode_estimator_pose, encode_external_pose
-from comp_link import (decode_timesync_rep, encode_timesync_req, host_now_us,
-                       quaternion_to_euler, solution_names, timesync_solve)
+from comp_link import (decode_timesync_rep, encode_timesync_end,
+                       encode_timesync_req, encode_timesync_start,
+                       host_now_us, quaternion_to_euler, solution_names,
+                       timesync_solve)
 
 BG, PANEL = "#0f1115", "#171b22"
 FG, MUTED, ACCENT = "#cdd6e0", "#7b8798", "#4c9aff"
@@ -191,6 +193,10 @@ class App(tk.Tk):
         self.est_reset_lbl.grid(row=3, column=0, columnspan=3, sticky="w",
                                 padx=18)
 
+        self.time_lbl = self._label(recv, "solution time --")
+        self.time_lbl.grid(row=4, column=0, columnspan=3, sticky="w",
+                           padx=18, pady=(4, 0))
+
         # ---- counters ---------------------------------------------------
 
         self.stats_lbl = self._label(self, "", MUTED)
@@ -237,6 +243,11 @@ class App(tk.Tk):
 
         self._sync_samples = []
         self._sync_left = 10
+
+        # Bracket the burst so the board knows one is running and, at the
+        # end, what we concluded - it cannot work the offset out itself,
+        # only this side sees all four timestamps.
+        self.link.send(encode_timesync_start(10))
         self.clock_lbl.configure(text="syncing...", fg=MUTED)
         self._sync_step()
 
@@ -252,11 +263,17 @@ class App(tk.Tk):
     def _sync_finish(self):
         if not self._sync_samples:
             self.clock_lbl.configure(text="sync failed - no reply", fg=BAD)
+            if self.link:
+                self.link.send(encode_timesync_end(0, 0, 0))
             return
 
         offset, trip = min(self._sync_samples, key=lambda s: s[1])
         self.clock_offset_us = offset
         self.clock_trip_us = trip
+
+        if self.link:
+            self.link.send(encode_timesync_end(offset, trip,
+                                               len(self._sync_samples)))
         self.clock_lbl.configure(
             text=(f"synced: offset {offset / 1000.0:+.2f} ms, "
                   f"round trip {trip / 1000.0:.2f} ms "
@@ -322,14 +339,14 @@ class App(tk.Tk):
                 break
 
             if kind == "frame":
-                msg_id, body = payload
+                msg_id, body, rx_us = payload
                 if msg_id == comp_link.MSG_ESTIMATOR_POSE:
-                    self._show(decode_estimator_pose(body))
+                    self._show(decode_estimator_pose(body), rx_us)
                     self.last_pose_us = now
                 elif msg_id == comp_link.MSG_TIMESYNC_REP:
                     rep = decode_timesync_rep(body)
-                    self._sync_samples.append(
-                        timesync_solve(rep, host_now_us()))
+                    # rx_us came off the reading thread, not from here.
+                    self._sync_samples.append(timesync_solve(rep, rx_us))
             elif kind == "error":
                 self.state_lbl.configure(text=str(payload)[:44], fg=BAD)
 
@@ -338,7 +355,7 @@ class App(tk.Tk):
 
         self._stats(now)
 
-    def _show(self, pose):
+    def _show(self, pose, rx_us=None):
         roll, pitch, yaw = quaternion_to_euler(pose["quaternion"])
         for name, value in (("x", pose["position"][0]),
                             ("y", pose["position"][1]),
@@ -352,6 +369,23 @@ class App(tk.Tk):
             text="solution " + solution_names(pose["solution_status"]))
         self.est_reset_lbl.configure(
             text=f"estimator reset_counter {pose['reset_counter']}")
+
+        # The solution's own timestamp, and how stale it is by the time it
+        # got here. Age needs the offset - it is the difference between two
+        # different clocks - so it only means anything once synced.
+        stamp_s = pose["timestamp_us"] / 1e6
+
+        if self.clock_offset_us is not None and rx_us is not None:
+            age_ms = (rx_us + self.clock_offset_us -
+                      pose["timestamp_us"]) / 1000.0
+            self.time_lbl.configure(
+                text=(f"solution time {stamp_s:12.6f} s   "
+                      f"age at arrival {age_ms:+.2f} ms"),
+                fg=BAD if abs(age_ms) > 100.0 else MUTED)
+        else:
+            self.time_lbl.configure(
+                text=(f"solution time {stamp_s:12.6f} s   "
+                      "(age needs a clock sync)"), fg=MUTED)
 
     def _stats(self, now):
         if not self.link:

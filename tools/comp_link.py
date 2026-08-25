@@ -33,6 +33,8 @@ MSG_EXTERNAL_POSE = 1
 MSG_CONTROL_TRAJ = 2       # reserved
 MSG_TIMESYNC_REQ = 3
 MSG_TIMESYNC_REP = 4
+MSG_TIMESYNC_START = 5
+MSG_TIMESYNC_END = 6
 MSG_ESTIMATOR_POSE = 16
 
 POSE_FLAG_VALID = 1 << 0
@@ -49,15 +51,21 @@ assert ESTIMATOR_POSE.size == 56, ESTIMATOR_POSE.size
 # struct comp_timesync_req_s / _rep_s
 TIMESYNC_REQ = struct.Struct("<Q")
 TIMESYNC_REP = struct.Struct("<QQQ")
+TIMESYNC_START = struct.Struct("<II")
+TIMESYNC_END = struct.Struct("<qII")
 
 assert TIMESYNC_REQ.size == 8, TIMESYNC_REQ.size
 assert TIMESYNC_REP.size == 24, TIMESYNC_REP.size
+assert TIMESYNC_START.size == 8, TIMESYNC_START.size
+assert TIMESYNC_END.size == 16, TIMESYNC_END.size
 
 PAYLOAD_LEN = {
     MSG_EXTERNAL_POSE: EXTERNAL_POSE.size,
     MSG_ESTIMATOR_POSE: ESTIMATOR_POSE.size,
     MSG_TIMESYNC_REQ: TIMESYNC_REQ.size,
     MSG_TIMESYNC_REP: TIMESYNC_REP.size,
+    MSG_TIMESYNC_START: TIMESYNC_START.size,
+    MSG_TIMESYNC_END: TIMESYNC_END.size,
 }
 
 _CRC_TAB = (0x0000, 0x1021, 0x2042, 0x3063, 0x4084, 0x50A5, 0x60C6, 0x70E7,
@@ -115,6 +123,16 @@ def host_now_us() -> int:
 
 def encode_timesync_req(host_tx_us: int) -> bytes:
     return encode(MSG_TIMESYNC_REQ, TIMESYNC_REQ.pack(int(host_tx_us)))
+
+
+def encode_timesync_start(count: int) -> bytes:
+    return encode(MSG_TIMESYNC_START, TIMESYNC_START.pack(int(count), 0))
+
+
+def encode_timesync_end(offset_us: int, trip_us: int, samples: int) -> bytes:
+    return encode(MSG_TIMESYNC_END,
+                  TIMESYNC_END.pack(int(offset_us), int(trip_us),
+                                    int(samples)))
 
 
 def decode_timesync_rep(payload: bytes) -> dict:
@@ -300,11 +318,20 @@ class Link(threading.Thread):
                 self.out.put(("error", f"link lost: {exc}"))
                 return
             if chunk:
+                # Stamp arrival HERE, on the reading thread.
+                #
+                # Taking it where the frame is consumed instead puts the
+                # consumer's scheduling between the wire and the timestamp.
+                # The Tk pump runs on a 100 ms timer, so a round trip
+                # measured there reads as 5-20 ms of jitter that is entirely
+                # the timer, and no amount of work on the board can improve
+                # a number measured that late.
+                rx_us = host_now_us()
                 self.bytes_in += len(chunk)
                 for b in chunk:
                     got = self.parser.feed(b)
                     if got is not None:
-                        self.out.put(("frame", got))
+                        self.out.put(("frame", (got[0], got[1], rx_us)))
         try:
             self.ser.close()
         except Exception:

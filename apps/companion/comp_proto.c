@@ -60,6 +60,12 @@ uint8_t comp_payload_len(uint8_t id)
       case COMP_MSG_TIMESYNC_REP:
         return (uint8_t)sizeof(struct comp_timesync_rep_s);
 
+      case COMP_MSG_TIMESYNC_START:
+        return (uint8_t)sizeof(struct comp_timesync_start_s);
+
+      case COMP_MSG_TIMESYNC_END:
+        return (uint8_t)sizeof(struct comp_timesync_end_s);
+
       default:
         return 0;
     }

@@ -199,6 +199,25 @@ static void comp_route(int id, FAR const struct comp_parser_s *parser,
       s->last_rx_us = out.timestamp;
     }
 
+  else if (id == COMP_MSG_TIMESYNC_START)
+    {
+      struct comp_timesync_start_s start;
+
+      memcpy(&start, parser->payload, sizeof(start));
+      s->timesync_expected = start.count;
+      s->timesync_replies = 0;
+      s->timesync_synced = false;
+    }
+  else if (id == COMP_MSG_TIMESYNC_END)
+    {
+      struct comp_timesync_end_s end;
+
+      memcpy(&end, parser->payload, sizeof(end));
+      s->timesync_offset_us = end.offset_us;
+      s->timesync_trip_us = end.trip_us;
+      s->timesync_samples = end.samples;
+      s->timesync_synced = end.samples > 0;
+    }
   else if (id == COMP_MSG_TIMESYNC_REQ)
     {
       struct comp_timesync_req_s req;
