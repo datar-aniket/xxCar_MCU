@@ -1716,6 +1716,15 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 - Produces: `int vesc_arm(bool armed);` and the extended
   `struct vesc_daemon_status_s`.
 
+> **Amended after the hardware run.** `VESC_TX_RATE` was drafted at 50 Hz
+> with a cap of 200; once the link was confirmed working it was raised to a
+> default of 400 and a cap of 500. That also forced `VESC_POLL_US` in
+> `vesc.c` down from 2000 to 1000: a 2 ms deadline check cannot place a
+> 2500 us period, and produced gaps alternating between 2 ms and 4 ms. 1 ms
+> is `CONFIG_USEC_PER_TICK` and the finest sleep available, giving 2 ms and
+> 3 ms in turn. 500 Hz is the cap because it is exactly two ticks — the last
+> rate the clock can express evenly.
+
 - [ ] **Step 1: Add the parameters**
 
 In `apps/param/param.c`, after the `VESC_BITRATE` entry:
@@ -1730,7 +1739,7 @@ In `apps/param/param.c`, after the `VESC_BITRATE` entry:
    * into every controller that ever publishes a command.
    */
 
-  { "VESC_TX_RATE", PARAM_TYPE_INT32, I32(50), I32(1), I32(200),
+  { "VESC_TX_RATE", PARAM_TYPE_INT32, I32(400), I32(1), I32(500),
     "Command frame rate (Hz)" },
   { "VESC_CMD_TO_MS", PARAM_TYPE_INT32, I32(200), I32(20), I32(5000),
     "Setpoint age before failsafe neutral (ms)" },

@@ -29,14 +29,19 @@
 #define VESC_PRIORITY   (SCHED_PRIORITY_DEFAULT + 10)
 #define VESC_STACK      2048
 
-/* Poll interval. STATUS_5 arrives at tens of hertz, so 2 ms drains the FIFO
- * far faster than it fills while costing almost nothing.
+/* Loop interval, and the floor on it: CONFIG_USEC_PER_TICK is 1000 and there
+ * is no tickless mode, so a shorter sleep is not expressible.
  *
- * This interval IS the jitter on the telemetry - see the note in fdcan.h
+ * It was 2 ms, which was ample for draining STATUS_5 at tens of hertz. The
+ * transmit deadline is what tightened it: checking every 2 ms cannot place a
+ * 2500 us period, and the cadence came out as 2 ms and 4 ms in turn - the
+ * right average rate with twice the jitter it needs.
+ *
+ * This interval IS the jitter on both directions - see the note in fdcan.h
  * about polling being a deliberate trade.
  */
 
-#define VESC_POLL_US    2000
+#define VESC_POLL_US    1000
 
 /* Bound on one drain pass. Without it a bus stuck jabbering would keep this
  * loop from ever reaching g_should_stop, and `vesc stop` would hang.

@@ -405,9 +405,19 @@ static const struct param_def_s g_params[] =
    * VESC_STEER_MIN is allowed to exceed VESC_STEER_MAX. That is how a
    * reversed linkage is expressed, and rejecting it would push the reversal
    * into every controller that ever publishes a command.
+   *
+   * VESC_TX_RATE is capped at 500 because the scheduler tick is 1000 us
+   * (CONFIG_USEC_PER_TICK) and the daemon sleeps in whole ticks. 500 Hz is
+   * exactly two ticks; above that the requested period is shorter than the
+   * clock can express and the real rate would stop matching the parameter.
+   *
+   * Rates that are not a whole number of ticks still average correctly, but
+   * individual periods alternate between the ticks either side. 400 Hz is
+   * 2.5 ticks, so frames go out 2 ms and 3 ms apart in turn. Fine for a
+   * motor controller; worth knowing before reading a scope.
    */
 
-  { "VESC_TX_RATE", PARAM_TYPE_INT32, I32(50), I32(1), I32(200),
+  { "VESC_TX_RATE", PARAM_TYPE_INT32, I32(400), I32(1), I32(500),
     "Command frame rate (Hz)" },
   { "VESC_CMD_TO_MS", PARAM_TYPE_INT32, I32(200), I32(20), I32(5000),
     "Setpoint age before failsafe neutral (ms)" },

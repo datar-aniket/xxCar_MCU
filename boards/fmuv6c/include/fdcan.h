@@ -71,9 +71,10 @@ int fdcan_receive(FAR struct fdcan_frame_s *frame);
  * A FULL FIFO IS THE DIAGNOSTIC WORTH KNOWING. Classic CAN needs another
  * node to acknowledge, and the hardware retries a frame that is never
  * acknowledged for as long as it takes. So an absent VESC, or a missing bus
- * terminator, fills all 32 elements in about 0.6 s at 50 Hz and every call
- * after that returns -EAGAIN. That climbing tx_full is a precise symptom,
- * and it is the first thing to look at when a bench run does nothing.
+ * terminator, fills all 32 elements and every call after that returns
+ * -EAGAIN - in about 80 ms at the default 400 Hz, or 0.6 s at 50. That
+ * climbing tx_full is a precise symptom, and it is the first thing to look
+ * at when a bench run does nothing.
  */
 
 int fdcan_transmit(FAR const struct fdcan_frame_s *frame);
