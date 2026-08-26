@@ -158,6 +158,13 @@ struct ekf_core_s
    * update must not move. Set around a fusion call and cleared after it.
    */
 
+  /* Attitude-only lane: no aiding of any kind, yaw pinned at zero, roll and
+   * pitch held by a continuous tilt reference instead of the standstill-only
+   * one. Runs as a MONITOR against the primary, never as its replacement.
+   */
+
+  bool     attitude_only;
+
   uint8_t  inhibit_mask;
 
   /* How many gain rows the mask has actually zeroed.
@@ -175,6 +182,9 @@ struct ekf_core_s
   uint64_t extnav_fault_since;     /* filter time the ratio went bad */
   uint32_t extnav_fault_count;
   uint32_t extnav_inhibit_count;
+
+  uint32_t tilt_update_count;    /* attitude-only lanes: accepted tilt fixes */
+  uint32_t tilt_skipped_count;   /* too far from gravity to be usable */
 
   uint32_t input_count;
   uint32_t predict_count;
@@ -279,6 +289,25 @@ struct ekf_output_s
 #define EKF_GYRO_BIAS_LIMIT          0.10f
 #define EKF_ACCEL_BIAS_LIMIT         1.00f
 
+/* Continuous tilt reference for the attitude-only lanes.
+ *
+ * An accelerometer measures specific force, so treating it as gravity is
+ * only true when the vehicle is not accelerating. Rather than wait for a
+ * standstill - which never comes on a drive, leaving the monitor to free-run
+ * on gyro alone and drift out of usefulness - the update runs every step
+ * with its noise scaled by how far the measured magnitude departs from g.
+ * Near 1 g it is trusted; under acceleration it is de-weighted until it
+ * contributes almost nothing. That is the ordinary AHRS complementary
+ * trade, and it keeps roll and pitch bounded indefinitely.
+ *
+ * Beyond the reject band the update is skipped entirely: a specific force
+ * that far from gravity carries no tilt information worth having.
+ */
+
+#define EKF_TILT_MEAS_NOISE          0.5f
+#define EKF_TILT_NOISE_PER_G         12.0f
+#define EKF_TILT_REJECT_G            0.35f
+
 #define EKF_EXTNAV_RATIO_ALPHA       0.05f
 
 /* Filtered ratio above this for longer than the fault time means the source
@@ -357,6 +386,36 @@ int ekf_core_fuse_extnav(FAR struct ekf_core_s *ekf,
  * horizontal projection is too short to give a direction, which is what
  * happens when the field is nearly parallel to the tilt axis.
  */
+
+/* Put a core into attitude-only monitor mode. Must be called before the
+ * first sample; it is configuration, not state.
+ */
+
+void ekf_core_set_attitude_only(FAR struct ekf_core_s *ekf, bool enable);
+
+/* Where "up" points in BODY coordinates, from a body-to-ENU quaternion.
+ *
+ * This is the yaw-free part of an attitude. R' applied to (0,0,1) meets the
+ * yaw rotation first, and a rotation about z leaves z alone - so the result
+ * depends on roll and pitch only. That is what makes two lanes comparable
+ * even when one has its yaw pinned at zero and the other does not.
+ */
+
+void ekf_core_up_in_body(FAR const float quaternion[4], FAR float up[3]);
+
+/* Disagreement between two attitudes, in the body frame they share.
+ *
+ * `error` is the small-angle rotation vector taking lane a's up onto lane
+ * b's: x is roll disagreement, y is pitch. Its z is zero by construction -
+ * gravity carries no yaw information, and asking for it would be asking the
+ * measurement a question it cannot answer.
+ *
+ * Returns the total tilt angle in radians.
+ */
+
+float ekf_core_tilt_difference(FAR const float quaternion_a[4],
+                               FAR const float quaternion_b[4],
+                               FAR float error[3]);
 
 bool ekf_mag_heading(FAR const float quaternion[4],
                      FAR const float field[3], float declination,

@@ -1011,6 +1011,170 @@ static void test_inhibit_mask_freezes_the_states_it_names(void)
     }
 }
 
+/* The comparison metric is YAW-FREE. This is the property the whole
+ * three-lane monitor rests on: EKF2 and EKF3 pin yaw at zero while EKF1 does
+ * not, so any metric that moved with yaw would report a fault the instant
+ * the vehicle turned.
+ */
+
+static void quat_ypr(float yaw, float pitch, float roll, float q[4])
+{
+  float cy = cosf(0.5f * yaw), sy = sinf(0.5f * yaw);
+  float cp = cosf(0.5f * pitch), sp = sinf(0.5f * pitch);
+  float cr = cosf(0.5f * roll), sr = sinf(0.5f * roll);
+
+  q[0] = cy * cp * cr + sy * sp * sr;
+  q[1] = cy * cp * sr - sy * sp * cr;
+  q[2] = cy * sp * cr + sy * cp * sr;
+  q[3] = sy * cp * cr - cy * sp * sr;
+}
+
+static void test_tilt_difference_ignores_yaw(void)
+{
+  float a[4];
+  float b[4];
+  float err[3];
+  int i;
+
+  /* Same tilt, wildly different yaw. Must read as zero disagreement at
+   * every heading, or a turning vehicle would trip the monitor.
+   */
+
+  for (i = 0; i < 12; i++)
+    {
+      float yaw = (float)i * 0.5f - 3.0f;
+
+      quat_ypr(yaw, 0.15f, -0.2f, a);
+      quat_ypr(0.0f, 0.15f, -0.2f, b);
+
+      assert_near(ekf_core_tilt_difference(a, b, err), 0.0f, 1.0e-4f);
+      assert_near(err[0], 0.0f, 1.0e-4f);
+      assert_near(err[1], 0.0f, 1.0e-4f);
+    }
+}
+
+/* A real tilt disagreement is reported at its true magnitude, and is not
+ * diluted by the lanes being at different headings.
+ */
+
+static void test_tilt_difference_measures_real_disagreement(void)
+{
+  float a[4];
+  float b[4];
+  float err[3];
+
+  quat_ypr(0.0f, 0.0f, 0.0f, a);
+  quat_ypr(0.0f, 0.0f, 0.1f, b);
+  assert_near(ekf_core_tilt_difference(a, b, err), 0.1f, 1.0e-4f);
+
+  /* Same 0.1 rad of roll error, but the lanes are 2 rad apart in yaw. */
+
+  quat_ypr(2.0f, 0.0f, 0.0f, a);
+  quat_ypr(0.0f, 0.0f, 0.1f, b);
+  assert_near(ekf_core_tilt_difference(a, b, err), 0.1f, 1.0e-4f);
+}
+
+/* Roll and pitch disagreement land on the axes they belong to, and z is
+ * never reported - gravity cannot see yaw.
+ */
+
+static void test_tilt_difference_axes(void)
+{
+  float a[4];
+  float b[4];
+  float err[3];
+
+  quat_ypr(0.0f, 0.0f, 0.0f, a);
+  quat_ypr(0.0f, 0.0f, 0.12f, b);
+  ekf_core_tilt_difference(a, b, err);
+  assert(fabsf(err[0]) > 0.1f);
+  assert(fabsf(err[1]) < 1.0e-4f);
+  assert_near(err[2], 0.0f, 1.0e-9f);
+
+  quat_ypr(0.0f, 0.0f, 0.0f, a);
+  quat_ypr(0.0f, 0.12f, 0.0f, b);
+  ekf_core_tilt_difference(a, b, err);
+  assert(fabsf(err[1]) > 0.1f);
+  assert(fabsf(err[0]) < 1.0e-4f);
+  assert_near(err[2], 0.0f, 1.0e-9f);
+}
+
+/* A small disagreement must still be measurable.
+ *
+ * acos(dot) cannot do this: near zero the dot product is 1 - a^2/2, and
+ * float resolution around 1.0 puts the floor at about 5e-4 rad. A monitor
+ * spends its whole life near zero and has to see a trend before it becomes a
+ * fault, so the angle is taken as atan2(|cross|, dot) instead.
+ */
+
+static void test_tilt_difference_resolves_small_angles(void)
+{
+  float a[4];
+  float b[4];
+
+  quat_ypr(0.0f, 0.0f, 0.0f, a);
+  quat_ypr(0.0f, 0.0f, 1.0e-4f, b);
+
+  assert_near(ekf_core_tilt_difference(a, b, NULL), 1.0e-4f, 1.0e-6f);
+
+  quat_ypr(0.0f, 0.0f, 0.0f, a);
+  quat_ypr(0.0f, 1.0e-5f, 0.0f, b);
+  assert(ekf_core_tilt_difference(a, b, NULL) > 5.0e-6f);
+}
+
+/* The z component is never reported, even when the cross product has a real
+ * one. Roll on one lane against pitch on the other gives cross_z = 0.0395 -
+ * plenty to notice if it leaked through - and it means nothing, because
+ * gravity carries no yaw information.
+ */
+
+static void test_tilt_difference_never_reports_yaw(void)
+{
+  float a[4];
+  float b[4];
+  float err[3];
+
+  quat_ypr(0.0f, 0.0f, 0.2f, a);      /* pure roll  */
+  quat_ypr(0.0f, 0.2f, 0.0f, b);      /* pure pitch */
+
+  ekf_core_tilt_difference(a, b, err);
+
+  assert(fabsf(err[0]) > 0.1f);
+  assert(fabsf(err[1]) > 0.1f);
+  assert_near(err[2], 0.0f, 1.0e-9f);
+}
+
+/* up_in_body must be the third ROW of the rotation, not the third column.
+ * The column is where body z points in the nav frame, which is a different
+ * vector and is NOT yaw-free - using it would silently reintroduce the
+ * dependence this whole design removes.
+ */
+
+static void test_up_in_body_is_yaw_free(void)
+{
+  float q[4];
+  float up_a[3];
+  float up_b[3];
+
+  quat_ypr(0.0f, 0.3f, 0.0f, q);
+  ekf_core_up_in_body(q, up_a);
+
+  quat_ypr(1.7f, 0.3f, 0.0f, q);
+  ekf_core_up_in_body(q, up_b);
+
+  assert_near(up_a[0], up_b[0], 1.0e-5f);
+  assert_near(up_a[1], up_b[1], 1.0e-5f);
+  assert_near(up_a[2], up_b[2], 1.0e-5f);
+
+  /* Level: up is straight up the body z axis. */
+
+  quat_ypr(0.9f, 0.0f, 0.0f, q);
+  ekf_core_up_in_body(q, up_a);
+  assert_near(up_a[0], 0.0f, 1.0e-5f);
+  assert_near(up_a[1], 0.0f, 1.0e-5f);
+  assert_near(up_a[2], 1.0f, 1.0e-5f);
+}
+
 /* The bias limit is a safety bound, not a tuning value: 2.0 m/s^2 is enough
  * to hide 0.2 g of real acceleration.
  */
@@ -1132,6 +1296,12 @@ int main(void)
   test_unhealthy_source_is_not_fused_even_when_plausible();
   test_health_alone_withdraws_position();
   test_inhibit_mask_freezes_the_states_it_names();
+  test_tilt_difference_ignores_yaw();
+  test_tilt_difference_measures_real_disagreement();
+  test_tilt_difference_axes();
+  test_tilt_difference_resolves_small_angles();
+  test_tilt_difference_never_reports_yaw();
+  test_up_in_body_is_yaw_free();
   test_accel_bias_limit_is_tight();
   test_extnav_source_reset_forces_a_redatum();
   test_extnav_timeout_drops_horizontal_validity();

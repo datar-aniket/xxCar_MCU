@@ -1464,6 +1464,202 @@ static int measurement_update_1d(FAR struct ekf_core_s *ekf,
   return 1;
 }
 
+/* Continuous tilt reference for an attitude-only lane.
+ *
+ * Same geometry as low_dynamics_updates - the measurement is that specific
+ * force should equal gravity rotated into the body - but it runs on EVERY
+ * step rather than only at a standstill, with the noise scaled by how far
+ * the measured magnitude departs from g.
+ *
+ * The scaling is what makes that legitimate. Under acceleration the gravity
+ * assumption is simply false, and a fixed noise would pull the attitude
+ * towards the acceleration vector. De-weighting instead lets the update
+ * contribute when the specific force looks like gravity and fade out when it
+ * does not, which is what a complementary AHRS does and why one holds tilt
+ * on a moving vehicle where a standstill-only update cannot.
+ *
+ * Accel bias is NOT learned here. Without velocity aiding a bias and a tilt
+ * produce the identical measurement, so the filter would trade one for the
+ * other and wander - the exact divergence this lane exists to detect in
+ * somebody else.
+ */
+
+static bool attitude_only_tilt_update(FAR struct ekf_core_s *ekf)
+{
+  float h[3][EKF_STATE_DIM];
+  float residual[3];
+  float rotation[3][3];
+  float gravity_body[3];
+  float gravity_axis[3];
+  float measured[3];
+  float suppressed_correction = 0.0f;
+  float dt = ekf->covariance_dt;
+  float magnitude;
+  float departure_g;
+  float noise;
+  int result;
+  int axis;
+
+  if (dt <= 0.0f)
+    {
+      return true;
+    }
+
+  for (axis = 0; axis < 3; axis++)
+    {
+      measured[axis] = ekf->covariance_delta_velocity[axis] / dt;
+    }
+
+  magnitude = vector_norm(measured);
+
+  if (!isfinite(magnitude))
+    {
+      return true;
+    }
+
+  departure_g = fabsf(magnitude - EKF_GRAVITY) / EKF_GRAVITY;
+
+  /* Too far from gravity to carry tilt information at all. */
+
+  if (departure_g > EKF_TILT_REJECT_G)
+    {
+      ekf->tilt_skipped_count++;
+      return true;
+    }
+
+  noise = EKF_TILT_MEAS_NOISE * (1.0f + EKF_TILT_NOISE_PER_G * departure_g);
+
+  quaternion_to_rotation(ekf->quaternion, rotation);
+  gravity_body[0] = rotation[2][0] * EKF_GRAVITY;
+  gravity_body[1] = rotation[2][1] * EKF_GRAVITY;
+  gravity_body[2] = rotation[2][2] * EKF_GRAVITY;
+  memset(h, 0, sizeof(h));
+
+  h[0][1] = -gravity_body[2];
+  h[0][2] = gravity_body[1];
+  h[1][0] = gravity_body[2];
+  h[1][2] = -gravity_body[0];
+  h[2][0] = -gravity_body[1];
+  h[2][1] = gravity_body[0];
+
+  for (axis = 0; axis < 3; axis++)
+    {
+      gravity_axis[axis] = gravity_body[axis] / EKF_GRAVITY;
+      residual[axis] = measured[axis] - gravity_body[axis];
+    }
+
+  /* Accel bias frozen for the duration of this update, for the reason in the
+   * comment above. h has no bias columns either, so this is belt and braces
+   * against the cross-covariance path.
+   */
+
+  ekf->inhibit_mask = EKF_INHIBIT_ACCEL_BIAS;
+
+  result = measurement_update_3d(ekf, h, residual, noise * noise,
+                                 &ekf->last_gravity_nis, gravity_axis,
+                                 &suppressed_correction);
+
+  ekf->inhibit_mask = 0;
+
+  if (result < 0)
+    {
+      return false;
+    }
+
+  if (result == 0)
+    {
+      ekf->gravity_reject_count++;
+    }
+  else
+    {
+      ekf->tilt_update_count++;
+    }
+
+  return true;
+}
+
+void ekf_core_set_attitude_only(FAR struct ekf_core_s *ekf, bool enable)
+{
+  if (ekf != NULL)
+    {
+      ekf->attitude_only = enable;
+    }
+}
+
+void ekf_core_up_in_body(FAR const float quaternion[4], FAR float up[3])
+{
+  float rotation[3][3];
+
+  if (quaternion == NULL || up == NULL)
+    {
+      return;
+    }
+
+  quaternion_to_rotation(quaternion, rotation);
+
+  /* The third ROW of R, which is R' applied to (0,0,1). Using the third
+   * column instead would give where body z points in the nav frame - a
+   * different vector, and one that is not yaw-free.
+   */
+
+  up[0] = rotation[2][0];
+  up[1] = rotation[2][1];
+  up[2] = rotation[2][2];
+}
+
+float ekf_core_tilt_difference(FAR const float quaternion_a[4],
+                               FAR const float quaternion_b[4],
+                               FAR float error[3])
+{
+  float up_a[3];
+  float up_b[3];
+  float cross[3];
+  float dot;
+  float angle;
+
+  if (error != NULL)
+    {
+      error[0] = 0.0f;
+      error[1] = 0.0f;
+      error[2] = 0.0f;
+    }
+
+  if (quaternion_a == NULL || quaternion_b == NULL)
+    {
+      return 0.0f;
+    }
+
+  ekf_core_up_in_body(quaternion_a, up_a);
+  ekf_core_up_in_body(quaternion_b, up_b);
+
+  cross[0] = up_a[1] * up_b[2] - up_a[2] * up_b[1];
+  cross[1] = up_a[2] * up_b[0] - up_a[0] * up_b[2];
+  cross[2] = up_a[0] * up_b[1] - up_a[1] * up_b[0];
+
+  dot = up_a[0] * up_b[0] + up_a[1] * up_b[1] + up_a[2] * up_b[2];
+
+  /* atan2 of the cross magnitude against the dot, not acos of the dot: acos
+   * loses all resolution near zero, which is precisely where a monitor
+   * spends its time and where it has to be able to see a trend.
+   */
+
+  angle = atan2f(vector_norm(cross), dot);
+
+  if (error != NULL)
+    {
+      /* Small-angle rotation vector taking a onto b, in body axes. The z
+       * component is dropped rather than reported: gravity cannot see yaw,
+       * so whatever lands there is numerical noise, not a measurement.
+       */
+
+      error[0] = cross[0];
+      error[1] = cross[1];
+      error[2] = 0.0f;
+    }
+
+  return angle;
+}
+
 static bool low_dynamics_updates(FAR struct ekf_core_s *ekf)
 {
   float h[3][EKF_STATE_DIM];
@@ -1632,7 +1828,14 @@ static bool nominal_predict(FAR struct ekf_core_s *ekf,
 
   if (ekf->covariance_phase >= EKF_COVARIANCE_INTERVAL)
     {
-      if (!covariance_predict(ekf) || !low_dynamics_updates(ekf))
+      /* An attitude-only lane takes the continuous tilt reference instead
+       * of the standstill-only one. Not as well as: they are the same
+       * measurement, and running both would fuse it twice.
+       */
+
+      if (!covariance_predict(ekf) ||
+          !(ekf->attitude_only ? attitude_only_tilt_update(ekf)
+                               : low_dynamics_updates(ekf)))
         {
           return false;
         }
@@ -1744,6 +1947,24 @@ int ekf_core_process(FAR struct ekf_core_s *ekf,
       ekf->reset_counter++;
       restart_alignment(ekf);
       return EKF_PROCESS_REJECTED;
+    }
+
+  /* Yaw pinned at zero, once per sample and after the strapdown - which is
+   * where yaw actually accumulates, from the z gyro.
+   *
+   * An unaided lane has no heading reference of any kind, so an integrated
+   * yaw is drift dressed up as a measurement. Zero is the honest value, and
+   * the comparison this lane exists for is yaw-free anyway: see
+   * ekf_core_tilt_difference.
+   */
+
+  if (ekf->attitude_only)
+    {
+      float euler[3];
+
+      ekf_core_euler(ekf, euler);
+      quaternion_from_euler(euler[0], euler[1], 0.0f, ekf->quaternion);
+      quaternion_normalize(ekf->quaternion);
     }
 
   return EKF_PROCESS_PREDICTED;
