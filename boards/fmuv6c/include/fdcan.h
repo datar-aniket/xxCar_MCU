@@ -24,6 +24,18 @@
  * size from four words to eighteen and invalidate the layout in fdcan.c.
  ****************************************************************************/
 
+/* Lives in include/ rather than src/ so apps reach it as
+ * <arch/board/fdcan.h>, the NuttX convention for a board header with app
+ * consumers.
+ *
+ * Note this is a style choice, not a necessity: deps/nuttx-apps/xxcar is a
+ * SYMLINK to apps/, so the relative "../../boards/fmuv6c/src/..." form that
+ * apps/pps uses resolves perfectly well. An earlier commit message here
+ * claimed otherwise - that apps are copied and the relative path could not
+ * resolve - and that was wrong. Either form works; don't "fix" one to match
+ * the other.
+ */
+
 #ifndef __BOARDS_FMUV6C_INCLUDE_FDCAN_H
 #define __BOARDS_FMUV6C_INCLUDE_FDCAN_H
 
