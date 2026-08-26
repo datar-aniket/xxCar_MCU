@@ -162,6 +162,14 @@ static void print_status(void)
   printf("  downlink   repeats %" PRIu32 "  sample gap %" PRIu32 "-%" PRIu32
          " us\n", s.tx_repeat, s.tx_gap_min_us, s.tx_gap_max_us);
 
+  /* TIM5 against CLOCK_MONOTONIC. Every UTC conversion on this link uses
+   * the first; this says how far the second has drifted from it, which is
+   * the quantity that used to leak into the emitted timestamps.
+   */
+
+  printf("  clocks     TIM5 - MONOTONIC %+" PRIi64 " us\n",
+         s.clock_skew_us);
+
   printf("  pps        %s  corrections %" PRIu32 "  last residual %+"
          PRIi32 " us\n",
          comp_pps_state_name(s.pps_state), s.pps_corrections,

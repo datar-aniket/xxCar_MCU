@@ -74,6 +74,18 @@ struct companion_status_s
   int32_t  pps_residual_us;     /* last measured error, + means we ran fast */
   uint64_t pps_edge_used;
   uint32_t tx_future_clamped;   /* a stamp that would have led the clock */
+
+  /* TIM5 minus CLOCK_MONOTONIC, microseconds.
+   *
+   * Both count from boot, so this should sit near zero. It does not have to:
+   * they are independent counters and fmuv6c_imu_time_now() only re-anchors
+   * to the coarse clock every 71.6 minutes, so a rate difference accumulates
+   * between wraps. Reported because mixing the two was the cause of a UTC
+   * that led the host by tens of milliseconds, and a number that grows here
+   * is that same divergence made visible.
+   */
+
+  int64_t  clock_skew_us;
   uint32_t connects;          /* hosts attached */
   uint32_t disconnects;
   bool     waiting_for_host;  /* removable port, nobody plugged in */

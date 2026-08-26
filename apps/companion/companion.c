@@ -81,7 +81,40 @@ static bool    g_utc_valid;
 
 #define COMP_UTC_PLAUSIBLE_S  1700000000ll   /* 2023-11-14 */
 
+/* THE board clock, for everything this link timestamps or converts.
+ *
+ * fmuv6c_imu_time_now(), not clock_gettime(CLOCK_MONOTONIC), and the
+ * distinction is not cosmetic.
+ *
+ * Every timestamp the UTC offset is applied to already lives in this
+ * domain: the IMU sample times that reach estimator_state come from
+ * fmuv6c_imu_time_now() in icm42688.c, and so does the PPS edge. The offset
+ * was being MEASURED against CLOCK_MONOTONIC - by the RTC seed and by the
+ * board timestamps in the timesync replies - and then applied to TIM5
+ * values.
+ *
+ * Those are two independent counters. TIM5 free-runs on the APB clock and
+ * CLOCK_MONOTONIC advances on the systick; fmuv6c_imu_time_now() re-anchors
+ * to the coarse clock only when TIM5 wraps, every 71.6 minutes, so between
+ * wraps any rate difference accumulates unopposed. Mixing them imports that
+ * divergence straight into the emitted UTC, where it reads as a solution
+ * time that leads or lags the host by tens of milliseconds - and it moves,
+ * because the divergence grows.
+ *
+ * One clock, used for every conversion, is the only version of this that
+ * cannot drift against itself.
+ */
+
 static uint64_t comp_now_us(void)
+{
+  return fmuv6c_imu_time_now();
+}
+
+/* The coarse clock, kept only to measure how far it has drifted from the
+ * one above. Nothing converts with it.
+ */
+
+static uint64_t comp_coarse_us(void)
 {
   struct timespec t;
 
@@ -425,7 +458,7 @@ static void comp_pps_discipline(FAR struct companion_status_s *s)
       return;                     /* already applied to this edge */
     }
 
-  now = fmuv6c_imu_time_now();
+  now = comp_now_us();
 
   if (now < pps.last_edge_us || now - pps.last_edge_us > 2000000ull)
     {
@@ -566,8 +599,7 @@ static void comp_transmit(int fd, int est_sub, int gyro_sub,
    * a fault that had not happened.
    */
 
-  now_utc = (int64_t)fmuv6c_imu_time_now() +
-            (g_utc_valid ? g_utc_offset_us : 0);
+  now_utc = (int64_t)comp_now_us() + (g_utc_valid ? g_utc_offset_us : 0);
 
   if ((int64_t)stamp > now_utc)
     {
@@ -757,6 +789,9 @@ static bool comp_service(int fd, FAR struct pollfd *pfd,
               return true;        /* cable pulled */
             }
         }
+
+      status->clock_skew_us = (int64_t)comp_now_us() -
+                              (int64_t)comp_coarse_us();
 
       /* Transmit is not here any more. It runs on its own thread against the
        * TIM6 tick, so the downlink cadence no longer depends on when this
