@@ -697,6 +697,13 @@ static FAR void *comp_tx_thread(FAR void *arg)
 
 #define COMP_POLL_MS 20
 
+/* Downlink thread stack. comp_transmit's message structs are about 570 bytes
+ * on their own; this leaves room for orb_copy and the serial write beneath
+ * them.
+ */
+
+#define COMP_TX_STACK 3072
+
 static bool comp_service(int fd, FAR struct pollfd *pfd,
                          int pose_pub,
                          FAR struct companion_status_s *status)
@@ -769,6 +776,7 @@ static int companion_daemon(int argc, FAR char *argv[])
   struct pollfd pfd;
   struct comp_tx_args_s tx_args;
   pthread_t tx_thread;
+  pthread_attr_t tx_attr;
   bool tx_running = false;
   bool keep_going;
   int fd = -1;
@@ -937,8 +945,27 @@ static int companion_daemon(int argc, FAR char *argv[])
       tx_args.accel_sub = accel_sub;
       tx_args.vesc_sub = vesc_sub;
       tx_args.status = &status;
-      tx_running = pthread_create(&tx_thread, NULL, comp_tx_thread,
-                                  &tx_args) == 0;
+      /* An EXPLICIT stack, not the default.
+       *
+       * comp_transmit alone puts about 570 bytes of message structs on the
+       * stack before calling into orb_copy and the serial write, and this
+       * board has already been rebooted once by a stack overflow that
+       * produced no assert output at all - the assert handler needs stack
+       * too, so it dies as well. Leaving that to whatever
+       * PTHREAD_STACK_DEFAULT happens to be is not worth the bytes saved.
+       */
+
+      if (pthread_attr_init(&tx_attr) == 0)
+        {
+          pthread_attr_setstacksize(&tx_attr, COMP_TX_STACK);
+          tx_running = pthread_create(&tx_thread, &tx_attr, comp_tx_thread,
+                                      &tx_args) == 0;
+          pthread_attr_destroy(&tx_attr);
+        }
+      else
+        {
+          tx_running = false;
+        }
 
       if (!tx_running)
         {

@@ -154,12 +154,20 @@ static void print_status(void)
          (unsigned)s.limits.steer_max);
 }
 
-/* Publish a setpoint at the daemon's own rate for a bounded time, then stop.
+/* Publish a setpoint at the daemon's rate for a bounded time, then stop.
  *
- * Bounded on purpose. A one-shot publish goes stale in VESC_CMD_TO_MS and
- * could never sweep a servo; an unbounded one would leave a vehicle driving
- * after the command returned. Stopping also demonstrates the failsafe, which
- * is the behaviour most worth seeing on a bench.
+ * It publishes control_cmd, the control router's AUTONOMOUS INPUT, and not
+ * actuator_command. That distinction is the whole point: actuator_command is
+ * the router's output and the router rewrites it every loop, so a second
+ * publisher there would be overwritten within milliseconds and would be
+ * writing to the safety boundary's output while it was at it. Going in
+ * through control_cmd means the router's arm gate, RC override and staleness
+ * policy all still apply to a bench command.
+ *
+ * Bounded on purpose. A one-shot publish goes stale and could never sweep a
+ * servo; an unbounded one would leave a vehicle driving after the command
+ * returned. Stopping also demonstrates the failsafe, which is the behaviour
+ * most worth seeing on a bench.
  */
 
 static int do_set(int argc, FAR char *argv[])
@@ -232,7 +240,9 @@ static int do_set(int argc, FAR char *argv[])
   period_us = 1000000 / (int)rate;
   ticks = (int)(seconds * (double)rate);
 
-  printf("vesc: publishing %s %.3f steering %.3f for %.1f s\n",
+  printf("vesc: publishing control_cmd %s %.3f steering %.3f for %.1f s\n"
+         "      the control router must be armed for this to reach the "
+         "motor\n",
          argv[2], (double)message.motor, (double)message.steering, seconds);
 
   for (i = 0; i < ticks; i++)
