@@ -453,22 +453,19 @@ int control_cmd_publish(int fd, FAR const struct control_cmd_s *msg)
 int vehicle_imu_advertise(int instance)
 {
   /* Multi-instance: 0 is the primary IMU feeding the estimator, 1 the
-   * secondary feeding the monitor lane. orb_advertise_multi_queue writes
-   * back the instance it actually got, which is not necessarily the one
-   * asked for - so it is checked rather than assumed.
+   * secondary feeding the monitor lane.
+   *
+   * The instance is an INPUT here and is never written back -
+   * orb_advertise_multi_queue_flags does `inst = instance ? *instance :
+   * orb_group_count(meta)`, so passing a pointer requests that exact
+   * instance. Checking it afterwards would be checking a value nothing
+   * changed.
    */
 
-  int got = instance;
-  int fd = orb_advertise_multi_queue(ORB_ID(vehicle_imu), NULL, &got,
-                                     VEHICLE_IMU_QUEUE_SIZE);
+  int want = instance;
 
-  if (fd >= 0 && got != instance)
-    {
-      orb_unadvertise(fd);
-      return -EADDRINUSE;
-    }
-
-  return fd;
+  return orb_advertise_multi_queue(ORB_ID(vehicle_imu), NULL, &want,
+                                   VEHICLE_IMU_QUEUE_SIZE);
 }
 
 int vehicle_imu_publish(int fd, FAR const struct vehicle_imu_s *msg)

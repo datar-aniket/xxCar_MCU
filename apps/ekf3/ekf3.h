@@ -40,6 +40,7 @@ struct ekf3_status_s
   float    mon_tilt_limit;       /* rad */
   uint32_t mon_hold_ms;
 
+  bool     mon_subscribed;       /* vehicle_imu instance 1 was found */
   bool     mon_secondary_live;   /* the second IMU is actually publishing */
   uint8_t  mon_primary_status;   /* solution bits of the primary monitor */
   uint8_t  mon_secondary_status;

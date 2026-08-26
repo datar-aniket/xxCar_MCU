@@ -607,6 +607,14 @@ static int ekf3_daemon(int argc, FAR char *argv[])
   if (status.mon_enabled)
     {
       mon_sub = orb_subscribe_multi(ORB_ID(vehicle_imu), 1);
+
+      if (mon_sub < 0)
+        {
+          syslog(LOG_WARNING, "[ekf3] no vehicle_imu instance 1 (%d); the "
+                 "IMU cross-check is inactive\n", errno);
+        }
+
+      status.mon_subscribed = mon_sub >= 0;
     }
   status.mag_available = mag_sub >= 0;
   status.baro_available = baro_sub >= 0;

@@ -316,8 +316,10 @@ static void print_status(void)
       printf("  monitor    aiding %.3f rad  imu %s  limit %.3f  hold %"
              PRIu32 " ms%s\n",
              (double)status.mon_aiding_tilt,
-             status.mon_secondary_live ?
-               "" : "-- (no second IMU)",
+             status.mon_secondary_live ? "" :
+               (status.mon_subscribed ? "-- (subscribed, no data yet)" :
+                                        "-- (no vehicle_imu1; run "
+                                        "`imu_delta status`)"),
              (double)status.mon_tilt_limit, status.mon_hold_ms,
              status.mon_act ? "" : "   REPORT ONLY");
 

@@ -32,8 +32,26 @@ static void print_status(int instance)
 
   imu_delta_status(instance, &status);
 
-  printf("imu_delta%d (%s IMU)\n", instance,
-         instance == 0 ? "primary" : "secondary");
+  printf("imu_delta%d (%s IMU)  %s\n", instance,
+         instance == 0 ? "primary" : "secondary",
+         status.running ? "running" : "NOT RUNNING");
+
+  /* A stopped lane has nothing worth printing, and a screenful of zeros
+   * reads like a lane that is running badly rather than one that never
+   * started.
+   */
+
+  if (!status.running)
+    {
+      if (instance == 1)
+        {
+          printf("  the attitude monitor needs this lane; start it with\n"
+                 "  `imu_delta start 1`, or check EKF_MON_EN and whether\n"
+                 "  sensor_accel1/sensor_gyro1 exist in /dev/uorb\n");
+        }
+
+      return;
+    }
 
   if (status.packets > 1 && status.last_packet_us > status.first_packet_us)
     {
@@ -79,6 +97,7 @@ int main(int argc, FAR char *argv[])
 {
   int result;
   int instance = 0;
+  bool all = true;
 
   if (argc != 2)
     {
@@ -90,8 +109,14 @@ int main(int argc, FAR char *argv[])
    * Defaults to 0, so every existing invocation means what it did before.
    */
 
+  /* `status` with no instance reports EVERY lane. Which lanes are running
+   * is the first question when the monitor says it has no second IMU, and
+   * making the caller ask twice to find out is the wrong default.
+   */
+
   if (argc > 2)
     {
+      all = false;
       instance = atoi(argv[2]);
 
       if (instance < 0 || instance >= IMU_DELTA_INSTANCES)
@@ -132,7 +157,17 @@ int main(int argc, FAR char *argv[])
 
   if (strcmp(argv[1], "status") == 0)
     {
-      print_status(instance);
+      if (all)
+        {
+          for (instance = 0; instance < IMU_DELTA_INSTANCES; instance++)
+            {
+              print_status(instance);
+            }
+        }
+      else
+        {
+          print_status(instance);
+        }
       return EXIT_SUCCESS;
     }
 
