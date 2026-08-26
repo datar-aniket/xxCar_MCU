@@ -1053,7 +1053,7 @@ int stm32_bringup(void)
 #endif
 
 #ifdef CONFIG_XXCAR_IMU_DELTA
-  if (param_i32("IMU_DELTA_EN") != 0 && imu_delta_start() < 0)
+  if (param_i32("IMU_DELTA_EN") != 0 && imu_delta_start(0) < 0)
     {
       syslog(LOG_ERR, "[imu-delta] boot start failed\n");
       fmuv6c_boot_optional_failure(&boot);
@@ -1061,6 +1061,24 @@ int stm32_bringup(void)
   else if (param_i32("IMU_DELTA_EN") != 0)
     {
       syslog(LOG_INFO, "[imu-delta] started at boot\n");
+
+      /* The secondary IMU, feeding the attitude monitor lane. Optional in
+       * the strongest sense: if the BMI055 is absent or failed, the primary
+       * estimator is unaffected and only the cross-check is lost.
+       */
+
+      if (param_i32("EKF_MON_EN") != 0)
+        {
+          if (imu_delta_start(1) < 0)
+            {
+              syslog(LOG_WARNING, "[imu-delta] secondary did not start; "
+                     "the attitude monitor will be inactive\n");
+            }
+          else
+            {
+              syslog(LOG_INFO, "[imu-delta] secondary started at boot\n");
+            }
+        }
 
 #ifdef CONFIG_XXCAR_EKF3
       /* Still nested: ekf3 consumes vehicle_imu, so starting it when

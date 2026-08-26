@@ -457,6 +457,31 @@ static const struct param_def_s g_params[] =
   { "EKF3_EN", PARAM_TYPE_INT32, I32(1), I32(0), I32(1),
     "Start the estimator at boot" },
 
+  /* The attitude monitor lanes.
+   *
+   * EKF1 is the primary: primary IMU plus every aiding source. EKF2 runs the
+   * SECONDARY IMU, attitude only. EKF3 runs the PRIMARY IMU, attitude only.
+   *
+   * The third lane is what makes this diagnostic rather than merely a
+   * disagreement detector. EKF3 shares EKF1's IMU exactly, so an attitude
+   * difference between them cannot be the sensor - it is the aiding
+   * corrupting EKF1. EKF2 against EKF3 is the same IMU question with the
+   * aiding removed from both, so that difference IS the sensor.
+   *
+   * EKF_MON_ACT is OFF: the lanes run, the comparison is reported, and
+   * nothing acts on it yet. Turn it on once the numbers have been watched on
+   * a real vehicle and the threshold means something.
+   */
+
+  { "EKF_MON_EN", PARAM_TYPE_INT32, I32(1), I32(0), I32(1),
+    "Run the attitude monitor lanes" },
+  { "EKF_MON_ACT", PARAM_TYPE_INT32, I32(0), I32(0), I32(1),
+    "Act on monitor faults (0 = report only)" },
+  { "EKF_MON_TILT", PARAM_TYPE_FLOAT, F32(0.15f), F32(0.01f), F32(1.5f),
+    "Tilt disagreement calling a lane faulted (rad)" },
+  { "EKF_MON_MS", PARAM_TYPE_INT32, I32(2000), I32(100), I32(30000),
+    "How long disagreement must persist (ms)" },
+
   { "COMP_EN", PARAM_TYPE_INT32, I32(1), I32(0), I32(1),
     "Start the companion serial link at boot" },
   { "PPS_EN", PARAM_TYPE_INT32, I32(1), I32(0), I32(1),

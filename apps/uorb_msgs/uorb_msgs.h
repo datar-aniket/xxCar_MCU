@@ -442,7 +442,7 @@ int actuator_command_publish(int fd,
 int control_cmd_advertise(void);
 int control_cmd_publish(int fd, FAR const struct control_cmd_s *msg);
 
-int vehicle_imu_advertise(void);
+int vehicle_imu_advertise(int instance);
 int vehicle_imu_publish(int fd, FAR const struct vehicle_imu_s *msg);
 
 int estimator_state_advertise(void);

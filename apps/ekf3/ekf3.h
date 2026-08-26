@@ -22,6 +22,43 @@
 struct ekf3_status_s
 {
   struct ekf_core_s core;
+
+  /* The monitor CORES are not members here, for the same reason the delay
+   * ring is not: this struct is copied wholesale under a mutex by
+   * ekf3_status(), and two more ekf_core_s would add 2800 bytes to every
+   * copy on a 6144-byte stack. Only the derived numbers are mirrored.
+   *
+   * mon_secondary runs the SECONDARY IMU; mon_primary runs the PRIMARY, the
+   * same one the main core uses. That pairing is what separates a sensor
+   * fault from an aiding fault: primary-vs-monitor_primary shares the IMU,
+   * so a difference there is the aiding; monitor_primary-vs-monitor_secondary
+   * removes the aiding from both, so a difference there is the IMU.
+   */
+
+  bool     mon_enabled;
+  bool     mon_act;              /* act on a fault, or only report it */
+  float    mon_tilt_limit;       /* rad */
+  uint32_t mon_hold_ms;
+
+  bool     mon_secondary_live;   /* the second IMU is actually publishing */
+  uint8_t  mon_primary_status;   /* solution bits of the primary monitor */
+  uint8_t  mon_secondary_status;
+
+  /* Tilt disagreements, radians, and the per-axis body-frame errors.
+   * "aiding" is primary vs monitor_primary; "imu" is the two monitors.
+   */
+
+  float    mon_aiding_tilt;
+  float    mon_aiding_err[3];
+  float    mon_imu_tilt;
+  float    mon_imu_err[3];
+
+  bool     mon_aiding_fault;
+  bool     mon_imu_fault;
+  uint32_t mon_aiding_faults;
+  uint32_t mon_imu_faults;
+  uint64_t mon_aiding_since;
+  uint64_t mon_imu_since;
   uint64_t first_output_us;
   uint64_t last_output_us;
   uint32_t publish_count;

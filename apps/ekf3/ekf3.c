@@ -52,6 +52,21 @@ static struct ekf3_status_s g_status;
 
 static struct ekf_delay_s g_delay;
 
+/* The attitude monitor lanes. File-scope for the same reason the delay ring
+ * is: 1400 bytes each, and ekf3_status() copies its struct wholesale under a
+ * mutex on a 6144-byte stack.
+ *
+ * Both run in REAL TIME, on samples as they arrive, and are compared against
+ * the output-predicted attitude - the one actually published - rather than
+ * against the core's delayed horizon state. Comparing a real-time monitor
+ * with a state 100 ms behind would report a difference proportional to turn
+ * rate: at 1 rad/s that is 0.1 rad of pure artefact, comparable to the fault
+ * threshold itself.
+ */
+
+static struct ekf_core_s g_mon_primary;
+static struct ekf_core_s g_mon_secondary;
+
 static uint64_t now_us(void)
 {
   struct timespec timestamp;
@@ -175,6 +190,17 @@ static bool take_imu_sample(int sub, FAR struct ekf3_status_s *status)
 
       fill_core_sample(&message, &sample);
       ekf_delay_push_imu(&g_delay, &sample);
+
+      /* The primary monitor sees exactly what the estimator sees, with no
+       * aiding and no horizon. Sharing the IMU is the whole point: any
+       * attitude difference that develops cannot be the sensor.
+       */
+
+      if (status->mon_enabled)
+        {
+          ekf_core_process(&g_mon_primary, &sample);
+        }
+
       return true;
     }
 
@@ -322,6 +348,146 @@ static void drain_baro(int sub, FAR struct ekf3_status_s *status)
     }
 }
 
+/* The secondary IMU, feeding the other monitor lane.
+ *
+ * No delay ring and no aiding - just strapdown plus the continuous tilt
+ * reference. Its whole job is to have an opinion about attitude that owes
+ * nothing to the primary sensor.
+ */
+
+static void drain_monitor_imu(int sub, FAR struct ekf3_status_s *status)
+{
+  int drained = 0;
+
+  if (sub < 0 || !status->mon_enabled)
+    {
+      return;
+    }
+
+  while (drained++ < EKF3_DRAIN_MAX)
+    {
+      struct vehicle_imu_s message;
+      struct ekf_imu_sample_s sample;
+      uint64_t now;
+
+      if (orb_copy(ORB_ID(vehicle_imu), sub, &message) < 0)
+        {
+          return;
+        }
+
+      now = now_us();
+
+      if (now > message.timestamp_sample &&
+          now - message.timestamp_sample > EKF3_MAX_INPUT_AGE_US)
+        {
+          continue;
+        }
+
+      fill_core_sample(&message, &sample);
+      ekf_core_process(&g_mon_secondary, &sample);
+      status->mon_secondary_live = true;
+      status->mon_secondary_status =
+        ekf_core_solution_status(&g_mon_secondary);
+    }
+}
+
+/* Compare the three lanes and hold the verdict.
+ *
+ * Two questions, and the pairing is what separates them:
+ *
+ *   published vs monitor_primary   - same IMU, so a difference is the AIDING
+ *   monitor_primary vs monitor_secondary - no aiding either side, so a
+ *                                    difference is the IMU
+ *
+ * A difference has to persist for mon_hold_ms before it counts. Attitude
+ * disagreement spikes briefly on any hard manoeuvre, when the tilt reference
+ * is de-weighted in both monitors at once and they free-run for a moment;
+ * calling that a fault would cry wolf on every pothole.
+ */
+
+static void monitor_compare(FAR struct ekf3_status_s *status,
+                            FAR const float published_quaternion[4],
+                            uint64_t now)
+{
+  bool aiding_bad;
+  bool imu_bad;
+
+  if (!status->mon_enabled)
+    {
+      return;
+    }
+
+  status->mon_primary_status = ekf_core_solution_status(&g_mon_primary);
+
+  status->mon_aiding_tilt =
+    ekf_core_tilt_difference(published_quaternion, g_mon_primary.quaternion,
+                             status->mon_aiding_err);
+
+  if (status->mon_secondary_live)
+    {
+      status->mon_imu_tilt =
+        ekf_core_tilt_difference(g_mon_primary.quaternion,
+                                 g_mon_secondary.quaternion,
+                                 status->mon_imu_err);
+    }
+
+  /* A lane that has not finished aligning has no opinion worth comparing. */
+
+  if (!g_mon_primary.initialized || !status->core.initialized)
+    {
+      status->mon_aiding_since = 0;
+      status->mon_imu_since = 0;
+      return;
+    }
+
+  aiding_bad = status->mon_aiding_tilt > status->mon_tilt_limit;
+  imu_bad = status->mon_secondary_live && g_mon_secondary.initialized &&
+            status->mon_imu_tilt > status->mon_tilt_limit;
+
+  if (!aiding_bad)
+    {
+      status->mon_aiding_since = 0;
+      status->mon_aiding_fault = false;
+    }
+  else if (status->mon_aiding_since == 0)
+    {
+      status->mon_aiding_since = now;
+    }
+  else if (now - status->mon_aiding_since >
+           (uint64_t)status->mon_hold_ms * 1000ull &&
+           !status->mon_aiding_fault)
+    {
+      status->mon_aiding_fault = true;
+      status->mon_aiding_faults++;
+      syslog(LOG_ERR, "[ekf3] AIDING fault: the estimator and its own IMU "
+             "disagree by %.3f rad\n", (double)status->mon_aiding_tilt);
+    }
+
+  if (!imu_bad)
+    {
+      status->mon_imu_since = 0;
+      status->mon_imu_fault = false;
+    }
+  else if (status->mon_imu_since == 0)
+    {
+      status->mon_imu_since = now;
+    }
+  else if (now - status->mon_imu_since >
+           (uint64_t)status->mon_hold_ms * 1000ull &&
+           !status->mon_imu_fault)
+    {
+      status->mon_imu_fault = true;
+      status->mon_imu_faults++;
+      syslog(LOG_ERR, "[ekf3] IMU fault: the two IMUs disagree by %.3f "
+             "rad\n", (double)status->mon_imu_tilt);
+    }
+
+  /* EKF_MON_ACT is off by default and nothing acts on these yet - the lanes
+   * run and report so the numbers can be watched on a real vehicle before a
+   * threshold is trusted to drop a solution or reset the filter.
+   */
+}
+
 static void publish_output(int publisher, FAR struct ekf3_status_s *status,
                            uint64_t now)
 {
@@ -338,6 +504,15 @@ static void publish_output(int publisher, FAR struct ekf3_status_s *status,
 
   ekf_core_output_predict(&status->core, replay, count, &output);
   status->output_replay = output.samples_replayed;
+
+  /* Compared against the OUTPUT-PREDICTED attitude, which is what actually
+   * leaves this daemon, and which is at the same real time as the monitors.
+   */
+
+  if (output.valid)
+    {
+      monitor_compare(status, output.quaternion, now);
+    }
 
   /* Nothing has reached the filter yet. At a 100 ms horizon the first ~40
    * packets are buffered before a single one is released, and publishing
@@ -376,11 +551,25 @@ static int ekf3_daemon(int argc, FAR char *argv[])
   int mag_sub = -1;
   int baro_sub = -1;
   int extnav_sub = -1;
+  int mon_sub = -1;
   int publisher = -1;
   int result = EXIT_FAILURE;
 
   memset(&status, 0, sizeof(status));
   ekf_core_init(&status.core);
+
+  status.mon_enabled = param_i32("EKF_MON_EN") != 0;
+  status.mon_act = param_i32("EKF_MON_ACT") != 0;
+  status.mon_tilt_limit = param_f32("EKF_MON_TILT");
+  status.mon_hold_ms = (uint32_t)param_i32("EKF_MON_MS");
+
+  if (status.mon_enabled)
+    {
+      ekf_core_init(&g_mon_primary);
+      ekf_core_init(&g_mon_secondary);
+      ekf_core_set_attitude_only(&g_mon_primary, true);
+      ekf_core_set_attitude_only(&g_mon_secondary, true);
+    }
 
   if (ekf_sources_load(&status.sources, source_error,
                        sizeof(source_error)) < 0)
@@ -409,6 +598,16 @@ static int ekf3_daemon(int argc, FAR char *argv[])
   mag_sub = orb_subscribe(ORB_ID(vehicle_mag));
   baro_sub = orb_subscribe(ORB_ID(vehicle_baro));
   extnav_sub = orb_subscribe(ORB_ID(external_pose));
+
+  /* Instance 1 of vehicle_imu, the secondary IMU. Absent if imu_delta's
+   * second lane did not start, which is not a failure here: the estimator
+   * runs unchanged and only the IMU cross-check is lost.
+   */
+
+  if (status.mon_enabled)
+    {
+      mon_sub = orb_subscribe_multi(ORB_ID(vehicle_imu), 1);
+    }
   status.mag_available = mag_sub >= 0;
   status.baro_available = baro_sub >= 0;
   status.extnav_available = extnav_sub >= 0;
@@ -622,6 +821,7 @@ static int ekf3_daemon(int argc, FAR char *argv[])
        * iteration.
        */
 
+      drain_monitor_imu(mon_sub, &status);
       publish_output(publisher, &status, now);
 
       status.imu_overflow = g_delay.imu_overflow_count;
@@ -654,6 +854,11 @@ out:
   if (extnav_sub >= 0)
     {
       orb_unsubscribe(extnav_sub);
+    }
+
+  if (mon_sub >= 0)
+    {
+      orb_unsubscribe(mon_sub);
     }
 
   if (publisher >= 0)

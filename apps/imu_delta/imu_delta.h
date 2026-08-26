@@ -39,8 +39,15 @@ struct imu_delta_status_s
   bool     running;
 };
 
-int imu_delta_start(void);
-int imu_delta_stop(void);
-void imu_delta_status(struct imu_delta_status_s *status);
+/* Instance 0 is the primary IMU and feeds the estimator; instance 1 is the
+ * secondary and feeds the monitor lane.
+ */
+
+#define IMU_DELTA_INSTANCES 2
+
+int imu_delta_start(int instance);
+int imu_delta_stop(int instance);
+void imu_delta_status(int instance,
+                      struct imu_delta_status_s *status);
 
 #endif /* __APPS_IMU_DELTA_IMU_DELTA_H */

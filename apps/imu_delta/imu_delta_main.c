@@ -16,18 +16,24 @@
 
 static void usage(void)
 {
-  printf("Usage: imu_delta start | stop | status\n"
-         "  ICM42688 only: calibrated, unfiltered 2 kHz samples to\n"
-         "  400 Hz coning/sculling-corrected vehicle_imu packets.\n");
+  printf("Usage: imu_delta start|stop|status [instance]\n"
+         "  Calibrated, unfiltered samples to 400 Hz\n"
+         "  coning/sculling-corrected vehicle_imu packets.\n"
+         "\n"
+         "  instance 0 = ICM42688, feeds the estimator\n"
+         "  instance 1 = BMI055, feeds the attitude monitor lane\n");
 }
 
-static void print_status(void)
+static void print_status(int instance)
 {
   struct imu_delta_status_s status;
   double rate = 0.0;
   double mean_window = 0.0;
 
-  imu_delta_status(&status);
+  imu_delta_status(instance, &status);
+
+  printf("imu_delta%d (%s IMU)\n", instance,
+         instance == 0 ? "primary" : "secondary");
 
   if (status.packets > 1 && status.last_packet_us > status.first_packet_us)
     {
@@ -72,6 +78,7 @@ static void print_status(void)
 int main(int argc, FAR char *argv[])
 {
   int result;
+  int instance = 0;
 
   if (argc != 2)
     {
@@ -79,9 +86,25 @@ int main(int argc, FAR char *argv[])
       return EXIT_FAILURE;
     }
 
+  /* An optional trailing instance: `imu_delta start 1` runs the secondary.
+   * Defaults to 0, so every existing invocation means what it did before.
+   */
+
+  if (argc > 2)
+    {
+      instance = atoi(argv[2]);
+
+      if (instance < 0 || instance >= IMU_DELTA_INSTANCES)
+        {
+          printf("imu_delta: instance must be 0..%d\n",
+                 IMU_DELTA_INSTANCES - 1);
+          return EXIT_FAILURE;
+        }
+    }
+
   if (strcmp(argv[1], "start") == 0)
     {
-      result = imu_delta_start();
+      result = imu_delta_start(instance);
 
       if (result < 0)
         {
@@ -89,13 +112,13 @@ int main(int argc, FAR char *argv[])
           return EXIT_FAILURE;
         }
 
-      print_status();
+      print_status(instance);
       return EXIT_SUCCESS;
     }
 
   if (strcmp(argv[1], "stop") == 0)
     {
-      result = imu_delta_stop();
+      result = imu_delta_stop(instance);
 
       if (result < 0)
         {
@@ -103,13 +126,13 @@ int main(int argc, FAR char *argv[])
           return EXIT_FAILURE;
         }
 
-      print_status();
+      print_status(instance);
       return EXIT_SUCCESS;
     }
 
   if (strcmp(argv[1], "status") == 0)
     {
-      print_status();
+      print_status(instance);
       return EXIT_SUCCESS;
     }
 

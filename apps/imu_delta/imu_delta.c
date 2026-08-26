@@ -57,9 +57,36 @@ struct axis_map_s
 };
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
-static volatile bool g_running;
-static volatile bool g_should_stop;
-static struct imu_delta_status_s g_status;
+
+/* One set of state per IMU. Instance 0 is the primary (ICM-42688) and feeds
+ * the estimator; instance 1 is the secondary (BMI055) and feeds the monitor
+ * lane, which exists to disagree with the primary when something is wrong.
+ *
+ * Two tasks rather than one loop over four descriptors: the pairing and gap
+ * logic is per-IMU and already reads as one sensor's story. Interleaving two
+ * would make every counter ambiguous.
+ */
+
+static volatile bool g_running[IMU_DELTA_INSTANCES];
+static volatile bool g_should_stop[IMU_DELTA_INSTANCES];
+static struct imu_delta_status_s g_status[IMU_DELTA_INSTANCES];
+
+/* The task's own instance, read from argv. task_create's argv is copied, so
+ * a pointer to a local would dangle; the index is passed as a decimal string
+ * and parsed back.
+ */
+
+static int daemon_instance(int argc, FAR char *argv[])
+{
+  int instance = 0;
+
+  if (argc > 1 && argv[1] != NULL)
+    {
+      instance = atoi(argv[1]);
+    }
+
+  return (instance >= 0 && instance < IMU_DELTA_INSTANCES) ? instance : 0;
+}
 
 static uint64_t now_us(void)
 {
@@ -258,13 +285,14 @@ static void copy_integrator_status(FAR struct imu_delta_status_s *status,
   status->invalid = state->invalid;
 }
 
-static void publish_status(FAR const struct imu_delta_status_s *local,
+static void publish_status(int instance,
+                           FAR const struct imu_delta_status_s *local,
                            FAR const struct imu_integrator_s *integrator)
 {
   pthread_mutex_lock(&g_lock);
-  g_status = *local;
-  copy_integrator_status(&g_status, integrator);
-  g_status.running = true;
+  g_status[instance] = *local;
+  copy_integrator_status(&g_status[instance], integrator);
+  g_status[instance].running = true;
   pthread_mutex_unlock(&g_lock);
 }
 
@@ -321,6 +349,7 @@ static void account_packet(FAR struct imu_delta_status_s *status,
 
 static int imu_delta_daemon(int argc, FAR char *argv[])
 {
+  const int instance = daemon_instance(argc, argv);
   struct accel_queue_s accel_queue;
   struct gyro_queue_s gyro_queue;
   struct imu_integrator_s integrator;
@@ -388,9 +417,13 @@ static int imu_delta_daemon(int argc, FAR char *argv[])
       goto out;
     }
 
-  accel_sub = orb_subscribe_multi(accel_meta, 0);
-  gyro_sub = orb_subscribe_multi(gyro_meta, 0);
-  publisher = vehicle_imu_advertise();
+  /* The driver instance IS the lane: sensor_accel0/sensor_gyro0 are the
+   * ICM-42688 and 1 the BMI055.
+   */
+
+  accel_sub = orb_subscribe_multi(accel_meta, (unsigned)instance);
+  gyro_sub = orb_subscribe_multi(gyro_meta, (unsigned)instance);
+  publisher = vehicle_imu_advertise(instance);
 
   if (accel_sub < 0 || gyro_sub < 0 || publisher < 0)
     {
@@ -403,16 +436,16 @@ static int imu_delta_daemon(int argc, FAR char *argv[])
   pollfd[0].events = POLLIN;
   pollfd[1].fd = gyro_sub;
   pollfd[1].events = POLLIN;
-  g_running = true;
+  g_running[instance] = true;
   status.running = true;
-  publish_status(&status, &integrator);
+  publish_status(instance, &status, &integrator);
 
   syslog(LOG_INFO,
          "[imu-delta] ICM42688 2 kHz -> 400 Hz, rotation %s, cal A:%s G:%s\n",
          rotation_name(sensor_rot), accel_calibrated ? "on" : "off",
          gyro_calibrated ? "on" : "off");
 
-  while (!g_should_stop)
+  while (!g_should_stop[instance])
     {
       int ready = poll(pollfd, 2, 100);
 
@@ -495,7 +528,7 @@ static int imu_delta_daemon(int argc, FAR char *argv[])
                 message.delta_velocity_dt = delta.delta_velocity_dt;
                 message.samples = delta.samples;
                 message.reset_counter = (uint16_t)integrator.resets;
-                message.instance = 0;
+                message.instance = (uint8_t)instance;
                 message.clipping = delta.clipping;
                 message.accel_calibrated = accel_calibrated ? 1 : 0;
                 message.gyro_calibrated = gyro_calibrated ? 1 : 0;
@@ -509,7 +542,7 @@ static int imu_delta_daemon(int argc, FAR char *argv[])
 
                 if ((status.packets & 15u) == 0)
                   {
-                    publish_status(&status, &integrator);
+                    publish_status(instance, &status, &integrator);
                   }
               }
           }
@@ -524,9 +557,9 @@ static int imu_delta_daemon(int argc, FAR char *argv[])
 out:
   status.running = false;
   pthread_mutex_lock(&g_lock);
-  g_status = status;
-  copy_integrator_status(&g_status, &integrator);
-  g_status.running = false;
+  g_status[instance] = status;
+  copy_integrator_status(&g_status[instance], &integrator);
+  g_status[instance].running = false;
   pthread_mutex_unlock(&g_lock);
 
   if (accel_sub >= 0)
@@ -544,59 +577,87 @@ out:
       close(publisher);
     }
 
-  g_running = false;
+  g_running[instance] = false;
   return result;
 }
 
-int imu_delta_start(void)
+int imu_delta_start(int instance)
 {
+  FAR char index[4];
+  FAR char *argv[2];
   int task;
   int wait;
 
-  if (g_running)
+  if (instance < 0 || instance >= IMU_DELTA_INSTANCES)
+    {
+      return -EINVAL;
+    }
+
+  if (g_running[instance])
     {
       return -EALREADY;
     }
 
-  g_should_stop = false;
-  task = task_create("imu_delta", IMU_DELTA_PRIORITY, IMU_DELTA_STACK,
-                     imu_delta_daemon, NULL);
+  snprintf(index, sizeof(index), "%d", instance);
+  argv[0] = index;
+  argv[1] = NULL;
+
+  g_should_stop[instance] = false;
+  task = task_create(instance == 0 ? "imu_delta" : "imu_delta1",
+                     IMU_DELTA_PRIORITY, IMU_DELTA_STACK,
+                     imu_delta_daemon, argv);
 
   if (task < 0)
     {
       return -errno;
     }
 
-  for (wait = 0; wait < 100 && !g_running; wait++)
+  for (wait = 0; wait < 100 && !g_running[instance]; wait++)
     {
       usleep(10000);
     }
 
-  return g_running ? 0 : -EIO;
+  return g_running[instance] ? 0 : -EIO;
 }
 
-int imu_delta_stop(void)
+int imu_delta_stop(int instance)
 {
   int wait;
 
-  if (!g_running)
+  if (instance < 0 || instance >= IMU_DELTA_INSTANCES)
+    {
+      return -EINVAL;
+    }
+
+  if (!g_running[instance])
     {
       return -ENOENT;
     }
 
-  g_should_stop = true;
+  g_should_stop[instance] = true;
 
-  for (wait = 0; wait < 100 && g_running; wait++)
+  for (wait = 0; wait < 100 && g_running[instance]; wait++)
     {
       usleep(10000);
     }
 
-  return g_running ? -ETIMEDOUT : 0;
+  return g_running[instance] ? -ETIMEDOUT : 0;
 }
 
-void imu_delta_status(FAR struct imu_delta_status_s *status)
+void imu_delta_status(int instance, FAR struct imu_delta_status_s *status)
 {
+  if (status == NULL)
+    {
+      return;
+    }
+
+  if (instance < 0 || instance >= IMU_DELTA_INSTANCES)
+    {
+      memset(status, 0, sizeof(*status));
+      return;
+    }
+
   pthread_mutex_lock(&g_lock);
-  *status = g_status;
+  *status = g_status[instance];
   pthread_mutex_unlock(&g_lock);
 }

@@ -294,6 +294,61 @@ static void print_status(void)
          core->duplicate_count, core->backward_count, core->gap_count,
          core->source_reset_count, core->numerical_reset_count,
          status.publish_errors);
+  /* The attitude monitor.
+   *
+   * Two questions, and the lane pairing is what separates them: "aiding" is
+   * the estimator against a lane running its OWN IMU with no aiding, so a
+   * difference there cannot be the sensor. "imu" is that lane against one
+   * running the other IMU, with no aiding on either side, so a difference
+   * there IS the sensor.
+   *
+   * Both are yaw-free tilt angles - the monitors pin yaw at zero, so only
+   * roll and pitch are comparable, and the metric is built to ignore yaw
+   * entirely.
+   */
+
+  if (!status.mon_enabled)
+    {
+      printf("  monitor    off (EKF_MON_EN=0)\n");
+    }
+  else
+    {
+      printf("  monitor    aiding %.3f rad  imu %s  limit %.3f  hold %"
+             PRIu32 " ms%s\n",
+             (double)status.mon_aiding_tilt,
+             status.mon_secondary_live ?
+               "" : "-- (no second IMU)",
+             (double)status.mon_tilt_limit, status.mon_hold_ms,
+             status.mon_act ? "" : "   REPORT ONLY");
+
+      if (status.mon_secondary_live)
+        {
+          printf("             imu %.3f rad  roll %+.3f pitch %+.3f\n",
+                 (double)status.mon_imu_tilt,
+                 (double)status.mon_imu_err[0],
+                 (double)status.mon_imu_err[1]);
+        }
+
+      printf("             aiding roll %+.3f pitch %+.3f  faults a=%"
+             PRIu32 " i=%" PRIu32 "\n",
+             (double)status.mon_aiding_err[0],
+             (double)status.mon_aiding_err[1],
+             status.mon_aiding_faults, status.mon_imu_faults);
+
+      if (status.mon_aiding_fault)
+        {
+          printf("             AIDING FAULT: the estimator disagrees with "
+                 "its own IMU.\n"
+                 "             An aiding source is corrupting attitude - the "
+                 "sensor is ruled out.\n");
+        }
+
+      if (status.mon_imu_fault)
+        {
+          printf("             IMU FAULT: the two IMUs disagree with no "
+                 "aiding on either.\n");
+        }
+    }
 }
 
 int main(int argc, FAR char *argv[])

@@ -450,10 +450,25 @@ int control_cmd_publish(int fd, FAR const struct control_cmd_s *msg)
   return orb_publish(ORB_ID(control_cmd), fd, msg);
 }
 
-int vehicle_imu_advertise(void)
+int vehicle_imu_advertise(int instance)
 {
-  return orb_advertise_queue(ORB_ID(vehicle_imu), NULL,
-                             VEHICLE_IMU_QUEUE_SIZE);
+  /* Multi-instance: 0 is the primary IMU feeding the estimator, 1 the
+   * secondary feeding the monitor lane. orb_advertise_multi_queue writes
+   * back the instance it actually got, which is not necessarily the one
+   * asked for - so it is checked rather than assumed.
+   */
+
+  int got = instance;
+  int fd = orb_advertise_multi_queue(ORB_ID(vehicle_imu), NULL, &got,
+                                     VEHICLE_IMU_QUEUE_SIZE);
+
+  if (fd >= 0 && got != instance)
+    {
+      orb_unadvertise(fd);
+      return -EADDRINUSE;
+    }
+
+  return fd;
 }
 
 int vehicle_imu_publish(int fd, FAR const struct vehicle_imu_s *msg)
