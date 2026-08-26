@@ -294,6 +294,32 @@ static void print_status(void)
          core->duplicate_count, core->backward_count, core->gap_count,
          core->source_reset_count, core->numerical_reset_count,
          status.publish_errors);
+  /* The horizontal hold. Holding is not a fault in itself - it is the
+   * correct response to having no fix - but a solution in hold is one whose
+   * position is a bound rather than an estimate, and nothing should be
+   * driving on it.
+   */
+
+  if (status.position_hold_limit > 0.0f)
+    {
+      printf("  position   %s  bound %.1f m  holds %" PRIu32 "  snaps %"
+             PRIu32 "\n",
+             core->position_holding ? "HELD (no fix)" : "aided",
+             (double)status.position_hold_limit,
+             core->position_hold_count, core->position_snap_count);
+
+      if (core->position_holding)
+        {
+          printf("             dead reckoning is bounded, not running: the\n"
+                 "             position is where the last fix left it, and\n"
+                 "             the next valid fix is adopted outright\n");
+        }
+    }
+  else
+    {
+      printf("  position   free dead reckoning (EK3_POSHOLD_M=0)\n");
+    }
+
   /* The vertical bound. A clamp count that is climbing says the filter is
    * being held on the road by hand, which is a fault report, not a feature
    * working - the height it publishes is a bound, not an estimate.

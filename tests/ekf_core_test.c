@@ -1304,6 +1304,234 @@ static void test_height_limit_zero_disables(void)
   assert(ekf.height_limit == 0.0f);
 }
 
+/* With no fix, position is bounded rather than integrated.
+ *
+ * Free dead reckoning on an IMU leaves quadratically and never returns, so
+ * the useful property is not accuracy - the answer is known to be wrong -
+ * but that the error stays finite and recoverable.
+ */
+
+static void test_position_held_when_unaided(void)
+{
+  struct ekf_core_s ekf;
+  uint64_t timestamp;
+  struct ekf_extnav_sample_s s = extnav_at(0.0f, 0.0f, 0.0f);
+  unsigned i;
+
+  extnav_align(&ekf, &timestamp);
+  ekf_core_set_extnav_config(&ekf, 1000000u);
+  ekf_core_set_position_hold(&ekf, 2.0f);
+
+  ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f, true, false);
+
+  for (i = 0; i < 40; i++)
+    {
+      ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f, true, false);
+    }
+
+  assert(ekf_core_position_aided(&ekf));
+
+  /* Evaluated while aided: it must decline to engage, and must not freeze
+   * accel bias. A hold that engaged whenever it was asked would bound a
+   * perfectly good position and stop the bias ever being learnt.
+   */
+
+  ekf.inhibit_mask = 0;
+  constrain_position_for_test(&ekf);
+  assert(!ekf.position_holding);
+  assert((ekf.inhibit_mask & EKF_INHIBIT_ACCEL_BIAS) == 0);
+
+  /* The fix stops arriving. Everything past the timeout is unaided. */
+
+  ekf.last_timestamp_sample += 5000000ull;
+  assert(!ekf_core_position_aided(&ekf));
+
+  /* Evaluated the moment aiding is lost, which is what latches the last
+   * good position. It runs every sample in the real loop, so the latch is
+   * always taken before drift can accumulate - poking the state first would
+   * latch the runaway and test nothing.
+   */
+
+  ekf.inhibit_mask = 0;
+  constrain_position_for_test(&ekf);
+  assert(ekf.position_holding);
+
+  /* Accel bias is unobservable without a fix, and it is the state whose
+   * corruption takes attitude with it. Frozen for the duration.
+   */
+
+  assert((ekf.inhibit_mask & EKF_INHIBIT_ACCEL_BIAS) != 0);
+
+  /* Now the strapdown tries to run away with it. */
+
+  ekf.position[0] = 500.0f;
+  ekf.position[1] = -300.0f;
+  ekf.velocity[0] = 40.0f;
+  constrain_position_for_test(&ekf);
+
+  assert(ekf.position_holding);
+  assert(fabsf(ekf.position[0]) <= 2.0f + 1.0e-3f);
+  assert(fabsf(ekf.position[1]) <= 2.0f + 1.0e-3f);
+
+  /* Outward velocity stopped, so the bound is not re-violated every step. */
+
+  assert_near(ekf.velocity[0], 0.0f, 1.0e-6f);
+
+  /* And the covariance admits the position is held, not known. */
+
+  assert(ekf.covariance[EKF_P_INDEX(6, 6)] >= EKF_POSITION_HOLD_VAR);
+}
+
+/* Recovery is a SNAP, not a convergence.
+ *
+ * A held position stops moving while the vehicle does not, so a returning
+ * source can never be talked into agreeing with it. Waiting for agreement
+ * would lock the filter out for ever; the fix is simply adopted.
+ */
+
+static void test_position_snaps_back_on_recovery(void)
+{
+  struct ekf_core_s ekf;
+  uint64_t timestamp;
+  struct ekf_extnav_sample_s s = extnav_at(0.0f, 0.0f, 0.0f);
+  unsigned i;
+
+  extnav_align(&ekf, &timestamp);
+  ekf_core_set_extnav_config(&ekf, 1000000u);
+  ekf_core_set_position_hold(&ekf, 2.0f);
+  ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f, true, false);
+
+  for (i = 0; i < 40; i++)
+    {
+      ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f, true, false);
+    }
+
+  /* Lose the fix, and let the hold engage. */
+
+  ekf.last_timestamp_sample += 5000000ull;
+  constrain_position_for_test(&ekf);
+  ekf.position[0] = 500.0f;
+  constrain_position_for_test(&ekf);
+  assert(ekf.position_holding);
+
+  /* It comes back, somewhere else entirely - which is the normal case, since
+   * the vehicle has been driving the whole time.
+   */
+
+  s.x = 137.0f;
+  s.y = -42.0f;
+
+  assert(ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f,
+                              true, false) == -2);
+
+  assert_near(ekf.position[0], 137.0f, 1.0e-3f);
+  assert_near(ekf.position[1], -42.0f, 1.0e-3f);
+  assert(!ekf.position_holding);
+  assert(ekf.position_snap_count > 0);
+
+  /* Health is restored with the datum, or the source would be condemned on
+   * arrival by a ratio it had no chance to earn down.
+   */
+
+  assert(ekf.extnav_healthy);
+}
+
+/* A source that keeps arriving and keeps disagreeing is FOLLOWED, not
+ * refused - and this is a deliberate reversal worth being explicit about.
+ *
+ * Before the hold existed, a disagreeing source was condemned and ignored,
+ * because adopting it meant snapping position onto a value the strapdown
+ * was busy contradicting, and the only way to reconcile the two was
+ * accelerometer bias - which corrupted attitude.
+ *
+ * With position bounded and that bias frozen while unaided, the filter has
+ * no competing opinion left to reconcile. On a vehicle whose only absolute
+ * reference IS the external fix, following it is right: dead reckoning is
+ * the thing that cannot be trusted, not the fix.
+ *
+ * So the contract this checks is not "the bad source is rejected" but "the
+ * position never runs away, and ends up where the source says".
+ */
+
+static void test_disagreeing_source_is_followed_not_chased(void)
+{
+  struct ekf_core_s ekf;
+  uint64_t timestamp;
+  struct ekf_extnav_sample_s s = extnav_at(0.0f, 0.0f, 0.0f);
+  float worst = 0.0f;
+  unsigned i;
+
+  extnav_align(&ekf, &timestamp);
+  ekf_core_set_extnav_config(&ekf, 1000000u);
+  ekf_core_set_position_hold(&ekf, 2.0f);
+  ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f, true, false);
+
+  for (i = 0; i < 40; i++)
+    {
+      ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f, true, false);
+    }
+
+  /* The source jumps far away and stays there, while the strapdown keeps
+   * trying to drag position off in the other direction.
+   */
+
+  s.x = 50.0f;
+
+  for (i = 0; i < 400; i++)
+    {
+      float excursion;
+
+      ekf.last_timestamp_sample += 10000ull;
+      ekf.position[0] += 0.5f;          /* the strapdown running away */
+
+      constrain_position_for_test(&ekf);
+      ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f, true, false);
+
+      excursion = fabsf(ekf.position[0]);
+
+      if (excursion > worst)
+        {
+          worst = excursion;
+        }
+    }
+
+  /* Bounded. The strapdown was pushing 0.5 m per step for 400 steps, so
+   * free dead reckoning would have ended 200 m out; what actually happens
+   * is a drift of at most one aiding timeout, then a snap onto the source.
+   */
+
+  assert(worst < 70.0f);
+
+  /* And it stays near where the source says, not where the IMU thought.
+   *
+   * The result is a SAWTOOTH, not convergence: position drifts for one
+   * aiding timeout, snaps back onto the source, and drifts again. The
+   * amplitude is EK3_EXT_TIMEOUT multiplied by the drift rate - which is
+   * the number to reach for if the excursions matter, because shortening
+   * the timeout shortens them directly.
+   */
+
+  assert(fabsf(ekf.position[0] - 50.0f) < 12.0f);
+  assert(ekf.position_snap_count > 1);
+}
+
+/* Zero restores free dead reckoning, for anything that is not a car. */
+
+static void test_position_hold_zero_disables(void)
+{
+  struct ekf_core_s ekf;
+  uint64_t timestamp;
+
+  extnav_align(&ekf, &timestamp);
+  ekf_core_set_position_hold(&ekf, 0.0f);
+
+  ekf.position[0] = 500.0f;
+  constrain_position_for_test(&ekf);
+
+  assert_near(ekf.position[0], 500.0f, 1.0e-3f);
+  assert(!ekf.position_holding);
+}
+
 /* The bias limit is a safety bound, not a tuning value: 2.0 m/s^2 is enough
  * to hide 0.2 g of real acceleration.
  */
@@ -1431,6 +1659,10 @@ int main(void)
   test_tilt_difference_resolves_small_angles();
   test_tilt_difference_never_reports_yaw();
   test_up_in_body_is_yaw_free();
+  test_position_held_when_unaided();
+  test_position_snaps_back_on_recovery();
+  test_disagreeing_source_is_followed_not_chased();
+  test_position_hold_zero_disables();
   test_height_limit_clamps_and_admits_it();
   test_height_limit_is_symmetric();
   test_height_limit_allows_recovery();

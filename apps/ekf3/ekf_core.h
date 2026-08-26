@@ -191,6 +191,23 @@ struct ekf_core_s
    * nothing tells it the vehicle is on a road.
    */
 
+  /* Horizontal position hold, metres. Zero disables it and restores free
+   * inertial dead reckoning.
+   *
+   * Position is NOT observable from an IMU. Without an external fix the
+   * strapdown integrates accelerometer error twice, so the estimate leaves
+   * quadratically and never comes back - on a ground vehicle that is metres
+   * within seconds and unrecoverable. Bounding it to where the last fix put
+   * it keeps the error finite and, more importantly, keeps the filter from
+   * inventing the accelerometer bias that would explain the excursion.
+   */
+
+  float    position_hold_limit;
+  bool     position_holding;
+  float    position_hold_latch[2];
+  uint32_t position_hold_count;
+  uint32_t position_snap_count;
+
   float    height_limit;
   uint32_t height_clamp_count;
 
@@ -302,6 +319,12 @@ struct ekf_output_s
  */
 
 #define EKF_HEIGHT_LIMIT_VAR         (2.0f * 2.0f)
+
+/* Variance floor while horizontal position is being held rather than
+ * estimated. Deliberately large: the vehicle may have driven anywhere.
+ */
+
+#define EKF_POSITION_HOLD_VAR        (10.0f * 10.0f)
 
 #define EKF_GYRO_BIAS_LIMIT          0.10f
 #define EKF_ACCEL_BIAS_LIMIT         1.00f
@@ -417,6 +440,22 @@ void ekf_core_set_attitude_only(FAR struct ekf_core_s *ekf, bool enable);
 
 void ekf_core_set_height_limit(FAR struct ekf_core_s *ekf, float limit_m);
 
+/* Bound horizontal position to +/- limit_m of where the last valid fix left
+ * it, whenever no position source is aiding. Zero disables it.
+ */
+
+void ekf_core_set_position_hold(FAR struct ekf_core_s *ekf, float limit_m);
+
+/* Is a position source actually correcting right now?
+ *
+ * The same test EKF_SOLUTION_POSITION_HORIZ reports, exposed because the
+ * hold has to ask exactly the same question - two definitions of "aided"
+ * would eventually disagree, and the one that mattered would be whichever
+ * was wrong.
+ */
+
+bool ekf_core_position_aided(FAR const struct ekf_core_s *ekf);
+
 /* Where "up" points in BODY coordinates, from a body-to-ENU quaternion.
  *
  * This is the yaw-free part of an attitude. R' applied to (0,0,1) meets the
@@ -516,6 +555,8 @@ void ekf_core_euler(FAR const struct ekf_core_s *ekf, FAR float euler[3]);
  * test - the firmware never sees these. The alternative, making the updates
  * non-static, would widen the interface permanently for a test-only need.
  */
+
+void constrain_position_for_test(FAR struct ekf_core_s *ekf);
 
 int ekf_core_test_update_1d(FAR struct ekf_core_s *ekf,
                             FAR const float h[EKF_STATE_DIM],

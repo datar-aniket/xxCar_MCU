@@ -510,6 +510,28 @@ static const struct param_def_s g_params[] =
   { "EK3_HGT_LIM", PARAM_TYPE_FLOAT, F32(50.0f), F32(0.0f), F32(1000.0f),
     "Height bound above the alignment point (m, 0 = off)" },
 
+  /* Horizontal bound applied while NOTHING is aiding position.
+   *
+   * Position is not observable from an IMU. Left free, the strapdown
+   * integrates accelerometer error twice and leaves quadratically - metres
+   * within seconds on a car, and it never comes back. It also gives the
+   * filter a way to explain the excursion: it learns an accelerometer bias
+   * to match, and that bias corrupts the gravity reference and takes
+   * attitude with it.
+   *
+   * So while unaided the estimate is bounded to where the last fix left it
+   * and accel bias learning is frozen. The result is wrong - the vehicle is
+   * moving - but bounded, declared through POSITION_HORIZ, and recoverable:
+   * the next valid fix is adopted outright rather than argued with.
+   *
+   * 2 m by default. Larger buys nothing, because the answer is already
+   * known to be wrong; the point is that it stays finite. Zero restores
+   * free dead reckoning.
+   */
+
+  { "EK3_POSHOLD_M", PARAM_TYPE_FLOAT, F32(2.0f), F32(0.0f), F32(1000.0f),
+    "Position bound while unaided (m, 0 = free dead reckoning)" },
+
   { "EK3_EXT_TIMEOUT", PARAM_TYPE_INT32, I32(1000), I32(100), I32(10000),
     "External nav dropout before position is dropped (ms)" },
 

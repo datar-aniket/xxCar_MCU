@@ -1020,6 +1020,122 @@ static void reset_yaw_absolute(FAR struct ekf_core_s *ekf, float yaw,
  * the recovery.
  */
 
+bool ekf_core_position_aided(FAR const struct ekf_core_s *ekf)
+{
+  if (ekf == NULL)
+    {
+      return false;
+    }
+
+  /* A claim about a source actually CORRECTING, not about it being
+   * selected. A sustained rejection run withdraws it, and so does silence:
+   * a source that simply stopped talking leaves no rejections behind, so
+   * without the age check the claim would stand for ever on a dead link.
+   */
+
+  return ekf->extnav_datum_set && ekf->extnav_accept_count > 0 &&
+         ekf->extnav_healthy &&
+         ekf->extnav_consecutive_rejects < EKF_EXTNAV_REJECT_RUN_MAX &&
+         ekf->extnav_timeout_us > 0 &&
+         ekf->last_timestamp_sample >= ekf->last_extnav_timestamp &&
+         ekf->last_timestamp_sample - ekf->last_extnav_timestamp <
+           (uint64_t)ekf->extnav_timeout_us;
+}
+
+void ekf_core_set_position_hold(FAR struct ekf_core_s *ekf, float limit_m)
+{
+  if (ekf != NULL)
+    {
+      ekf->position_hold_limit = (limit_m > 0.0f && isfinite(limit_m)) ?
+                                 limit_m : 0.0f;
+    }
+}
+
+/* Hold horizontal position where the last valid fix left it.
+ *
+ * Position is not observable from an IMU. Left alone, the strapdown
+ * integrates accelerometer error twice and the estimate leaves
+ * quadratically - metres within seconds on a ground vehicle, and it never
+ * comes back. Worse, the filter has a way to "explain" the excursion: it
+ * learns an accelerometer bias to match, and that bias corrupts the gravity
+ * reference and takes attitude with it.
+ *
+ * So while nothing is aiding position, the estimate is bounded to where the
+ * last fix put it and accel bias learning is frozen. The result is wrong -
+ * the vehicle really is moving - but it is wrong by a bounded amount, it
+ * says so through POSITION_HORIZ, and it is recoverable the instant a fix
+ * returns. Unbounded dead reckoning is none of those things.
+ */
+
+static void constrain_position(FAR struct ekf_core_s *ekf)
+{
+  int axis;
+
+  if (!(ekf->position_hold_limit > 0.0f))
+    {
+      ekf->position_holding = false;
+      return;
+    }
+
+  if (ekf_core_position_aided(ekf))
+    {
+      ekf->position_holding = false;
+      return;
+    }
+
+  /* Entering the hold: remember where the last valid fix left us. */
+
+  if (!ekf->position_holding)
+    {
+      ekf->position_holding = true;
+      ekf->position_hold_latch[0] = ekf->position[0];
+      ekf->position_hold_latch[1] = ekf->position[1];
+      ekf->position_hold_count++;
+    }
+
+  /* Unobservable without a fix, and the state whose corruption takes
+   * attitude with it. Frozen for as long as the hold lasts.
+   */
+
+  ekf->inhibit_mask |= EKF_INHIBIT_ACCEL_BIAS;
+
+  for (axis = 0; axis < 2; axis++)
+    {
+      float excursion = ekf->position[axis] - ekf->position_hold_latch[axis];
+      float sign;
+
+      if (fabsf(excursion) <= ekf->position_hold_limit)
+        {
+          continue;
+        }
+
+      sign = excursion > 0.0f ? 1.0f : -1.0f;
+      ekf->position[axis] = ekf->position_hold_latch[axis] +
+                            sign * ekf->position_hold_limit;
+
+      /* Only the outward component. A vehicle at the bound may be coming
+       * back, and stopping that would fight the recovery.
+       */
+
+      if (ekf->velocity[axis] * sign > 0.0f)
+        {
+          ekf->velocity[axis] = 0.0f;
+        }
+
+      /* The number is now held by hand, so the covariance must stop
+       * claiming otherwise - anything reading position_variance to decide
+       * whether to trust this has to see it.
+       */
+
+      if (ekf->covariance[EKF_P_INDEX(6 + axis, 6 + axis)] <
+          EKF_POSITION_HOLD_VAR)
+        {
+          ekf->covariance[EKF_P_INDEX(6 + axis, 6 + axis)] =
+            EKF_POSITION_HOLD_VAR;
+        }
+    }
+}
+
 static void constrain_height(FAR struct ekf_core_s *ekf)
 {
   float excess;
@@ -1351,6 +1467,7 @@ static int measurement_update_3d(
 
   constrain_biases(ekf);
   constrain_height(ekf);
+  constrain_position(ekf);
 
   for (row = 0; row < EKF_STATE_DIM; row++)
     {
@@ -1511,6 +1628,7 @@ static int measurement_update_1d(FAR struct ekf_core_s *ekf,
 
   constrain_biases(ekf);
   constrain_height(ekf);
+  constrain_position(ekf);
 
   for (row = 0; row < EKF_STATE_DIM; row++)
     {
@@ -2021,6 +2139,7 @@ int ekf_core_process(FAR struct ekf_core_s *ekf,
    */
 
   constrain_height(ekf);
+  constrain_position(ekf);
 
   /* Yaw pinned at zero, once per sample and after the strapdown - which is
    * where yaw actually accumulates, from the z gyro.
@@ -2420,13 +2539,7 @@ uint8_t ekf_core_solution_status(FAR const struct ekf_core_s *ekf)
    * stand for ever on a dead link.
    */
 
-  if (ekf->extnav_datum_set && ekf->extnav_accept_count > 0 &&
-      ekf->extnav_healthy &&
-      ekf->extnav_consecutive_rejects < EKF_EXTNAV_REJECT_RUN_MAX &&
-      ekf->extnav_timeout_us > 0 &&
-      ekf->last_timestamp_sample >= ekf->last_extnav_timestamp &&
-      ekf->last_timestamp_sample - ekf->last_extnav_timestamp <
-        (uint64_t)ekf->extnav_timeout_us)
+  if (ekf_core_position_aided(ekf))
     {
       status |= EKF_SOLUTION_POSITION_HORIZ | EKF_SOLUTION_VELOCITY_HORIZ;
     }
@@ -2484,6 +2597,11 @@ void ekf_core_output_predict(FAR const struct ekf_core_s *ekf,
 }
 
 #ifdef EKF_CORE_HOST_TEST
+
+void constrain_position_for_test(FAR struct ekf_core_s *ekf)
+{
+  constrain_position(ekf);
+}
 
 int ekf_core_test_update_1d(FAR struct ekf_core_s *ekf,
                             FAR const float h[EKF_STATE_DIM],
@@ -2692,13 +2810,40 @@ int ekf_core_fuse_extnav(FAR struct ekf_core_s *ekf,
 
     ekf->last_extnav_rx_timestamp = ekf->last_timestamp_sample;
 
-    if (!ekf->extnav_datum_set || dropped)
+    /* A datum is granted when there has never been one, when the source
+     * went away and came back - and now also whenever position has been
+     * HELD, because a held position is not an estimate the source can be
+     * asked to agree with.
+     *
+     * That last case reverses an earlier rule, and only became safe once
+     * the hold existed. Re-datuming on disagreement used to be dangerous
+     * because the strapdown went on integrating real motion while the
+     * source insisted otherwise, and the only way to reconcile the two was
+     * accelerometer bias. With position bounded and that bias frozen while
+     * unaided, there is nothing left to reconcile: the filter has no
+     * competing opinion about where it is, so the source's is simply
+     * adopted.
+     *
+     * And without it the filter would lock out. A condemned source has to
+     * agree again to recover, but a held position stops moving while the
+     * vehicle does not - so they could never agree, and the fix would be
+     * refused for ever.
+     */
+
+    if (!ekf->extnav_datum_set || dropped || ekf->position_holding)
       {
+        if (ekf->position_holding)
+          {
+            ekf->position_snap_count++;
+          }
+
         extnav_set_datum(ekf, s, pos_noise, yaw_noise, want_position,
                          want_yaw);
         ekf->extnav_test_ratio = 0.0f;
         ekf->extnav_fault_since = 0;
         ekf->extnav_healthy = true;
+        ekf->position_holding = false;
+        ekf->inhibit_mask = 0;
         return -2;
       }
   }
