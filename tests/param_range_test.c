@@ -407,16 +407,19 @@ static void test_companion_parameters(void)
       }
   }
 
-  /* The gyro filter is ON, and low enough to anti-alias the companion
-   * downlink.
+  /* Both corrected-stream filters must be ON.
    *
-   * It feeds the corrected topics only - imu_delta subscribes to sensor_gyro
-   * directly, so the estimator never sees it. That split is ArduPilot's, and
-   * the value matches INS_GYRO_FILTER.
+   * This is the latent bug the check exists for: SENS_GYR_LPF defaulted to
+   * 0, so the "filtered" gyro was not filtered at all and the VEHICLE_STATE
+   * twist carried the raw signal with only the ICM42688's hardware AAF.
    *
-   * The downlink samples these 2 kHz topics at 200 Hz, so the cutoff has to
-   * sit well under the 100 Hz Nyquist or the twist carries folded noise.
-   * Two poles at 20 Hz put 100 Hz down 28 dB; at 50 Hz only 12.
+   * The CUTOFF is a tuning choice and is not asserted - 100 Hz trades
+   * anti-aliasing at the downlink's 100 Hz Nyquist for control bandwidth,
+   * which is the operator's call. That it is switched on is not.
+   *
+   * Neither filter reaches the estimator: imu_delta subscribes to
+   * sensor_gyro and sensor_accel directly, so raising or lowering these
+   * cannot affect EKF3.
    */
 
   {
@@ -426,13 +429,18 @@ static void test_companion_parameters(void)
       {
         fail("SENS_GYR_LPF is missing");
       }
-    else if (!(lpf > 0.0f))
+    else if (!(lpf > 0.0f && lpf <= 400.0f))
       {
-        fail("SENS_GYR_LPF is off; the corrected gyro is unfiltered");
+        fail("SENS_GYR_LPF must be on and within the filter's design range");
       }
-    else if (lpf > 40.0f)
+
+    if (param_get_f32("SENS_ACC_LPF", &lpf) < 0)
       {
-        fail("SENS_GYR_LPF is too high to anti-alias the 200 Hz downlink");
+        fail("SENS_ACC_LPF is missing");
+      }
+    else if (!(lpf > 0.0f && lpf <= 400.0f))
+      {
+        fail("SENS_ACC_LPF must be on and within the filter's design range");
       }
   }
 

@@ -397,12 +397,25 @@ The board keeps **two** IMU streams, the way ArduPilot separates
 
 | Stream | Filtering | Consumer |
 |---|---|---|
-| `sensor_gyro` / `sensor_accel` (raw driver topics) | calibration only | `imu_delta` → EKF3 |
+| `sensor_gyro` / `sensor_accel` (raw driver topics) | calibration only — offset, scale, axis map | `imu_delta` → `vehicle_imu` → EKF3 |
 | `vehicle_gyro` / `vehicle_accel` (corrected topics) | `SENS_GYR_LPF`, `SENS_ACC_LPF`, optional notch | this packet's twist and accel |
 
 `angular_velocity` and `accel` in `VEHICLE_STATE` come from the **filtered**
-side. The estimator never sees those filters: `imu_delta` subscribes to
-`sensor_gyro` directly and applies its own calibration.
+side. The estimator never sees those filters — for the accelerometer as much
+as the gyro. `imu_delta` subscribes to `sensor_accel` and `sensor_gyro`
+directly, applies calibration only, and integrates delta angles and delta
+velocities into `vehicle_imu`, whose own contract records that it "bypasses
+every configurable software LPF/notch".
+
+This matches ArduPilot, verified against its source rather than assumed.
+`AP_NavEKF3_Measurements.cpp` reads only
+`ins.get_delta_velocity()` / `ins.get_delta_angle()`, and in
+`AP_InertialSensor_Backend.cpp` those accumulators are fed the **raw**
+corrected sample — `_delta_velocity_acc[instance] += accel * dt` — while
+`_accel_filtered` and `_gyro_filtered` are computed separately and never
+reach them. So `INS_ACCEL_FILTER` and `INS_GYRO_FILTER` shape `get_accel()`
+and `get_gyro()` for the control loops only, exactly as `SENS_ACC_LPF` and
+`SENS_GYR_LPF` do here.
 
 That is not an accident of wiring. A low-pass in the estimator's path adds
 phase lag to the very signal the attitude solution integrates, and the
@@ -410,14 +423,15 @@ filter's delayed-fusion horizon already handles the problem a filter would be
 there to solve. On the control and telemetry side the trade runs the other
 way: lag costs less than noise.
 
-**Defaults:** `SENS_GYR_LPF` is 20 Hz, matching ArduPilot's
-`INS_GYRO_FILTER`. It doubles as the anti-alias filter for this downlink,
-which samples the 2 kHz corrected topics at 200 Hz — two poles at 20 Hz put
-the 100 Hz Nyquist 28 dB down.
+**Defaults:** both `SENS_GYR_LPF` and `SENS_ACC_LPF` are **100 Hz**, chosen
+for control bandwidth.
 
-`SENS_ACC_LPF` is 100 Hz, which is only 3 dB down at that same Nyquist. That
-is a bandwidth-versus-aliasing choice rather than an oversight: lower it if
-the `accel` channel looks noisy, at the cost of acceleration bandwidth.
+Note what that costs here. This downlink samples the 2 kHz corrected topics
+at 200 Hz, and two poles at 100 Hz are only 3 dB down at the 100 Hz Nyquist —
+so `angular_velocity` and `accel` carry some folded content. It is a
+deliberate bandwidth-versus-aliasing trade, not an oversight. If those
+channels look noisy and you do not need the bandwidth, drop both cutoffs to
+around 30 Hz, which puts 100 Hz roughly 21 dB down.
 
 `SENS_GYR_NF_FRQ` adds a notch for a known vibration line, off by default.
 

@@ -316,19 +316,18 @@ static const struct param_def_s g_params[] =
    * control and the companion's VEHICLE_STATE twist, where lag costs less
    * than noise does.
    *
-   * SENS_GYR_LPF at 20 Hz matches ArduPilot's INS_GYRO_FILTER default. It
-   * doubles as the anti-alias filter for the companion downlink, which
-   * samples these 2 kHz topics at 200 Hz: two poles at 20 Hz put the 100 Hz
-   * Nyquist 28 dB down.
-   *
-   * SENS_ACC_LPF stays at 100 Hz, which is only 3 dB down at that same
-   * Nyquist. That is a bandwidth-versus-aliasing choice rather than an
-   * oversight; lower it if the accel channel in VEHICLE_STATE looks noisy.
+   * Both default to 100 Hz, chosen for control bandwidth. That is well
+   * inside the 2 kHz the filters are designed at, but note the consequence
+   * downstream: the companion downlink samples these topics at 200 Hz, and
+   * two poles at 100 Hz are only 3 dB down at that 100 Hz Nyquist, so the
+   * VEHICLE_STATE twist and accel carry some folded content. That is a
+   * deliberate bandwidth-versus-aliasing trade - drop the cutoffs to around
+   * 30 Hz if those channels look noisy and the bandwidth is not needed.
    */
 
   { "SENS_ACC_LPF", PARAM_TYPE_FLOAT, F32(100.0f), F32(0.0f), F32(800.0f),
     "Corrected accel 2-pole low-pass cutoff (Hz, 0=off)" },
-  { "SENS_GYR_LPF", PARAM_TYPE_FLOAT, F32(20.0f), F32(0.0f), F32(800.0f),
+  { "SENS_GYR_LPF", PARAM_TYPE_FLOAT, F32(100.0f), F32(0.0f), F32(800.0f),
     "Corrected gyro 2-pole low-pass cutoff (Hz, 0=off)" },
   { "SENS_GYR_NF_FRQ", PARAM_TYPE_FLOAT, F32(0.0f), F32(0.0f), F32(800.0f),
     "Corrected gyro notch centre (Hz, 0=off)" },
