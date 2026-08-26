@@ -53,7 +53,7 @@ direction fails to route rather than half-working.
 | 4 | `TIMESYNC_REP` | board → companion | 24 |
 | 5 | `TIMESYNC_START` | companion → board | 8 |
 | 6 | `TIMESYNC_END` | companion → board | 16 |
-| 16 | `ESTIMATOR_POSE` | board → companion | 56 |
+| 16 | `VEHICLE_STATE` | board → companion | 96 |
 
 An unknown id is counted and ignored — that is a companion newer than the
 firmware, which is benign. A **known** id with the wrong length is counted
@@ -219,28 +219,113 @@ fe 01 30 00 b0 94 c7 29 3c 06 00 00 00 c0 3f 00
 If your encoder reproduces this exactly, the framing, the little-endian
 layout and the CRC are all correct.
 
-## 7. ESTIMATOR_POSE (id 16, 56 bytes)
+## 7. VEHICLE_STATE (id 16, 96 bytes)
 
 What the board sends back, at `EXT_TX_RATE` (default 200 Hz), driven by a
 hardware timer.
 
-| Offset | Type | Field | Units |
+| Offset | Type | Field | Frame | Units |
+|---|---|---|---|---|
+| 0 | `uint64` | `timestamp_us` | — | UTC µs once synced, else monotonic |
+| 8 | `float32[3]` | `position` | local ENU | m |
+| 20 | `float32[4]` | `quaternion` | body→ENU | w, x, y, z |
+| 36 | `float32[3]` | `velocity` | **body FLU** | m/s |
+| 48 | `float32[3]` | `angular_velocity` | body FLU | rad/s |
+| 60 | `float32` | `side_slip_rad` | — | rad, **NaN for now** |
+| 64 | `float32[3]` | `accel` | body FLU | m/s², gravity removed |
+| 76 | `float32` | `wheel_torque_nm` | — | Nm |
+| 80 | `float32` | `steering_angle` | — | scaled ADC |
+| 84 | `float32` | `motor_speed_ms` | — | m/s |
+| 88 | `uint8` | `solution_status` | — | bits below |
+| 89 | `uint8` | `reset_counter` | — | estimator reset generation |
+| 90 | `uint8` | `source_valid` | — | which inputs were fresh |
+| 91 | `uint8[5]` | pad | | |
+
+### The frames are not all the same
+
+This follows ROS `nav_msgs/Odometry`: **pose in the world frame, twist in the
+body frame.**
+
+- `position` and `quaternion` are in local **ENU** — x east, y north, z up.
+- `velocity`, `angular_velocity` and `accel` are in **body FLU** — x forward,
+  y left, z up.
+
+The estimator works in ENU velocity internally; the board converts before
+sending. Angular velocity is body-frame by construction because it is the
+gyro. Getting this backwards is a quiet failure: a velocity rotated by the
+quaternion instead of its transpose is still a plausible velocity, and at
+zero yaw the two are identical.
+
+### side_slip_rad
+
+The angle between the velocity vector and the vehicle's heading. **NaN**
+until the estimator carries it as a state.
+
+Deliberately NaN and not zero. Zero is a perfectly good slip angle — it means
+"travelling straight ahead" — and a consumer cannot tell that apart from "not
+computed". NaN can only mean the latter. Test it with `isnan()` before use.
+
+### accel
+
+Specific force with gravity removed using the estimator's attitude, so it
+reads **zero at rest** rather than 9.8 m/s² upward.
+
+Only gravity is removed. The accelerometer bias the estimator tracks is
+*not*, so a poorly calibrated accelerometer shows up here as a standing
+offset.
+
+Gravity removal needs an attitude, so if the estimator is not running this
+field stays zero and `COMP_SRC_ACCEL` is clear — rather than reporting the
+raw 9.8 m/s² as vehicle acceleration.
+
+### The VESC-derived channels
+
+| Field | Source | Scalar | Default |
 |---|---|---|---|
-| 0 | `uint64` | `timestamp_us` | UTC µs once synced, else board monotonic |
-| 8 | `float32[3]` | `position` | m, local ENU |
-| 20 | `float32[4]` | `quaternion` | w, x, y, z — body to nav |
-| 36 | `float32[3]` | `velocity` | m/s, local ENU |
-| 48 | `uint8` | `solution_status` | bits below |
-| 49 | `uint8` | `reset_counter` | estimator reset generation |
-| 50 | `uint8[6]` | pad | |
+| `wheel_torque_nm` | `vesc_status.current_a` | `VESC_TORQUE_K` | 1.0 |
+| `steering_angle` | `vesc_status.adc_volts` | `VESC_STEER_K` | 1.0 |
+| `motor_speed_ms` | tachometer rate | `VESC_SPEED_K` | 1.0 |
 
-`timestamp_us` is the **IMU sample time** of the solution, not the time the
-message was sent. So the age you measure on arrival legitimately includes the
-estimator's own output latency; it is not all transport.
+All three scalars default to **1.0**, so until the vehicle is characterised
+these carry raw amps, raw volts and raw counts per second. That is
+deliberate: a guessed gear ratio is worse than an honest raw number, because
+it looks calibrated.
 
-This timestamp is guaranteed never to be in the future — it is clamped to the
-board's own UTC before sending, and the PPS discipline in section 8 keeps
-that clock aligned to yours.
+`motor_speed_ms` is the time derivative of the tachometer, low-pass filtered
+with a 50 ms time constant. It is differentiated **when a `STATUS_5` frame
+arrives**, not on the downlink tick — VESC telemetry comes in at tens of
+hertz against a 200 Hz downlink, so differentiating per tick would sample an
+unchanged count most of the time and produce zeros punctuated by spikes.
+
+The tachometer is a 32-bit accumulator and it does wrap; the difference is
+taken in unsigned arithmetic so the wrap is a small step rather than a
+4.3-billion-count spike. After a gap of more than 500 ms the filter restarts
+instead of emitting one enormous value.
+
+### source_valid
+
+| Bit | Name | Meaning |
+|---|---|---|
+| 0 | `COMP_SRC_ESTIMATOR` | pose, velocity and status are real |
+| 1 | `COMP_SRC_GYRO` | `angular_velocity` is real |
+| 2 | `COMP_SRC_ACCEL` | `accel` is real |
+| 3 | `COMP_SRC_VESC` | the three VESC channels are real |
+
+**Check this before trusting a zero.** A stopped VESC and a stationary
+vehicle both report zero wheel torque, and only one of them means the vehicle
+is under control. When `COMP_SRC_ESTIMATOR` is clear the quaternion is left
+all-zero, which is not a rotation at all — an identity quaternion would have
+been indistinguishable from a real level attitude.
+
+### timestamp_us
+
+The **IMU sample time** of the solution, not the time the message was sent.
+So the age you measure on arrival legitimately includes the estimator's own
+output latency; it is not all transport.
+
+Guaranteed never to be in the future — clamped to the board's own UTC before
+sending, and the PPS discipline in section 8 keeps that clock aligned to
+yours.
 
 ### solution_status
 
@@ -259,6 +344,35 @@ that clock aligned to yours.
 Incremented when the **estimator's** datum moves — which the external
 position path does deliberately on a sustained rejection run. Position jumps
 discontinuously when it happens.
+
+### Decoding
+
+```python
+import struct, math
+
+VEHICLE_STATE = struct.Struct("<Q3f4f3f3ff3ffffBBB5x")
+assert VEHICLE_STATE.size == 96
+
+f = VEHICLE_STATE.unpack(payload)
+state = {
+    "timestamp_us": f[0],
+    "position": f[1:4],            # local ENU
+    "quaternion": f[4:8],          # w x y z
+    "velocity": f[8:11],           # BODY frame
+    "angular_velocity": f[11:14],  # body
+    "side_slip_rad": f[14],        # NaN until estimated
+    "accel": f[15:18],             # body, gravity removed
+    "wheel_torque_nm": f[18],
+    "steering_angle": f[19],
+    "motor_speed_ms": f[20],
+    "solution_status": f[21],
+    "reset_counter": f[22],
+    "source_valid": f[23],
+}
+```
+
+`tools/comp_link.py` carries this as `decode_vehicle_state()`, and
+`tests/comp_proto_cross_test.py` pins it against the C encoder byte for byte.
 
 ## 8. Clock synchronisation
 

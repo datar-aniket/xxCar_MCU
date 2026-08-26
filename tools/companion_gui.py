@@ -31,7 +31,7 @@ except ImportError:
     raise SystemExit("pyserial missing:  pip install pyserial")
 
 import comp_link
-from comp_link import Link, decode_estimator_pose, encode_external_pose
+from comp_link import Link, decode_vehicle_state, encode_external_pose
 from comp_link import (UtcClock, decode_timesync_rep, encode_timesync_end,
                        encode_timesync_req, encode_timesync_start,
                        host_now_us, quaternion_to_euler, solution_names,
@@ -191,12 +191,21 @@ class App(tk.Tk):
         self.sol_lbl = self._label(recv, "solution --", MUTED)
         self.sol_lbl.grid(row=2, column=0, columnspan=3, sticky="w",
                           padx=18, pady=(6, 0))
-        self.est_reset_lbl = self._label(recv, "estimator reset_counter --")
+        self.est_reset_lbl = self._label(recv, "reset_counter --")
         self.est_reset_lbl.grid(row=3, column=0, columnspan=3, sticky="w",
                                 padx=18)
 
+        self.twist_lbl = self._label(recv, "v_body --    w --    slip --",
+                                     MUTED)
+        self.twist_lbl.grid(row=4, column=0, columnspan=3, sticky="w",
+                            padx=18)
+        self.drive_lbl = self._label(recv, "torque --    steer --    speed --",
+                                     MUTED)
+        self.drive_lbl.grid(row=5, column=0, columnspan=3, sticky="w",
+                            padx=18)
+
         self.time_lbl = self._label(recv, "solution time --")
-        self.time_lbl.grid(row=4, column=0, columnspan=3, sticky="w",
+        self.time_lbl.grid(row=6, column=0, columnspan=3, sticky="w",
                            padx=18, pady=(4, 0))
 
         # ---- counters ---------------------------------------------------
@@ -343,8 +352,8 @@ class App(tk.Tk):
 
             if kind == "frame":
                 msg_id, body, rx_us = payload
-                if msg_id == comp_link.MSG_ESTIMATOR_POSE:
-                    self._show(decode_estimator_pose(body), rx_us)
+                if msg_id == comp_link.MSG_VEHICLE_STATE:
+                    self._show(decode_vehicle_state(body), rx_us)
                     self.last_pose_us = now
                 elif msg_id == comp_link.MSG_TIMESYNC_REP:
                     rep = decode_timesync_rep(body)
@@ -373,8 +382,32 @@ class App(tk.Tk):
 
         self.sol_lbl.configure(
             text="solution " + solution_names(pose["solution_status"]))
+
+        # Which inputs were fresh. Without this a stopped VESC and a
+        # stationary vehicle look identical - both report zero torque.
+        missing = [name for bit, name in (
+            (comp_link.SRC_ESTIMATOR, "ekf"),
+            (comp_link.SRC_GYRO, "gyro"),
+            (comp_link.SRC_ACCEL, "accel"),
+            (comp_link.SRC_VESC, "vesc"))
+            if not pose["source_valid"] & bit]
         self.est_reset_lbl.configure(
-            text=f"estimator reset_counter {pose['reset_counter']}")
+            text=(f"reset_counter {pose['reset_counter']}"
+                  + ("   MISSING: " + " ".join(missing) if missing else "")),
+            fg=BAD if missing else MUTED)
+
+        # Body-frame twist and the VESC-derived channels.
+        vx, vy, vz = pose["velocity"]
+        wx, wy, wz = pose["angular_velocity"]
+        slip = pose["side_slip_rad"]
+        self.twist_lbl.configure(
+            text=(f"v_body {vx:+6.2f} {vy:+6.2f} {vz:+6.2f} m/s    "
+                  f"w {wx:+6.2f} {wy:+6.2f} {wz:+6.2f} rad/s    "
+                  f"slip {'--' if math.isnan(slip) else f'{slip*DEG:+.1f}'}"))
+        self.drive_lbl.configure(
+            text=(f"torque {pose['wheel_torque_nm']:+7.3f} Nm    "
+                  f"steer {pose['steering_angle']:+7.3f}    "
+                  f"speed {pose['motor_speed_ms']:+7.3f} m/s"))
 
         # The solution's own timestamp, and how stale it is by the time it
         # got here. Age needs the offset - it is the difference between two

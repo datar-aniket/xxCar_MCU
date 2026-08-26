@@ -481,6 +481,19 @@ static const struct param_def_s g_params[] =
   { "VESC_STEER_MAX", PARAM_TYPE_INT32, I32(1900), I32(800), I32(2200),
     "Servo pulse at steering +1, full left (us)" },
 
+  /* Scalars turning VESC telemetry into the engineering units the companion
+   * expects. All 1.0 until the vehicle is characterised - a guessed gear
+   * ratio or torque constant is worse than an honest raw number, because it
+   * looks calibrated.
+   */
+
+  { "VESC_TORQUE_K", PARAM_TYPE_FLOAT, F32(1.0f), F32(-1000.0f),
+    F32(1000.0f), "Motor current to wheel torque (Nm per A)" },
+  { "VESC_STEER_K", PARAM_TYPE_FLOAT, F32(1.0f), F32(-1000.0f), F32(1000.0f),
+    "Steering ADC to angle (rad per V)" },
+  { "VESC_SPEED_K", PARAM_TYPE_FLOAT, F32(1.0f), F32(-1000.0f), F32(1000.0f),
+    "Tachometer rate to ground speed (m/s per count/s)" },
+
   /* ---- Logging (on request only; these choose WHAT gets logged) ---------- */
 
   { "LOG_ENABLE", PARAM_TYPE_INT32, I32(0), I32(0), I32(1),

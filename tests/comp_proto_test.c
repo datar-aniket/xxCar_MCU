@@ -60,9 +60,9 @@ static struct comp_external_pose_s sample_pose(void)
 static void test_layout(void)
 {
   assert(sizeof(struct comp_external_pose_s) == 48);
-  assert(sizeof(struct comp_estimator_pose_s) == 56);
+  assert(sizeof(struct comp_vehicle_state_s) == 96);
   assert(comp_payload_len(COMP_MSG_EXTERNAL_POSE) == 48);
-  assert(comp_payload_len(COMP_MSG_ESTIMATOR_POSE) == 56);
+  assert(comp_payload_len(COMP_MSG_VEHICLE_STATE) == 96);
   assert(comp_payload_len(COMP_MSG_TIMESYNC_REQ) == 8);
   assert(comp_payload_len(COMP_MSG_TIMESYNC_REP) == 24);
   assert(sizeof(struct comp_timesync_req_s) == 8);

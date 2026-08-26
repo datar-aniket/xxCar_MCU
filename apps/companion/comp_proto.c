@@ -51,8 +51,8 @@ uint8_t comp_payload_len(uint8_t id)
       case COMP_MSG_EXTERNAL_POSE:
         return (uint8_t)sizeof(struct comp_external_pose_s);
 
-      case COMP_MSG_ESTIMATOR_POSE:
-        return (uint8_t)sizeof(struct comp_estimator_pose_s);
+      case COMP_MSG_VEHICLE_STATE:
+        return (uint8_t)sizeof(struct comp_vehicle_state_s);
 
       case COMP_MSG_TIMESYNC_REQ:
         return (uint8_t)sizeof(struct comp_timesync_req_s);

@@ -30,7 +30,13 @@
 #endif
 
 #define COMP_SYNC              0xfe
-#define COMP_MAX_PAYLOAD       64
+/* Sized for the largest message, VEHICLE_STATE at 96 bytes, with room to
+ * grow. The `len` field is a uint8 so 255 is the format's ceiling; this
+ * buffer is what costs RAM, and it sits inside comp_parser_s which is copied
+ * under a mutex by companion_status().
+ */
+
+#define COMP_MAX_PAYLOAD       128
 #define COMP_FRAME_OVERHEAD    5      /* sync + id + len + crc16 */
 
 /* Inbound: companion -> board. */
@@ -44,7 +50,7 @@
 /* Outbound: board -> companion. */
 
 #define COMP_MSG_TIMESYNC_REP    4
-#define COMP_MSG_ESTIMATOR_POSE 16
+#define COMP_MSG_VEHICLE_STATE  16
 
 /* Absolute pose in the companion's map frame. Only x, y and yaw are fused;
  * height stays with the barometer.
@@ -76,27 +82,77 @@ struct comp_external_pose_s
 
 #define COMP_POSE_FLAG_VALID (1u << 0)
 
-/* The estimator's pose, sent at EXT_TX_RATE.
+/* The vehicle's full state, sent at EXT_TX_RATE.
+ *
+ * FRAMES, and they are not all the same one - this follows ROS
+ * nav_msgs/Odometry, where the pose is in the world frame and the twist is
+ * in the body frame:
+ *
+ *   position, quaternion   local ENU (x east, y north, z up)
+ *   velocity               body FLU (x forward, y left, z up)
+ *   angular_velocity       body FLU
+ *   accel                  body FLU
+ *
+ * The estimator works in ENU velocity; this converts. Angular velocity is
+ * body by construction because it is the gyro.
  *
  * reset_counter matters more than it looks: the datum reset moves position
  * discontinuously, and anything differentiating position on the companion
  * side needs to know that happened rather than seeing a spike.
  */
 
-struct comp_estimator_pose_s
+struct comp_vehicle_state_s
 {
-  uint64_t timestamp_us;    /*  0: board monotonic */
-  float    position[3];     /*  8: m, local ENU */
-  float    quaternion[4];   /* 20: w x y z, body to nav */
-  float    velocity[3];     /* 36: m/s, local ENU */
-  uint8_t  solution_status; /* 48: ESTIMATOR_* validity bits */
-  uint8_t  reset_counter;   /* 49: estimator reset generation */
-  uint8_t  pad[6];          /* 50: a uint64 first member forces 8-byte
-                             *     alignment, so 50 pads to 56 whatever this
-                             *     says. Declared, so the wire format is what
-                             *     the struct says rather than what the
-                             *     compiler decided. */
+  uint64_t timestamp_us;      /*  0: UTC us once synced, else monotonic */
+
+  float    position[3];       /*  8: m, local ENU */
+  float    quaternion[4];     /* 20: w x y z, body FLU to local ENU */
+
+  float    velocity[3];       /* 36: m/s, BODY frame */
+  float    angular_velocity[3]; /* 48: rad/s, body - the filtered gyro */
+
+  /* Angle between the velocity vector and the vehicle's heading.
+   *
+   * NaN until the estimator carries it as a state. NOT zero: zero is a
+   * perfectly good slip angle meaning "travelling straight ahead", and a
+   * consumer cannot tell that apart from "not computed". NaN can only mean
+   * the latter. Check it with isnan() before use.
+   */
+
+  float    side_slip_rad;     /* 60 */
+
+  /* Specific force with gravity removed using the estimator's attitude, so
+   * this reads zero at rest rather than 9.8 m/s^2 upward. The accelerometer
+   * bias the estimator tracks is NOT removed - only gravity is.
+   */
+
+  float    accel[3];          /* 64: m/s^2, body FLU */
+
+  float    wheel_torque_nm;   /* 76: VESC current x VESC_TORQUE_K */
+  float    steering_angle;    /* 80: VESC ADC volts x VESC_STEER_K */
+  float    motor_speed_ms;    /* 84: tachometer rate x VESC_SPEED_K */
+
+  uint8_t  solution_status;   /* 88: ESTIMATOR_* validity bits */
+  uint8_t  reset_counter;     /* 89: estimator reset generation */
+  uint8_t  source_valid;      /* 90: COMP_SRC_* - which inputs were fresh */
+  uint8_t  pad[5];            /* 91: a uint64 first member forces 8-byte
+                               *     alignment, so 91 pads to 96 whatever
+                               *     this says. Declared, so the wire format
+                               *     is what the struct says rather than what
+                               *     the compiler decided. */
 };
+
+/* Which inputs were actually fresh when this was assembled.
+ *
+ * Without this a consumer cannot tell a genuine zero from a source that is
+ * not publishing: a stopped VESC and a stationary vehicle both report zero
+ * wheel torque, and only one of them means the vehicle is under control.
+ */
+
+#define COMP_SRC_ESTIMATOR   (1u << 0)
+#define COMP_SRC_GYRO        (1u << 1)
+#define COMP_SRC_ACCEL       (1u << 2)
+#define COMP_SRC_VESC        (1u << 3)
 
 /* Clock synchronisation, request and reply.
  *

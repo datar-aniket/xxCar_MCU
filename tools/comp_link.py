@@ -26,7 +26,7 @@ import time
 import serial
 
 SYNC = 0xFE
-MAX_PAYLOAD = 64
+MAX_PAYLOAD = 128
 FRAME_OVERHEAD = 5
 
 MSG_EXTERNAL_POSE = 1
@@ -35,18 +35,30 @@ MSG_TIMESYNC_REQ = 3
 MSG_TIMESYNC_REP = 4
 MSG_TIMESYNC_START = 5
 MSG_TIMESYNC_END = 6
-MSG_ESTIMATOR_POSE = 16
+MSG_VEHICLE_STATE = 16
 
 POSE_FLAG_VALID = 1 << 0
 
 # struct comp_external_pose_s - 48 bytes
 EXTERNAL_POSE = struct.Struct("<Q3f6fBB2x")
 
-# struct comp_estimator_pose_s - 56 bytes
-ESTIMATOR_POSE = struct.Struct("<Q3f4f3fBB6x")
+# struct comp_vehicle_state_s - 96 bytes
+#
+# Frames are NOT all the same, following ROS nav_msgs/Odometry: pose in the
+# world frame, twist in the body frame.
+#   position, quaternion  local ENU
+#   velocity, angular_velocity, accel   body FLU
+VEHICLE_STATE = struct.Struct("<Q3f4f3f3ff3ffffBBB5x")
+
+# Which inputs were fresh when the packet was assembled. Without these a
+# stopped VESC and a stationary vehicle both report zero torque.
+SRC_ESTIMATOR = 1 << 0
+SRC_GYRO = 1 << 1
+SRC_ACCEL = 1 << 2
+SRC_VESC = 1 << 3
 
 assert EXTERNAL_POSE.size == 48, EXTERNAL_POSE.size
-assert ESTIMATOR_POSE.size == 56, ESTIMATOR_POSE.size
+assert VEHICLE_STATE.size == 96, VEHICLE_STATE.size
 
 # struct comp_timesync_req_s / _rep_s
 TIMESYNC_REQ = struct.Struct("<Q")
@@ -61,7 +73,7 @@ assert TIMESYNC_END.size == 16, TIMESYNC_END.size
 
 PAYLOAD_LEN = {
     MSG_EXTERNAL_POSE: EXTERNAL_POSE.size,
-    MSG_ESTIMATOR_POSE: ESTIMATOR_POSE.size,
+    MSG_VEHICLE_STATE: VEHICLE_STATE.size,
     MSG_TIMESYNC_REQ: TIMESYNC_REQ.size,
     MSG_TIMESYNC_REP: TIMESYNC_REP.size,
     MSG_TIMESYNC_START: TIMESYNC_START.size,
@@ -180,15 +192,28 @@ def timesync_solve(rep: dict, host_rx_us: int):
     return offset, trip
 
 
-def decode_estimator_pose(payload: bytes) -> dict:
-    f = ESTIMATOR_POSE.unpack(payload)
+def decode_vehicle_state(payload: bytes) -> dict:
+    """Unpack a VEHICLE_STATE.
+
+    side_slip_rad is NaN until the estimator carries it as a state - NOT
+    zero, because zero is a real slip angle meaning "travelling straight
+    ahead" and the two must stay distinguishable. Check it with math.isnan.
+    """
+    f = VEHICLE_STATE.unpack(payload)
     return {
         "timestamp_us": f[0],
-        "position": f[1:4],
-        "quaternion": f[4:8],
-        "velocity": f[8:11],
-        "solution_status": f[11],
-        "reset_counter": f[12],
+        "position": f[1:4],            # local ENU, m
+        "quaternion": f[4:8],          # w x y z, body FLU -> ENU
+        "velocity": f[8:11],           # BODY frame, m/s
+        "angular_velocity": f[11:14],  # body, rad/s
+        "side_slip_rad": f[14],        # NaN until estimated
+        "accel": f[15:18],             # body, m/s^2, gravity removed
+        "wheel_torque_nm": f[18],
+        "steering_angle": f[19],
+        "motor_speed_ms": f[20],
+        "solution_status": f[21],
+        "reset_counter": f[22],
+        "source_valid": f[23],
     }
 
 

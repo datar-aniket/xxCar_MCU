@@ -13,7 +13,7 @@ MODULE    = $(CONFIG_XXCAR_COMPANION)
 
 # comp_proto.c is the wire format, with no I/O so it can be host-tested;
 # companion.c is the daemon; companion_main.c is the command.
-CSRCS   = companion.c comp_proto.c
+CSRCS   = companion.c comp_proto.c comp_state.c
 MAINSRC = companion_main.c
 
 include $(APPDIR)/Application.mk

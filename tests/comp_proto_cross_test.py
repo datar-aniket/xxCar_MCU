@@ -40,7 +40,7 @@ int main(void)
 {
   unsigned char frame[COMP_MAX_PAYLOAD + COMP_FRAME_OVERHEAD];
   struct comp_external_pose_s ext;
-  struct comp_estimator_pose_s est;
+  struct comp_vehicle_state_s est;
   int n;
 
   printf("%zu %zu\n", sizeof(ext), sizeof(est));
@@ -63,9 +63,20 @@ int main(void)
   est.position[0] = 1.0f; est.position[1] = -2.0f; est.position[2] = 3.5f;
   est.quaternion[0] = 0.7071068f; est.quaternion[3] = 0.7071068f;
   est.velocity[0] = 0.25f; est.velocity[1] = -0.5f; est.velocity[2] = 0.125f;
+  est.angular_velocity[0] = 0.01f; est.angular_velocity[1] = -0.02f;
+  est.angular_velocity[2] = 0.03f;
+  est.side_slip_rad = 0.0f;   /* a literal here, not NAN: NaN never compares
+                               * equal, so a byte comparison is the only way
+                               * to check it and that is not what this test
+                               * is for. */
+  est.accel[0] = 0.5f; est.accel[1] = -1.5f; est.accel[2] = 0.25f;
+  est.wheel_torque_nm = 2.75f;
+  est.steering_angle = -0.35f;
+  est.motor_speed_ms = 4.5f;
   est.solution_status = 0x4f;
   est.reset_counter = 3;
-  n = comp_encode(COMP_MSG_ESTIMATOR_POSE, &est, sizeof(est), frame,
+  est.source_valid = 0x0f;
+  n = comp_encode(COMP_MSG_VEHICLE_STATE, &est, sizeof(est), frame,
                   sizeof(frame));
   dump(frame, n);
 
@@ -93,9 +104,9 @@ def main():
     assert c_ext_size == comp_link.EXTERNAL_POSE.size, (
         f"external_pose: C says {c_ext_size}, "
         f"Python says {comp_link.EXTERNAL_POSE.size}")
-    assert c_est_size == comp_link.ESTIMATOR_POSE.size, (
-        f"estimator_pose: C says {c_est_size}, "
-        f"Python says {comp_link.ESTIMATOR_POSE.size}")
+    assert c_est_size == comp_link.VEHICLE_STATE.size, (
+        f"vehicle_state: C says {c_est_size}, "
+        f"Python says {comp_link.VEHICLE_STATE.size}")
 
     py_ext = comp_link.encode_external_pose(
         -12.5, 3.25, 1.5707963,
@@ -106,13 +117,18 @@ def main():
         f"  py: {py_ext.hex()}")
 
     py_est = comp_link.encode(
-        comp_link.MSG_ESTIMATOR_POSE,
-        comp_link.ESTIMATOR_POSE.pack(
+        comp_link.MSG_VEHICLE_STATE,
+        comp_link.VEHICLE_STATE.pack(
             999999999, 1.0, -2.0, 3.5,
             0.7071068, 0.0, 0.0, 0.7071068,
-            0.25, -0.5, 0.125, 0x4f, 3))
+            0.25, -0.5, 0.125,
+            0.01, -0.02, 0.03,
+            0.0,
+            0.5, -1.5, 0.25,
+            2.75, -0.35, 4.5,
+            0x4f, 3, 0x0f))
     assert py_est == c_est_frame, (
-        f"ESTIMATOR_POSE bytes differ\n  C:  {c_est_frame.hex()}\n"
+        f"VEHICLE_STATE bytes differ\n  C:  {c_est_frame.hex()}\n"
         f"  py: {py_est.hex()}")
 
     # And the Python parser must accept what C produced.
@@ -122,10 +138,19 @@ def main():
         result = parser.feed(b)
         if result is not None:
             got = result
-    assert got is not None and got[0] == comp_link.MSG_ESTIMATOR_POSE
-    pose = comp_link.decode_estimator_pose(got[1])
+    assert got is not None and got[0] == comp_link.MSG_VEHICLE_STATE
+    pose = comp_link.decode_vehicle_state(got[1])
     assert abs(pose["position"][2] - 3.5) < 1e-6
     assert pose["reset_counter"] == 3
+
+    # Every field must land where the struct says. A wrong offset shifts the
+    # whole tail and each of these would read a neighbour's value.
+    assert abs(pose["angular_velocity"][2] - 0.03) < 1e-6
+    assert abs(pose["accel"][1] + 1.5) < 1e-6
+    assert abs(pose["wheel_torque_nm"] - 2.75) < 1e-6
+    assert abs(pose["steering_angle"] + 0.35) < 1e-6
+    assert abs(pose["motor_speed_ms"] - 4.5) < 1e-6
+    assert pose["source_valid"] == 0x0f
 
     # A 90-degree yaw quaternion must read back as 90 degrees, which pins the
     # Euler convention against the firmware's own ekf_core_euler().

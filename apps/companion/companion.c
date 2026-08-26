@@ -24,6 +24,7 @@
 #include <uORB/uORB.h>
 
 #include "companion.h"
+#include "comp_state.h"
 #include "../param/param.h"
 #include "../serial/serial.h"
 #include "../uorb_msgs/uorb_msgs.h"
@@ -53,6 +54,23 @@ static struct companion_status_s g_status;
 
 static volatile bool g_tx_stop;
 static uint64_t g_tx_last_sample;
+
+/* Tachometer differentiator. Advanced when a NEW vesc_status arrives, not on
+ * the downlink tick: STATUS_5 comes in at tens of hertz against a 200 Hz
+ * downlink, so ticking it here would differentiate an unchanged count most
+ * of the time.
+ */
+
+/* Scalars turning VESC telemetry into engineering units. Read once at start
+ * like every other parameter here.
+ */
+
+static float g_torque_k = 1.0f;
+static float g_steer_k = 1.0f;
+static float g_speed_k = 1.0f;
+
+static struct comp_speed_filter_s g_speed;
+static uint64_t g_speed_last_stamp;
 
 static int64_t g_utc_offset_us;
 static bool    g_utc_valid;
@@ -439,17 +457,28 @@ static void comp_pps_discipline(FAR struct companion_status_s *s)
   s->pps_corrections++;
 }
 
-static void comp_transmit(int fd, int est_sub,
+static void comp_transmit(int fd, int est_sub, int gyro_sub,
+                          int accel_sub, int vesc_sub,
                           FAR struct companion_status_s *s)
 {
   struct estimator_state_s est;
-  struct comp_estimator_pose_s wire;
+  struct vehicle_gyro_s gyro;
+  struct vehicle_accel_s accel;
+  struct vesc_status_s vesc;
+  struct comp_state_inputs_s in;
+  struct comp_vehicle_state_s wire;
   uint8_t frame[COMP_MAX_PAYLOAD + COMP_FRAME_OVERHEAD];
   int64_t now_utc;
+  uint64_t stamp;
   uint32_t gap = 0;
   bool repeat = false;
   bool clamped = false;
   int n;
+
+  memset(&in, 0, sizeof(in));
+  in.torque_k = g_torque_k;
+  in.steer_k = g_steer_k;
+  in.speed_k = g_speed_k;
 
   if (orb_copy(ORB_ID(estimator_state), est_sub, &est) < 0)
     {
@@ -463,6 +492,13 @@ static void comp_transmit(int fd, int est_sub,
       pthread_mutex_unlock(&g_lock);
       return;
     }
+
+  in.est_valid = true;
+  memcpy(in.position, est.position, sizeof(in.position));
+  memcpy(in.quaternion, est.quaternion, sizeof(in.quaternion));
+  memcpy(in.velocity_enu, est.velocity, sizeof(in.velocity_enu));
+  in.solution_status = est.solution_status;
+  in.reset_counter = (uint8_t)est.reset_counter;
 
   /* The tick free-runs against the estimator, so measure the slip rather
    * than assume it away: an unchanged sample time means this tick caught the
@@ -482,16 +518,50 @@ static void comp_transmit(int fd, int est_sub,
 
   g_tx_last_sample = est.timestamp_sample;
 
-  memset(&wire, 0, sizeof(wire));
+  if (gyro_sub >= 0 && orb_copy(ORB_ID(vehicle_gyro), gyro_sub, &gyro) >= 0)
+    {
+      in.gyro_valid = true;
+      in.gyro[0] = gyro.x;
+      in.gyro[1] = gyro.y;
+      in.gyro[2] = gyro.z;
+    }
+
+  if (accel_sub >= 0 &&
+      orb_copy(ORB_ID(vehicle_accel), accel_sub, &accel) >= 0)
+    {
+      in.accel_valid = true;
+      in.accel[0] = accel.x;
+      in.accel[1] = accel.y;
+      in.accel[2] = accel.z;
+    }
+
+  if (vesc_sub >= 0 && orb_copy(ORB_ID(vesc_status), vesc_sub, &vesc) >= 0)
+    {
+      in.vesc_valid = true;
+      in.current_a = vesc.current_a;
+      in.adc_volts = vesc.adc_volts;
+
+      /* Only differentiate a reading we have not already used. orb_copy
+       * hands back the newest message whether or not it changed.
+       */
+
+      if (vesc.timestamp_sample != g_speed_last_stamp)
+        {
+          g_speed_last_stamp = vesc.timestamp_sample;
+          comp_speed_update(&g_speed, vesc.tachometer,
+                            vesc.timestamp_sample);
+        }
+
+      in.motor_counts_per_s = g_speed.value;
+    }
 
   /* UTC on the wire once synced. Before that the companion gets the board's
    * raw monotonic time, which is all there is to give.
    */
 
-  wire.timestamp_us = g_utc_valid ?
-                      (uint64_t)((int64_t)est.timestamp_sample +
-                                 g_utc_offset_us) :
-                      est.timestamp_sample;
+  stamp = g_utc_valid ?
+          (uint64_t)((int64_t)est.timestamp_sample + g_utc_offset_us) :
+          est.timestamp_sample;
 
   /* A solution cannot be newer than now, so refuse to say that it is.
    *
@@ -506,19 +576,15 @@ static void comp_transmit(int fd, int est_sub,
   now_utc = (int64_t)fmuv6c_imu_time_now() +
             (g_utc_valid ? g_utc_offset_us : 0);
 
-  if ((int64_t)wire.timestamp_us > now_utc)
+  if ((int64_t)stamp > now_utc)
     {
-      wire.timestamp_us = (uint64_t)now_utc;
+      stamp = (uint64_t)now_utc;
       clamped = true;
     }
 
-  memcpy(wire.position, est.position, sizeof(wire.position));
-  memcpy(wire.quaternion, est.quaternion, sizeof(wire.quaternion));
-  memcpy(wire.velocity, est.velocity, sizeof(wire.velocity));
-  wire.solution_status = est.solution_status;
-  wire.reset_counter = (uint8_t)est.reset_counter;
+  comp_state_build(&in, stamp, &wire);
 
-  n = comp_encode(COMP_MSG_ESTIMATOR_POSE, &wire, sizeof(wire), frame,
+  n = comp_encode(COMP_MSG_VEHICLE_STATE, &wire, sizeof(wire), frame,
                   sizeof(frame));
 
   if (n < 0)
@@ -583,6 +649,9 @@ struct comp_tx_args_s
 {
   int fd;
   int est_sub;
+  int gyro_sub;
+  int accel_sub;
+  int vesc_sub;
   FAR struct companion_status_s *status;
 };
 
@@ -613,7 +682,8 @@ static FAR void *comp_tx_thread(FAR void *arg)
 
       if (a->est_sub >= 0)
         {
-          comp_transmit(a->fd, a->est_sub, a->status);
+          comp_transmit(a->fd, a->est_sub, a->gyro_sub, a->accel_sub,
+                        a->vesc_sub, a->status);
         }
 
       fmuv6c_txtick_status(&tick);
@@ -711,6 +781,9 @@ static int companion_daemon(int argc, FAR char *argv[])
   int fd = -1;
   int pose_pub = -1;
   int est_sub = -1;
+  int gyro_sub = -1;
+  int accel_sub = -1;
+  int vesc_sub = -1;
   int result = EXIT_FAILURE;
 
   memset(&status, 0, sizeof(status));
@@ -734,6 +807,9 @@ static int companion_daemon(int argc, FAR char *argv[])
   status.baud = port->baud_param != NULL ?
                 (uint32_t)param_i32(port->baud_param) : 0;
   status.tx_rate_hz = (uint32_t)param_i32("EXT_TX_RATE");
+  g_torque_k = param_f32("VESC_TORQUE_K");
+  g_steer_k = param_f32("VESC_STEER_K");
+  g_speed_k = param_f32("VESC_SPEED_K");
 
   /* The tick is the downlink's clock from here on. Failing to start it is
    * fatal to this daemon rather than a quiet fall back to some other
@@ -761,6 +837,16 @@ static int companion_daemon(int argc, FAR char *argv[])
    */
 
   est_sub = orb_subscribe(ORB_ID(estimator_state));
+
+  /* The IMU and VESC feeds are equally optional. A missing one leaves its
+   * fields zero and its bit clear in source_valid, which the companion can
+   * see - rather than the daemon refusing to run because one sensor of four
+   * is absent.
+   */
+
+  gyro_sub = orb_subscribe(ORB_ID(vehicle_gyro));
+  accel_sub = orb_subscribe(ORB_ID(vehicle_accel));
+  vesc_sub = orb_subscribe(ORB_ID(vesc_status));
 
   g_running = true;
   status.running = true;
@@ -852,8 +938,13 @@ static int companion_daemon(int argc, FAR char *argv[])
 
       g_tx_stop = false;
       g_tx_last_sample = 0;
+      comp_speed_reset(&g_speed);
+      g_speed_last_stamp = 0;
       tx_args.fd = fd;
       tx_args.est_sub = est_sub;
+      tx_args.gyro_sub = gyro_sub;
+      tx_args.accel_sub = accel_sub;
+      tx_args.vesc_sub = vesc_sub;
       tx_args.status = &status;
       tx_running = pthread_create(&tx_thread, NULL, comp_tx_thread,
                                   &tx_args) == 0;
@@ -917,6 +1008,21 @@ out:
   if (est_sub >= 0)
     {
       orb_unsubscribe(est_sub);
+    }
+
+  if (gyro_sub >= 0)
+    {
+      orb_unsubscribe(gyro_sub);
+    }
+
+  if (accel_sub >= 0)
+    {
+      orb_unsubscribe(accel_sub);
+    }
+
+  if (vesc_sub >= 0)
+    {
+      orb_unsubscribe(vesc_sub);
     }
 
   if (pose_pub >= 0)
