@@ -477,9 +477,35 @@ static void test_vesc_parameters(void)
       return;
     }
 
-  if (param_get_i32("VESC_EN", &v) < 0 || v != 0)
+  /* VESC_EN now defaults ON, which it did not when this link was new.
+   *
+   * What makes that safe is not the flag but the two properties below, so
+   * they are what gets asserted rather than the flag alone.
+   */
+
+  if (param_get_i32("VESC_EN", &v) < 0 || v != 1)
     {
-      fail("VESC_EN does not default to off");
+      fail("VESC_EN does not default to on");
+    }
+
+  /* Transmit is suppressed entirely while VESC_CAN_ID is 0, so a board that
+   * boots with the link up and no node id configured commands nothing. If
+   * this ever defaults to a real id, starting at boot starts commanding.
+   */
+
+  if (param_get_i32("VESC_CAN_ID", &v) < 0 || v != 0)
+    {
+      fail("VESC_CAN_ID must default to 0 or boot-start begins commanding");
+    }
+
+  /* The telemetry watchdog must be armed by default. Zero disables it, and a
+   * vehicle that boots armed-capable with no watchdog is the combination
+   * worth refusing to ship.
+   */
+
+  if (param_get_i32("VESC_TLM_TO_MS", &v) < 0 || v <= 0 || v > 500)
+    {
+      fail("VESC_TLM_TO_MS must default to a live, short timeout");
     }
 
   if (param_get_i32("VESC_CAN_ID", &v) < 0 || v != 0)

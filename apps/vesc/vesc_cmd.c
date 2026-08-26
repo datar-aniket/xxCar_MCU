@@ -167,6 +167,27 @@ bool vesc_cmd_may_arm(bool have_setpoint, float motor,
   return fabsf(motor) <= VESC_CMD_ZERO_EPS;
 }
 
+bool vesc_cmd_telemetry_lost(uint64_t last_tlm_us, uint64_t now_us,
+                             uint32_t timeout_ms)
+{
+  if (timeout_ms == 0 || last_tlm_us == 0)
+    {
+      return false;
+    }
+
+  /* A timestamp in the future is a clock problem, not a drop-out. Reporting
+   * it as lost would disarm the vehicle for something that is not a comms
+   * failure at all.
+   */
+
+  if (now_us <= last_tlm_us)
+    {
+      return false;
+    }
+
+  return now_us - last_tlm_us > (uint64_t)timeout_ms * 1000ull;
+}
+
 FAR const char *vesc_cmd_reason_name(uint8_t reason)
 {
   switch (reason)

@@ -102,6 +102,11 @@
 #  include "../../../apps/control_router/control_router.h"
 #endif
 
+#ifdef CONFIG_XXCAR_SENSORS
+#  include "../../../apps/sensors/sensors.h"
+#  include "../../../apps/sensors/aux.h"
+#endif
+
 #ifdef CONFIG_XXCAR_IMU_DELTA
 #  include "../../../apps/imu_delta/imu_delta.h"
 #endif
@@ -1009,25 +1014,71 @@ int stm32_bringup(void)
    * above and EKF3 treats absent or invalid external localization as no aiding.
    */
 
-#ifdef CONFIG_XXCAR_IMU_DELTA
-  if (imu_delta_start() < 0)
-    {
-      syslog(LOG_ERR, "[imu-delta] boot start failed\n");
-      fmuv6c_boot_optional_failure(&boot);
-    }
-  else
-    {
-      syslog(LOG_INFO, "[imu-delta] started at boot\n");
+  /* The sensor daemons.
+   *
+   * Nothing started these at boot until now, and the gap was easy to miss:
+   * imu_delta reads the NuttX driver topics directly, so the estimator's
+   * attitude worked, while vehicle_mag, vehicle_baro, vehicle_accel and
+   * vehicle_gyro simply never existed. That cost EKF3 its height and heading
+   * aiding, and left the companion's VEHICLE_STATE reporting gyro and accel
+   * permanently absent.
+   */
 
-#ifdef CONFIG_XXCAR_EKF3
-      if (ekf3_start() < 0)
+#ifdef CONFIG_XXCAR_SENSORS
+  if (param_i32("SENS_EN") != 0)
+    {
+      if (sensors_start() < 0)
         {
-          syslog(LOG_ERR, "[ekf3] boot start failed\n");
+          syslog(LOG_ERR, "[sensors] boot start failed\n");
           fmuv6c_boot_optional_failure(&boot);
         }
       else
         {
-          syslog(LOG_INFO, "[ekf3] started at boot\n");
+          syslog(LOG_INFO, "[sensors] started at boot\n");
+        }
+    }
+
+  if (param_i32("SENS_AUX_EN") != 0)
+    {
+      if (sensors_aux_start() < 0)
+        {
+          syslog(LOG_ERR, "[sensors] aux boot start failed\n");
+          fmuv6c_boot_optional_failure(&boot);
+        }
+      else
+        {
+          syslog(LOG_INFO, "[sensors] aux started at boot\n");
+        }
+    }
+#endif
+
+#ifdef CONFIG_XXCAR_IMU_DELTA
+  if (param_i32("IMU_DELTA_EN") != 0 && imu_delta_start() < 0)
+    {
+      syslog(LOG_ERR, "[imu-delta] boot start failed\n");
+      fmuv6c_boot_optional_failure(&boot);
+    }
+  else if (param_i32("IMU_DELTA_EN") != 0)
+    {
+      syslog(LOG_INFO, "[imu-delta] started at boot\n");
+
+#ifdef CONFIG_XXCAR_EKF3
+      /* Still nested: ekf3 consumes vehicle_imu, so starting it when
+       * imu_delta did not come up would leave it waiting on a topic that
+       * will never exist.
+       */
+
+      if (param_i32("EKF3_EN") != 0)
+        {
+          if (ekf3_start() < 0)
+            {
+              syslog(LOG_ERR, "[ekf3] boot start failed\n");
+              fmuv6c_boot_optional_failure(&boot);
+            }
+          else
+            {
+              syslog(LOG_INFO, "[ekf3] started at boot\n");
+            }
         }
 #endif
     }

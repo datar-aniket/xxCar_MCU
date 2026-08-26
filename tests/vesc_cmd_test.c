@@ -270,6 +270,36 @@ static void test_may_arm(void)
   assert(!vesc_cmd_may_arm(true, NAN, 0, 200));         /* not trustworthy */
 }
 
+/* The telemetry watchdog. It disarms the vehicle, so every edge matters. */
+
+static void test_telemetry_lost(void)
+{
+  const uint64_t last = 1000000;
+
+  /* Inside the window is fine, one microsecond past it is not. */
+
+  assert(!vesc_cmd_telemetry_lost(last, last + 100000, 100));
+  assert(vesc_cmd_telemetry_lost(last, last + 100000 + 1, 100));
+
+  /* A timeout of zero disables the check entirely. */
+
+  assert(!vesc_cmd_telemetry_lost(last, last + 10000000, 0));
+
+  /* Nothing has ever arrived: that is start-up, not a drop-out. Disarming
+   * here would mean a board that can never be armed before the first frame.
+   */
+
+  assert(!vesc_cmd_telemetry_lost(0, 10000000, 100));
+
+  /* A timestamp at or ahead of now is a clock problem, not a comms failure.
+   * Unsigned subtraction would otherwise underflow to something enormous and
+   * disarm the vehicle for it.
+   */
+
+  assert(!vesc_cmd_telemetry_lost(last, last, 100));
+  assert(!vesc_cmd_telemetry_lost(last, last - 500000, 100));
+}
+
 static void test_reason_names(void)
 {
   int i;
@@ -296,6 +326,7 @@ int main(void)
   test_steering_reversed();
   test_non_finite_is_neutral();
   test_may_arm();
+  test_telemetry_lost();
   test_reason_names();
 
   printf("vesc_cmd: arm gate, failsafe, clamping and steering map - OK\n");

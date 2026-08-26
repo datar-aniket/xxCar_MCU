@@ -62,6 +62,14 @@ struct vesc_daemon_status_s
   uint32_t tx_errors;                   /* driver refused the frame */
   uint32_t tx_clamped;                  /* setpoint was out of range */
   uint32_t reason_count[VESC_CMD_NREASON];
+
+  /* Telemetry watchdog. A VESC that has stopped reporting is one whose state
+   * we cannot see, and commanding a motor blind is what this prevents.
+   */
+
+  uint32_t tlm_timeout_ms;
+  uint32_t tlm_disarms;         /* times the watchdog disarmed the vehicle */
+  bool     tlm_lost;            /* telemetry currently absent */
   uint8_t  last_reason;
   float    last_motor;                  /* what actually went out */
   uint16_t last_servo_us;

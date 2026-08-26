@@ -415,6 +415,29 @@ static const struct param_def_s g_params[] =
 
   { "EXT_TX_RATE", PARAM_TYPE_INT32, I32(200), I32(16), I32(1000),
     "Companion pose transmit rate (Hz)" },
+  /* ---- What starts at boot --------------------------------------------
+   *
+   * Every one of these is an OPTIONAL boot failure: a subsystem that will
+   * not start is a serious problem, but wedging the boot is a worse one -
+   * the board must still reach a shell, which is where it gets diagnosed.
+   *
+   * SENS_EN and SENS_AUX_EN were the gap. Nothing started either daemon at
+   * boot, so a freshly booted board published no vehicle_accel, vehicle_gyro,
+   * vehicle_mag or vehicle_baro at all - the estimator ran on the IMU alone
+   * and the companion's VEHICLE_STATE reported gyro and accel permanently
+   * absent. imu_delta was unaffected because it reads the NuttX driver
+   * topics directly, which is why this stayed hidden.
+   */
+
+  { "SENS_EN", PARAM_TYPE_INT32, I32(1), I32(0), I32(1),
+    "Start the IMU sensor daemon at boot" },
+  { "SENS_AUX_EN", PARAM_TYPE_INT32, I32(1), I32(0), I32(1),
+    "Start the magnetometer and barometer daemon at boot" },
+  { "IMU_DELTA_EN", PARAM_TYPE_INT32, I32(1), I32(0), I32(1),
+    "Start the IMU delta integrator at boot" },
+  { "EKF3_EN", PARAM_TYPE_INT32, I32(1), I32(0), I32(1),
+    "Start the estimator at boot" },
+
   { "COMP_EN", PARAM_TYPE_INT32, I32(1), I32(0), I32(1),
     "Start the companion serial link at boot" },
   { "PPS_EN", PARAM_TYPE_INT32, I32(1), I32(0), I32(1),
@@ -440,7 +463,7 @@ static const struct param_def_s g_params[] =
    * work away.
    */
 
-  { "VESC_EN", PARAM_TYPE_INT32, I32(0), I32(0), I32(1),
+  { "VESC_EN", PARAM_TYPE_INT32, I32(1), I32(0), I32(1),
     "Start the VESC CAN link at boot" },
   { "VESC_CAN_ID", PARAM_TYPE_INT32, I32(0), I32(0), I32(255),
     "VESC controller id to accept (0 = any)" },
@@ -511,6 +534,21 @@ static const struct param_def_s g_params[] =
     "Expected STATUS_5 telemetry rate (Hz)" },
   { "VESC_SPD_LPF", PARAM_TYPE_FLOAT, F32(100.0f), F32(0.0f), F32(500.0f),
     "Motor speed low-pass cutoff (Hz, 0 = off)" },
+
+  /* Telemetry drop-out before the vehicle is disarmed.
+   *
+   * A VESC that has stopped reporting is a VESC we cannot see the state of,
+   * and continuing to command a motor blind is the failure this prevents.
+   * 100 ms is 40 missed frames at the stock 400 Hz - long enough that
+   * ordinary bus contention cannot trip it, short enough to matter.
+   *
+   * This is SEPARATE from VESC_CMD_TO_MS, which is about commands going
+   * stale on the way OUT. This one is about telemetry stopping on the way
+   * IN, and it disarms rather than merely commanding neutral.
+   */
+
+  { "VESC_TLM_TO_MS", PARAM_TYPE_INT32, I32(100), I32(0), I32(5000),
+    "Telemetry dropout before disarm (ms, 0 = never)" },
 
   /* ---- Logging (on request only; these choose WHAT gets logged) ---------- */
 

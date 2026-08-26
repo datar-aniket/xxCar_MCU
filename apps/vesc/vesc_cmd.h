@@ -95,6 +95,16 @@ void vesc_cmd_resolve(bool armed, bool have_setpoint,
 bool vesc_cmd_may_arm(bool have_setpoint, float motor,
                       uint64_t age_us, uint32_t timeout_ms);
 
+/* Has telemetry stopped?
+ *
+ * A timeout of zero disables the check. A last_tlm_us of zero means nothing
+ * has EVER arrived, which is start-up rather than a drop-out - the daemon
+ * has no business disarming something it never saw working.
+ */
+
+bool vesc_cmd_telemetry_lost(uint64_t last_tlm_us, uint64_t now_us,
+                             uint32_t timeout_ms);
+
 FAR const char *vesc_cmd_reason_name(uint8_t reason);
 
 #endif /* __APPS_VESC_VESC_CMD_H */

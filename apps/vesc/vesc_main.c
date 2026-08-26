@@ -42,6 +42,7 @@ static void usage(void)
          "  VESC_CAN_ID     0 accepts any controller id (discovery)\n"
          "  VESC_BITRATE    bus bitrate; only 1000000 is implemented\n"
          "  VESC_EN         start at boot\n"
+         "  VESC_TLM_TO_MS  telemetry dropout before disarm\n"
          "  VESC_TX_RATE    command frame rate, Hz\n"
          "  VESC_CMD_TO_MS  setpoint age before failsafe neutral\n"
          "  VESC_CUR_MAX    current ceiling, A\n"
@@ -131,6 +132,11 @@ static void print_status(void)
   printf("  tx      fifo_full %" PRIu32 "  last %s  motor %.3f  servo %u us"
          "\n", s.bus.tx_full, vesc_cmd_reason_name(s.last_reason),
          (double)s.last_motor, (unsigned)s.last_servo_us);
+
+  printf("  telemetry %s  timeout %" PRIu32 " ms  watchdog disarms %"
+         PRIu32 "%s\n",
+         s.tlm_lost ? "LOST" : "ok", s.tlm_timeout_ms, s.tlm_disarms,
+         s.tlm_timeout_ms == 0 ? "   (watchdog DISABLED)" : "");
 
   printf("  reasons armed %" PRIu32 "  disarmed %" PRIu32
          "  no-setpoint %" PRIu32 "  stale %" PRIu32 "  bad-mode %" PRIu32
@@ -300,6 +306,14 @@ int main(int argc, FAR char *argv[])
       if (ret == -ESRCH)
         {
           printf("vesc: not running\n");
+          return EXIT_FAILURE;
+        }
+
+      if (ret == -ENOLINK)
+        {
+          printf("vesc: refused - telemetry is not arriving. The watchdog\n"
+                 "      disarms on this, so arming through it would make the"
+                 " watchdog\n      a suggestion. Check the CAN link.\n");
           return EXIT_FAILURE;
         }
 

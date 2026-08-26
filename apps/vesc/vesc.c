@@ -68,6 +68,13 @@ static volatile bool g_armed;
  */
 
 static uint32_t g_cmd_timeout_ms;
+
+/* Board time of the last decoded STATUS_5, and the watchdog that acts on its
+ * absence. Written by the daemon thread only.
+ */
+
+static uint64_t g_last_tlm_us;
+static volatile bool g_tlm_lost;
 static struct vesc_daemon_status_s g_status;
 
 /* Every decoded STATUS_5 reaches this, at the full 400 Hz - which is the
@@ -261,6 +268,50 @@ static void vesc_take_setpoints(int sub, FAR struct vesc_daemon_status_s *s)
     }
 }
 
+/* Disarm when telemetry stops.
+ *
+ * Checked on the LOOP, not on message arrival - the trigger is an absence,
+ * and nothing arrives to notice it. This is deliberately stronger than the
+ * command failsafe: a stale setpoint means we stop commanding and hold
+ * neutral, but silent telemetry means we cannot see what the motor is doing
+ * at all, and staying armed through that is the thing worth refusing.
+ *
+ * It never re-arms itself. Coming back from a comms failure is a decision
+ * for whoever is standing next to the vehicle.
+ */
+
+static void vesc_telemetry_watchdog(FAR struct vesc_daemon_status_s *s)
+{
+  bool lost = vesc_cmd_telemetry_lost(g_last_tlm_us, vesc_now_us(),
+                                      s->tlm_timeout_ms);
+
+  s->tlm_lost = lost;
+
+  if (!lost)
+    {
+      g_tlm_lost = false;
+      return;
+    }
+
+  if (!g_tlm_lost)
+    {
+      g_tlm_lost = true;
+
+      if (g_armed)
+        {
+          g_armed = false;
+          s->tlm_disarms++;
+          syslog(LOG_ERR, "[vesc] telemetry lost for more than %" PRIu32
+                 " ms - DISARMED\n", s->tlm_timeout_ms);
+        }
+      else
+        {
+          syslog(LOG_WARNING, "[vesc] telemetry lost for more than %" PRIu32
+                 " ms\n", s->tlm_timeout_ms);
+        }
+    }
+}
+
 static void vesc_transmit(FAR struct vesc_daemon_status_s *s)
 {
   struct vesc_cmd_out_s cmd;
@@ -341,6 +392,7 @@ static int vesc_daemon(int argc, FAR char *argv[])
   status.bitrate = (uint32_t)param_i32("VESC_BITRATE");
   status.filter_id = (uint8_t)param_i32("VESC_CAN_ID");
   status.tx_rate = (uint32_t)param_i32("VESC_TX_RATE");
+  status.tlm_timeout_ms = (uint32_t)param_i32("VESC_TLM_TO_MS");
   status.cmd_timeout_ms = (uint32_t)param_i32("VESC_CMD_TO_MS");
   g_cmd_timeout_ms = status.cmd_timeout_ms;
   status.limits.cur_max = param_f32("VESC_CUR_MAX");
@@ -417,6 +469,7 @@ static int vesc_daemon(int argc, FAR char *argv[])
           vesc_handle(&frame, pub, &status);
         }
 
+      vesc_telemetry_watchdog(&status);
       vesc_take_setpoints(sub, &status);
 
       /* Transmit only once the controller id is known. VESC_CAN_ID at 0 is
@@ -504,6 +557,8 @@ int vesc_start(void)
 
   g_should_stop = false;
   g_armed = false;
+  g_last_tlm_us = 0;
+  g_tlm_lost = false;
   memset(&g_setpoint, 0, sizeof(g_setpoint));
   task = task_create("vesc", VESC_PRIORITY, VESC_STACK, vesc_daemon, NULL);
 
@@ -557,6 +612,16 @@ int vesc_arm(bool armed)
 
       g_armed = false;
       return 0;
+    }
+
+  /* Refuse to arm into a link that is not reporting. This is the same
+   * condition the watchdog disarms on, and allowing it back in through the
+   * arm command would make the watchdog a suggestion.
+   */
+
+  if (g_tlm_lost)
+    {
+      return -ENOLINK;
     }
 
   now = vesc_now_us();
