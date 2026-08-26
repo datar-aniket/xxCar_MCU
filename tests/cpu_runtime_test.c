@@ -10,18 +10,16 @@
 
 #include "cpu_runtime.h"
 
-static void test_accumulation_and_wrap(void)
-{
-  struct cpu_runtime_counter_s counter = {0};
-
-  assert(cpu_runtime_update(&counter, 100) == 0);
-  assert(cpu_runtime_update(&counter, 160) == 60);
-  assert(counter.cycles == 60);
-
-  counter.previous = UINT32_MAX - 9;
-  assert(cpu_runtime_update(&counter, 20) == 30);
-  assert(counter.cycles == 90);
-}
+/* The counter accumulation and 32-bit DWT wrap that used to be tested here
+ * moved into cpu_audit.c when CPU load switched to hardware cycles
+ * (9fd5a1c). It still exists - see the unsigned subtraction at
+ * cpu_audit.c:164 - but it is now coupled to the snapshot and entry structs
+ * and is NOT covered by any host test. This file stopped compiling at that
+ * commit and the failure went unnoticed because it looked like an
+ * environment problem rather than a stale test.
+ *
+ * Left as a note rather than a deleted function so the gap is visible.
+ */
 
 static void test_conversions(void)
 {
@@ -35,7 +33,6 @@ static void test_conversions(void)
 
 int main(void)
 {
-  test_accumulation_and_wrap();
   test_conversions();
   puts("cpu_runtime_test: PASS");
   return 0;
