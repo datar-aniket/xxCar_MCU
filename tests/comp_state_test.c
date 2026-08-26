@@ -215,7 +215,7 @@ static void test_speed_first_reading_is_zero(void)
 {
   struct comp_speed_filter_s f;
 
-  comp_speed_reset(&f);
+  comp_speed_init(&f, 10.0f);
 
   /* The first sample only establishes a reference. Emitting a rate would
    * divide the whole accumulated count by the time since boot.
@@ -236,10 +236,10 @@ static void test_speed_converges(void)
   float v = 0.0f;
   int i;
 
-  comp_speed_reset(&f);
+  comp_speed_init(&f, 10.0f);
   comp_speed_update(&f, tach, t);
 
-  for (i = 0; i < 200; i++)
+  for (i = 0; i < 400; i++)
     {
       t += 50000;           /* 20 Hz */
       tach += 50;           /* 50 counts per 50 ms = 1000 /s */
@@ -257,10 +257,10 @@ static void test_speed_sign(void)
   float v = 0.0f;
   int i;
 
-  comp_speed_reset(&f);
+  comp_speed_init(&f, 10.0f);
   comp_speed_update(&f, tach, t);
 
-  for (i = 0; i < 200; i++)
+  for (i = 0; i < 400; i++)
     {
       t += 50000;
       tach -= 50;
@@ -282,14 +282,14 @@ static void test_speed_wraps(void)
   uint64_t t = 1000000;
   float v;
 
-  comp_speed_reset(&f);
+  comp_speed_init(&f, 10.0f);
   comp_speed_update(&f, INT32_MAX - 10, t);
 
   t += 50000;
   v = comp_speed_update(&f, INT32_MIN + 10, t);
 
-  /* 21 counts forward across the wrap over 50 ms is 420 counts/s raw. One
-   * filter step at dt == tau has alpha 0.5, so the output is 210.
+  /* 21 counts forward across the wrap over 50 ms is 420 counts/s raw, then
+   * two filter sections attenuate it.
    *
    * What the test is really for is the sign and the ORDER: taking the signed
    * difference of the raw values here gives about -4.3 billion, so anything
@@ -297,19 +297,104 @@ static void test_speed_wraps(void)
    */
 
   assert(v > 0.0f);
-  assert(CLOSE(v, 210.0f));
+  assert(v < 420.0f);
 }
 
-/* A long gap means the count can no longer be related to the previous one.
- * Carrying on would emit one enormous spike.
+/* The rolloff must be TWO poles, not one.
+ *
+ * A step is what separates them. At a 10 Hz cutoff and 50 Hz arrivals,
+ * alpha = dt/(tau+dt) = 0.5569, so one section passes 557 of a 1000 step on
+ * the first sample and two sections pass alpha^2 = 310.
  */
+
+static void test_speed_is_two_pole(void)
+{
+  struct comp_speed_filter_s f;
+  uint64_t t = 1000000;
+  float first;
+
+  comp_speed_init(&f, 10.0f);
+  comp_speed_update(&f, 0, t);
+
+  t += 20000;                            /* 50 Hz */
+  first = comp_speed_update(&f, 20, t);  /* a 1000 counts/s step */
+
+  assert(first > 250.0f);
+  assert(first < 400.0f);                /* one pole would give 557 */
+}
+
+/* A cutoff above what the arrival rate can support must be clamped.
+ *
+ * NOT because the filter would go unstable - alpha = dt/(tau+dt) is below 1
+ * for any cutoff, so it cannot - but because it stops filtering: at 100 Hz
+ * against 20 Hz arrivals alpha reaches 0.969 and 939 of a 1000 step passes
+ * straight through on the first sample. Clamped to 0.4*fs = 8 Hz, alpha is
+ * 0.715 and the step is held to 512.
+ */
+
+static void test_speed_clamps_cutoff(void)
+{
+  struct comp_speed_filter_s f;
+  uint64_t t = 1000000;
+  float first;
+
+  comp_speed_init(&f, 100.0f);           /* impossible at 20 Hz */
+  comp_speed_update(&f, 0, t);
+
+  t += 50000;                            /* 20 Hz */
+  first = comp_speed_update(&f, 50, t);  /* a 1000 counts/s step */
+
+  assert(first < 700.0f);                /* unclamped would give 939 */
+  assert(first > 350.0f);
+}
+
+/* A zero cutoff means "no filtering" and must pass the raw rate straight
+ * through, not silently apply some default.
+ */
+
+static void test_speed_cutoff_zero_passes_through(void)
+{
+  struct comp_speed_filter_s f;
+  uint64_t t = 1000000;
+  float v;
+
+  comp_speed_init(&f, 0.0f);
+  comp_speed_update(&f, 0, t);
+
+  t += 50000;
+  v = comp_speed_update(&f, 50, t);
+
+  assert(CLOSE(v, 1000.0f));
+}
+
+/* The observed arrival rate is reported so a clamped cutoff is visible. */
+
+static void test_speed_reports_rate(void)
+{
+  struct comp_speed_filter_s f;
+  int32_t tach = 0;
+  uint64_t t = 1000000;
+  int i;
+
+  comp_speed_init(&f, 10.0f);
+  comp_speed_update(&f, tach, t);
+
+  for (i = 0; i < 200; i++)
+    {
+      t += 20000;                        /* 50 Hz */
+      tach += 20;
+      comp_speed_update(&f, tach, t);
+    }
+
+  assert(fabsf(f.rate_hz - 50.0f) < 1.0f);
+}
 
 static void test_speed_restarts_after_gap(void)
 {
   struct comp_speed_filter_s f;
   uint64_t t = 1000000;
 
-  comp_speed_reset(&f);
+  comp_speed_init(&f, 10.0f);
   comp_speed_update(&f, 0, t);
 
   t += COMP_SPEED_MAX_GAP_US + 1;
@@ -320,7 +405,7 @@ static void test_speed_rejects_backwards_time(void)
 {
   struct comp_speed_filter_s f;
 
-  comp_speed_reset(&f);
+  comp_speed_init(&f, 10.0f);
   comp_speed_update(&f, 0, 2000000);
 
   /* Same timestamp would divide by zero; an earlier one is nonsense. */
@@ -339,6 +424,105 @@ static void test_build_side_slip_is_nan(void)
   memset(&in, 0, sizeof(in));
   comp_state_build(&in, 123, &out);
 
+  assert(isnan(out.side_slip_rad));
+}
+
+/* Travelling straight ahead is ZERO slip - and that is exactly why the
+ * absent case has to be NaN, since the two are otherwise identical.
+ */
+
+static void test_side_slip_straight_ahead(void)
+{
+  struct comp_state_inputs_s in;
+  struct comp_vehicle_state_s out;
+
+  memset(&in, 0, sizeof(in));
+  in.est_valid = true;
+  quat_yaw(0.0f, in.quaternion);
+  in.velocity_enu[0] = 5.0f;            /* east, and pointing east */
+
+  comp_state_build(&in, 0, &out);
+
+  assert(!isnan(out.side_slip_rad));
+  assert(CLOSE(out.side_slip_rad, 0.0f));
+}
+
+/* Sliding to the LEFT of the nose is positive, matching body y and ISO 8855.
+ *
+ * Pointing east, moving 45 degrees north of east: the velocity is to the
+ * vehicle's left, so slip is +45 degrees.
+ */
+
+static void test_side_slip_sign_is_left_positive(void)
+{
+  struct comp_state_inputs_s in;
+  struct comp_vehicle_state_s out;
+
+  memset(&in, 0, sizeof(in));
+  in.est_valid = true;
+  quat_yaw(0.0f, in.quaternion);
+  in.velocity_enu[0] = 5.0f;
+  in.velocity_enu[1] = 5.0f;
+
+  comp_state_build(&in, 0, &out);
+  assert(CLOSE(out.side_slip_rad, COMP_PI / 4.0f));
+
+  /* Mirror it: to the right must be negative. */
+
+  in.velocity_enu[1] = -5.0f;
+  comp_state_build(&in, 0, &out);
+  assert(CLOSE(out.side_slip_rad, -COMP_PI / 4.0f));
+}
+
+/* It is the angle between travel and HEADING, so rotating the vehicle and
+ * its velocity together must leave the slip unchanged.
+ */
+
+static void test_side_slip_is_heading_invariant(void)
+{
+  int i;
+
+  for (i = 0; i < 8; i++)
+    {
+      struct comp_state_inputs_s in;
+      struct comp_vehicle_state_s out;
+      float yaw = (float)i * COMP_PI / 4.0f;
+      float travel = yaw + COMP_PI / 6.0f;   /* 30 deg to the left */
+
+      memset(&in, 0, sizeof(in));
+      in.est_valid = true;
+      quat_yaw(yaw, in.quaternion);
+      in.velocity_enu[0] = 4.0f * cosf(travel);
+      in.velocity_enu[1] = 4.0f * sinf(travel);
+
+      comp_state_build(&in, 0, &out);
+      assert(CLOSE(out.side_slip_rad, COMP_PI / 6.0f));
+    }
+}
+
+/* At rest the direction of travel is noise, so slip must stay NaN rather
+ * than reporting whatever atan2 makes of two tiny numbers.
+ */
+
+static void test_side_slip_nan_at_rest(void)
+{
+  struct comp_state_inputs_s in;
+  struct comp_vehicle_state_s out;
+
+  memset(&in, 0, sizeof(in));
+  in.est_valid = true;
+  quat_yaw(0.0f, in.quaternion);
+  in.velocity_enu[0] = 0.01f;
+  in.velocity_enu[1] = 0.01f;
+
+  comp_state_build(&in, 0, &out);
+  assert(isnan(out.side_slip_rad));
+
+  /* Vertical motion alone is not side slip either. */
+
+  memset(&in.velocity_enu, 0, sizeof(in.velocity_enu));
+  in.velocity_enu[2] = 5.0f;
+  comp_state_build(&in, 0, &out);
   assert(isnan(out.side_slip_rad));
 }
 
@@ -441,7 +625,15 @@ int main(void)
   test_speed_wraps();
   test_speed_restarts_after_gap();
   test_speed_rejects_backwards_time();
+  test_speed_is_two_pole();
+  test_speed_clamps_cutoff();
+  test_speed_cutoff_zero_passes_through();
+  test_speed_reports_rate();
   test_build_side_slip_is_nan();
+  test_side_slip_straight_ahead();
+  test_side_slip_sign_is_left_positive();
+  test_side_slip_is_heading_invariant();
+  test_side_slip_nan_at_rest();
   test_build_reports_missing_sources();
   test_build_accel_needs_attitude();
   test_build_scalars();

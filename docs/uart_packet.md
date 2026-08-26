@@ -231,7 +231,7 @@ hardware timer.
 | 20 | `float32[4]` | `quaternion` | body→ENU | w, x, y, z |
 | 36 | `float32[3]` | `velocity` | **body FLU** | m/s |
 | 48 | `float32[3]` | `angular_velocity` | body FLU | rad/s |
-| 60 | `float32` | `side_slip_rad` | — | rad, **NaN for now** |
+| 60 | `float32` | `side_slip_rad` | body FLU | rad, NaN below 0.3 m/s |
 | 64 | `float32[3]` | `accel` | body FLU | m/s², gravity removed |
 | 76 | `float32` | `wheel_torque_nm` | — | Nm |
 | 80 | `float32` | `steering_angle` | — | scaled ADC |
@@ -258,12 +258,19 @@ zero yaw the two are identical.
 
 ### side_slip_rad
 
-The angle between the velocity vector and the vehicle's heading. **NaN**
-until the estimator carries it as a state.
+The angle between where the vehicle is **going** and where it is **pointing**,
+computed from the body velocity already in this packet as
+`atan2(velocity[1], velocity[0])` — body x is the heading and body y is left,
+so the comparison needs no separate yaw term.
 
-Deliberately NaN and not zero. Zero is a perfectly good slip angle — it means
-"travelling straight ahead" — and a consumer cannot tell that apart from "not
-computed". NaN can only mean the latter. Test it with `isnan()` before use.
+Horizontal components only; a climb is not side slip. Left-positive, matching
+body y and ISO 8855, so sliding to the left of the nose gives a positive
+angle.
+
+**NaN below 0.3 m/s.** At rest the direction of travel is noise, and
+reporting whatever `atan2` makes of two near-zero numbers would be worse than
+saying nothing. NaN is also what distinguishes "not computed" from a genuine
+zero, which means "travelling straight ahead" — test with `isnan()`.
 
 ### accel
 
@@ -285,22 +292,58 @@ raw 9.8 m/s² as vehicle acceleration.
 | `wheel_torque_nm` | `vesc_status.current_a` | `VESC_TORQUE_K` | 1.0 |
 | `steering_angle` | `vesc_status.adc_volts` | `VESC_STEER_K` | 1.0 |
 | `motor_speed_ms` | tachometer rate | `VESC_SPEED_K` | 1.0 |
+| (filter cutoff) | — | `VESC_SPD_LPF` | 10 Hz |
 
 All three scalars default to **1.0**, so until the vehicle is characterised
 these carry raw amps, raw volts and raw counts per second. That is
 deliberate: a guessed gear ratio is worse than an honest raw number, because
 it looks calibrated.
 
-`motor_speed_ms` is the time derivative of the tachometer, low-pass filtered
-with a 50 ms time constant. It is differentiated **when a `STATUS_5` frame
-arrives**, not on the downlink tick — VESC telemetry comes in at tens of
-hertz against a 200 Hz downlink, so differentiating per tick would sample an
-unchanged count most of the time and produce zeros punctuated by spikes.
+`motor_speed_ms` is the time derivative of the tachometer, differentiated
+**when a `STATUS_5` frame arrives** and not on the downlink tick — VESC
+telemetry comes in at tens of hertz against a 200 Hz downlink, so
+differentiating per tick would sample an unchanged count most of the time and
+produce zeros punctuated by spikes.
+
+It is then low-passed by two cascaded one-pole sections (−40 dB/decade) with
+cutoff `VESC_SPD_LPF`, default 10 Hz. The sections recompute their
+coefficient from each measured interval rather than being designed for a
+fixed rate, because CAN telemetry does not arrive on one — a biquad built for
+50 Hz and fed at 43 Hz has neither the cutoff nor the damping it was designed
+for.
+
+The requested cutoff is **clamped at runtime to 40% of the measured arrival
+rate**. A cutoff at or above Nyquist is not a filter: at 100 Hz against 20 Hz
+arrivals the coefficient reaches 0.97 and 94% of a step passes straight
+through. Asking for more than the data rate supports is therefore harmless
+rather than silently ineffective.
+
+> **What this cannot do.** The VESC samples the tachometer at its own rate,
+> so any wheel content above that Nyquist has *already* folded down before
+> the count reaches us. No filter on this side can undo it; that would have
+> to happen inside the VESC.
+>
+> Note also that the 200 Hz downlink cannot itself alias this. Holding a
+> slower signal at a faster rate produces images, not aliases, and the output
+> can carry no content above the VESC Nyquist regardless.
 
 The tachometer is a 32-bit accumulator and it does wrap; the difference is
 taken in unsigned arithmetic so the wrap is a small step rather than a
 4.3-billion-count spike. After a gap of more than 500 ms the filter restarts
 instead of emitting one enormous value.
+
+### A note on angular_velocity
+
+`SENS_GYR_LPF` defaults to **0.0, which means the software low-pass is off**.
+So this field carries the gyro with only the ICM42688's hardware anti-alias
+filter applied, not a software-filtered signal. Set `SENS_GYR_LPF` if you
+want one — but note it feeds the estimator too, so it is not a
+downlink-only choice.
+
+`SENS_ACC_LPF` does default to 100 Hz, so `accel` is filtered. Both are
+sampled at 2 kHz and delivered here at 200 Hz, and a 100 Hz cutoff sits
+exactly at the 200 Hz Nyquist — it is −3 dB where it would need to be
+stopping things.
 
 ### source_valid
 

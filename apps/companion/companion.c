@@ -810,6 +810,7 @@ static int companion_daemon(int argc, FAR char *argv[])
   g_torque_k = param_f32("VESC_TORQUE_K");
   g_steer_k = param_f32("VESC_STEER_K");
   g_speed_k = param_f32("VESC_SPEED_K");
+  comp_speed_init(&g_speed, param_f32("VESC_SPD_LPF"));
 
   /* The tick is the downlink's clock from here on. Failing to start it is
    * fatal to this daemon rather than a quiet fall back to some other

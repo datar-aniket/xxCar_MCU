@@ -494,6 +494,21 @@ static const struct param_def_s g_params[] =
   { "VESC_SPEED_K", PARAM_TYPE_FLOAT, F32(1.0f), F32(-1000.0f), F32(1000.0f),
     "Tachometer rate to ground speed (m/s per count/s)" },
 
+  /* Cutoff for the two-pole filter on the differentiated tachometer.
+   *
+   * 10 Hz because STATUS_5 arrives at tens of hertz and a cutoff has to sit
+   * well below that Nyquist to be a filter at all. Asking for more is
+   * clamped at runtime against the MEASURED arrival rate rather than
+   * accepted and quietly ignored. Zero disables filtering entirely.
+   *
+   * This cannot undo aliasing: the VESC samples the tachometer at its own
+   * rate, so wheel content above that has already folded down before the
+   * count reaches us.
+   */
+
+  { "VESC_SPD_LPF", PARAM_TYPE_FLOAT, F32(10.0f), F32(0.0f), F32(200.0f),
+    "Motor speed low-pass cutoff (Hz, 0 = off)" },
+
   /* ---- Logging (on request only; these choose WHAT gets logged) ---------- */
 
   { "LOG_ENABLE", PARAM_TYPE_INT32, I32(0), I32(0), I32(1),

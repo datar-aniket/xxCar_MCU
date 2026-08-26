@@ -26,25 +26,57 @@
 
 #define COMP_STATE_GRAVITY   9.80665f
 
-/* Time constant of the motor-speed low pass, and the longest gap that is
- * still treated as a continuous measurement.
- *
- * The tachometer is an accumulated count arriving in STATUS_5 at tens of
- * hertz. Differentiating it produces a quantised, noisy rate, so it is
- * filtered; and after a long gap - the VESC rebooted, the bus dropped - the
- * count is no longer relatable to the previous one and the filter restarts
- * rather than emitting one enormous spike.
+/* Below this the direction of travel is noise, so side slip is reported as
+ * NaN rather than whatever atan2 makes of two near-zero numbers.
  */
 
-#define COMP_SPEED_TAU_S     0.05f
+#define COMP_SLIP_MIN_SPEED  0.3f
+
+/* Motor-speed filtering.
+ *
+ * The tachometer is an accumulated count arriving in STATUS_5 at the VESC's
+ * own rate - tens of hertz - and the difference of two integers over a short
+ * interval is heavily quantised. So the rate is differentiated on ARRIVAL
+ * and low-passed here.
+ *
+ * TWO cascaded one-pole sections rather than one, for a -40 dB/decade
+ * rolloff instead of -20.
+ *
+ * Not the dsp_biquad3 filters the sensors use: those are designed for a
+ * FIXED sample rate, and CAN telemetry does not arrive on a fixed one. A
+ * biquad designed for 50 Hz and fed at 43 Hz has neither the cutoff nor the
+ * damping it was built for. These sections recompute their coefficient from
+ * the measured interval on every sample instead.
+ *
+ * WHAT THIS CANNOT DO: the tachometer is already sampled by the VESC at the
+ * VESC's rate, so anything on the wheel above that Nyquist has ALREADY
+ * folded down before the count reaches us. No filter on this side can undo
+ * it; that would have to happen inside the VESC.
+ *
+ * What it can do is stop the differentiator's own quantisation noise from
+ * reaching the downlink. Note the 200 Hz downlink cannot itself alias this:
+ * holding a slower signal at a faster rate produces images, not aliases, and
+ * the output can carry no content above the VESC Nyquist regardless.
+ */
+
 #define COMP_SPEED_MAX_GAP_US 500000ull
+
+/* Ceiling on the cutoff as a fraction of the MEASURED arrival rate. Asking
+ * for 100 Hz from a 50 Hz stream is not a filter, it is a pass-through with
+ * extra steps; this makes that impossible rather than merely inadvisable.
+ */
+
+#define COMP_SPEED_MAX_FS_FRACTION 0.4f
 
 struct comp_speed_filter_s
 {
   bool     primed;
   int32_t  last_tach;
   uint64_t last_us;
+  float    cutoff_hz;         /* requested, before the Nyquist clamp */
+  float    stage[2];          /* the two one-pole sections */
   float    value;             /* filtered counts per second */
+  float    rate_hz;           /* observed arrival rate, for diagnosis */
 };
 
 struct comp_state_inputs_s
@@ -72,6 +104,9 @@ struct comp_state_inputs_s
   float    speed_k;
 };
 
+/* cutoff_hz of zero disables the filter and passes the raw rate through. */
+
+void comp_speed_init(FAR struct comp_speed_filter_s *f, float cutoff_hz);
 void comp_speed_reset(FAR struct comp_speed_filter_s *f);
 
 /* Feed one tachometer reading. Returns the filtered rate in counts per
