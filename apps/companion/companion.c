@@ -426,6 +426,12 @@ static void comp_transmit(int fd, int est_sub,
  * whole point: on a removable port a read error is a cable, not a fault.
  */
 
+/* Ceiling on the poll wait. Only reached when nothing is being transmitted;
+ * with a transmit deadline pending the wait is shortened to meet it.
+ */
+
+#define COMP_POLL_MS 20
+
 static bool comp_service(int fd, FAR struct pollfd *pfd, int est_sub,
                          int pose_pub, FAR uint64_t *next_tx,
                          uint64_t tx_interval,
@@ -436,7 +442,43 @@ static bool comp_service(int fd, FAR struct pollfd *pfd, int est_sub,
       uint8_t buf[COMP_READ_MAX];
       uint64_t now;
       ssize_t got;
-      int ready = poll(pfd, 1, 20);
+      int wait_ms = COMP_POLL_MS;
+      int ready;
+
+      /* Bound the wait by the transmit deadline.
+       *
+       * Without this the deadline is only ever examined when poll returns
+       * for its own reasons - a frame arriving from the host, or the 20 ms
+       * timeout - so the board transmits on the HOST's schedule rather than
+       * its own. The pose then arrives a few milliseconds late by an amount
+       * that tracks whatever the companion happens to be sending, which is
+       * exactly the wander that shows up as jitter in "age at arrival".
+       *
+       * Rounded up, because the system tick is 1 ms and a wait that rounds
+       * down to zero turns this loop into a spin.
+       */
+
+      now = comp_now_us();
+
+      if (est_sub >= 0)
+        {
+          if (*next_tx > now)
+            {
+              uint64_t remain = *next_tx - now;
+              int ms = (int)((remain + 999ull) / 1000ull);
+
+              if (ms < wait_ms)
+                {
+                  wait_ms = ms;
+                }
+            }
+          else
+            {
+              wait_ms = 0;
+            }
+        }
+
+      ready = poll(pfd, 1, wait_ms);
 
       if (ready < 0 && errno != EINTR)
         {
