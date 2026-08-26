@@ -1,0 +1,9 @@
+############################################################################
+# apps/pps/Make.defs
+#
+# SPDX-License-Identifier: Apache-2.0
+############################################################################
+
+ifneq ($(CONFIG_XXCAR_PPS),)
+CONFIGURED_APPS += $(APPDIR)/xxcar/pps
+endif

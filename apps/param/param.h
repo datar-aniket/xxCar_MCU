@@ -63,10 +63,8 @@
 
 #define SER_FUNC_CAL      5
 
-/* Reserve the port for the companion computer link. Like SER_FUNC_CAL this
- * starts nothing at boot - `companion start` opens it - and for the same
- * reason: a shell here would sit blocked in read() stealing the link's
- * input.
+/* Reserve the port for the companion computer link. The companion daemon
+ * opens it at boot when COMP_EN is set; a shell must never share the port.
  */
 
 #define SER_FUNC_COMPANION 6

@@ -365,6 +365,46 @@ uint64_t fmuv6c_imu_time_now(void);
 #endif
 
 /****************************************************************************
+ * Name: fmuv6c_pps_*
+ *
+ * Description:
+ *   Capture the companion PPS rising edge on TELEM2 CTS (PC9/TIM3_CH4).
+ *   TIM3 latches the edge at 1 MHz; the ISR maps that latch into the shared
+ *   monotonic IMU time domain.  PPS never changes that clock.
+ ****************************************************************************/
+
+#ifdef CONFIG_XXCAR_PPS
+enum fmuv6c_pps_state_e
+{
+  FMUV6C_PPS_NO_SIGNAL = 0,
+  FMUV6C_PPS_ACQUIRING,
+  FMUV6C_PPS_LOCKED,
+  FMUV6C_PPS_HOLDOVER
+};
+
+struct fmuv6c_pps_status_s
+{
+  bool running;
+  enum fmuv6c_pps_state_e state;
+  uint8_t good_intervals;
+  uint64_t last_edge_us;
+  uint32_t last_period_us;
+  uint32_t min_period_us;
+  uint32_t max_period_us;
+  uint32_t raw_edges;
+  uint32_t accepted_edges;
+  uint32_t glitches;
+  uint32_t bad_periods;
+  uint32_t missed_pulses;
+  uint32_t overcaptures;
+};
+
+int fmuv6c_pps_initialize(void);
+int fmuv6c_pps_uninitialize(void);
+void fmuv6c_pps_status(FAR struct fmuv6c_pps_status_s *status);
+#endif
+
+/****************************************************************************
  * Name: stm32_spidev_initialize
  *
  * Description:

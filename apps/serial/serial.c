@@ -606,10 +606,9 @@ int serial_manager_start(void)
 
           case SER_FUNC_COMPANION:
 
-            /* Deliberately starts nothing, exactly as SER_FUNC_CAL does. The
-             * link needs the port to itself and a shell here would sit
-             * blocked in read() stealing its input. `companion start` opens
-             * it on demand.
+            /* The serial manager only reserves the port. The companion daemon
+             * opens it later in bring-up when COMP_EN is set. A shell here
+             * would sit blocked in read() and steal the link's input.
              */
 
             syslog(LOG_INFO,

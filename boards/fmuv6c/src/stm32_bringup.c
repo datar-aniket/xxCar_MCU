@@ -114,9 +114,18 @@
 #  include "../../../apps/logger/logger.h"
 #endif
 
+#ifdef CONFIG_XXCAR_COMPANION
+#  include "../../../apps/companion/companion.h"
+#endif
+
+#ifdef CONFIG_XXCAR_PPS
+#  include "../../../apps/pps/pps.h"
+#endif
+
 #if defined(CONFIG_XXCAR_SERIAL) || defined(CONFIG_XXCAR_PX4IO) || \
     defined(CONFIG_XXCAR_VESC) || defined(CONFIG_XXCAR_CONTROL_ROUTER) || \
-    defined(CONFIG_XXCAR_LOGGER)
+    defined(CONFIG_XXCAR_LOGGER) || defined(CONFIG_XXCAR_COMPANION) || \
+    defined(CONFIG_XXCAR_PPS)
 #  include "../../../apps/param/param.h"
 #endif
 
@@ -857,6 +866,44 @@ int stm32_bringup(void)
   serial_manager_start();
 #endif
 
+#ifdef CONFIG_XXCAR_PPS
+  /* TIM3 captures the rising edge on TELEM2 CTS in hardware. It is
+   * observe-only in this validation step: PPS loss or reacquisition cannot
+   * step either the monotonic estimator clock or UTC.
+   */
+
+  if (param_i32("PPS_EN") != 0)
+    {
+      ret = pps_start();
+      if (ret < 0 && ret != -EALREADY)
+        {
+          syslog(LOG_ERR, "[pps] boot start failed: %d\n", ret);
+          fmuv6c_boot_optional_failure(&boot);
+        }
+      else
+        {
+          syslog(LOG_INFO,
+                 "[pps] TELEM2 CTS PC9/TIM3_CH4 capture ready\n");
+        }
+    }
+#endif
+
+#ifdef CONFIG_XXCAR_COMPANION
+  if (param_i32("COMP_EN") != 0)
+    {
+      ret = companion_start();
+      if (ret < 0 && ret != -EALREADY)
+        {
+          syslog(LOG_ERR, "[companion] boot start failed: %d\n", ret);
+          fmuv6c_boot_optional_failure(&boot);
+        }
+      else
+        {
+          syslog(LOG_INFO, "[companion] started at boot\n");
+        }
+    }
+#endif
+
 #ifdef CONFIG_XXCAR_PX4IO
   /* The PX4IO co-processor owns the RC IN connector and the PWM rails, and it
    * failsafes those rails if we stop talking to it. Starting the client at boot
@@ -958,9 +1005,8 @@ int stm32_bringup(void)
    * serious problem, but wedging the boot is a worse one - the board must
    * still reach a shell, which is where it can be diagnosed.
    *
-   * Aiding is deliberately NOT started here. `sensors aux` (magnetometer and
-   * barometer) and `companion` stay manual: ekf3 treats their absence as no
-   * aiding rather than as a failure, so it comes up either way.
+   * Sensor aiding remains manual. The companion link starts independently
+   * above and EKF3 treats absent or invalid external localization as no aiding.
    */
 
 #ifdef CONFIG_XXCAR_IMU_DELTA

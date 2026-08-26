@@ -1,0 +1,25 @@
+config XXCAR_PPS
+	tristate "pps: companion pulse-per-second capture"
+	default n
+	depends on SENSORS && SPI
+	select XXCAR_PARAM
+	---help---
+		Captures a 3.3 V PPS rising edge from the Jetson on TELEM2 CTS
+		(PC9/TIM3_CH4). Provides lock, holdover, reacquisition and edge
+		quality diagnostics without changing the monotonic system clock.
+
+if XXCAR_PPS
+
+config XXCAR_PPS_PROGNAME
+	string "Program name"
+	default "pps"
+
+config XXCAR_PPS_PRIORITY
+	int "command priority"
+	default 100
+
+config XXCAR_PPS_STACKSIZE
+	int "command stack size"
+	default 2048
+
+endif

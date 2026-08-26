@@ -61,6 +61,12 @@ ifeq ($(CONFIG_XXCAR_VESC),y)
 CSRCS += fdcan.c
 endif
 
+# Exact companion PPS capture on TELEM2 CTS (PC9/TIM3_CH4).  This owns TIM3
+# directly and deliberately does not enable NuttX's timer/capture lower-half.
+ifeq ($(CONFIG_XXCAR_PPS),y)
+CSRCS += fmuv6c_pps.c
+endif
+
 ifeq ($(CONFIG_SENSORS),y)
 CSRCS += fmuv6c_sensors.c
 CSRCS += ms5611.c ms5611_comp.c
