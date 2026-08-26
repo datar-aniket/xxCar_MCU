@@ -17,7 +17,11 @@ The board claims whichever serial port has its `SER_*_FUNC` parameter set to
 | TELEM2 | `/dev/ttyS3` (UART5) | `SER_TEL2_FUNC` | `SER_TEL2_BAUD` | 921600 |
 
 8N1, no flow control on the data lines. TELEM2's CTS pin is repurposed as the
-PPS input — see section 7 — so hardware flow control must stay off.
+PPS input — see section 8 — so hardware flow control must stay off.
+
+The link starts at boot when `COMP_EN` is 1, which is the default, along with
+the estimator (`EKF3_EN`), the IMU integrator (`IMU_DELTA_EN`) and the sensor
+daemons (`SENS_EN`, `SENS_AUX_EN`). Nothing needs starting by hand.
 
 ## 2. Frame
 
@@ -174,7 +178,7 @@ filter into trusting it more than the operator allowed:
 | `EK3_EXT_M_NSE` | 0.10 m | x and y |
 | `EK3_EXT_YAW_NSE` | 0.05 rad | yaw |
 | `EK3_EXT_I_GATE` | 5.0 | innovation gate, sigmas |
-| `EK3_EXT_TIMEOUT` | 1000 ms | dropout before position is dropped |
+| `EK3_EXT_TIMEOUT` | 1000 ms | silence before a dropout, and how long a bad ratio is tolerated before the source is condemned |
 
 ### flags
 
@@ -192,13 +196,60 @@ loop closure, a datum change. Anything downstream differentiating position
 needs to know a discontinuity was intentional rather than seeing it as a
 velocity spike.
 
-### Gating
+### Gating, per pose
 
 x and y are gated **jointly**, on the sum of both innovations against the
 combined variance, the way ArduPilot's `posTestRatio` works — not
 independently per axis. A pose 500 m wrong in x with y unchanged is rejected
 as one bad pose. Gating the axes separately lets exactly that case through on
 the good axis.
+
+### Health, across poses
+
+Separately from the per-pose gate, the estimator keeps a **low-passed
+innovation ratio** for your source — ArduPilot keeps both for the same
+reason: the gate handles one bad pose, this handles a source that is wrong as
+a matter of course.
+
+If that filtered ratio stays above 1 for longer than `EK3_EXT_TIMEOUT`, the
+source is **condemned**:
+
+- it stops being fused entirely, position *and* yaw
+- `POSITION_HORIZ` is withdrawn from `solution_status`
+- attitude, heading and height are unaffected
+
+It re-earns trust by agreeing again — the filtered ratio has to fall back
+below the threshold, which takes sustained agreement rather than one good
+pose. `ekf3 status` shows the ratio, the health verdict and the fault count.
+
+**This is the failure to design against.** Publishing a *stale* pose — a
+position that stops updating while the vehicle keeps moving — is precisely
+what condemns a source, and it is an easy thing to do accidentally when a
+localisation pipeline stalls but the transport keeps running. Prefer one of:
+
+- stop sending, and let `EK3_EXT_TIMEOUT` handle it as a dropout
+- keep sending with **`VALID` cleared** in `flags`
+- keep sending with an **honest, growing covariance**
+
+All three are handled gracefully. A confident, frozen pose is not.
+
+### Why a condemned source is not simply re-datumed
+
+The estimator will re-datum to your source when it has been **silent** past
+`EK3_EXT_TIMEOUT` and then returns — a localisation stack that restarted may
+legitimately have a new origin.
+
+It will **not** re-datum because your source disagrees. That distinction is
+load-bearing: re-datuming on disagreement means snapping the filter's
+position onto a source already known to be wrong, and the strapdown then has
+nowhere to put the real motion except into accelerometer bias, which couples
+into the gravity reference and takes attitude with it. That is a diverged
+filter, reached from nothing worse than a frozen pose.
+
+While your source and the IMU disagree, accelerometer bias learning is
+**frozen** for exactly this reason. The IMU is treated as the reference: it
+is redundant at board level and bounded by calibration, while an external
+source can be arbitrarily wrong and still look plausible.
 
 ### Test vector
 
@@ -389,11 +440,25 @@ yours.
 | 5 | `POSITION_HORIZ` |
 | 6 | `POSITION_VERT` |
 
+**`POSITION_HORIZ` is the bit autonomy should gate on.** It is a claim that
+external navigation is *actually correcting*, not that it is selected, and it
+is withdrawn when the source is stale, silent, or condemned for disagreeing
+with the IMU. Losing it means the horizontal position estimate is no longer
+being held by anything and will drift on the IMU alone — a vehicle driving
+autonomously should stop.
+
+`ATTITUDE_VALID` surviving while `POSITION_HORIZ` drops is the expected
+shape, not a contradiction: roll and pitch come from gravity and remain
+trustworthy when a companion does not.
+
 ### reset_counter
 
-Incremented when the **estimator's** datum moves — which the external
-position path does deliberately on a sustained rejection run. Position jumps
+Incremented when the **estimator's** datum moves, which happens when your
+source returns after a dropout with a different origin. Position jumps
 discontinuously when it happens.
+
+Note it no longer moves on a rejection run — a disagreeing source is
+condemned rather than adopted, so there is no jump to announce.
 
 ### Decoding
 
@@ -525,8 +590,26 @@ the board.
 | `pps` | lock state, corrections applied, last residual |
 | `tx_future_clamped` | a stamp that would have led the clock |
 
-`ekf3 status` reports the consumption side: `extnav_in`, `extnav_bad_time`,
-`extnav_untimed`, and whether external position is actually being fused.
+`ekf3 status` reports the consumption side:
+
+| Field | Meaning |
+|---|---|
+| `extnav_in` | poses queued for fusion |
+| `extnav_bad_time` | refused on the timestamp window |
+| `extnav_untimed` | arrival-stamped; the source sent zero |
+| `accept` / `reject` | per-pose gate outcomes, and the current reject run |
+| `redatum` | times a datum was granted — only ever after silence |
+| `health` | `OK`, or `UNHEALTHY - NOT FUSED` |
+| `test_ratio` | the low-passed innovation ratio against the IMU |
+| `faults` | times the source has been condemned |
+| `accel-bias` | `learning` or `FROZEN` |
+
+**Reading a bad run.** `test_ratio` climbing above 1 while `reject` grows
+means your poses and the IMU disagree. If `accel-bias` shows `FROZEN` the
+guard has engaged and the filter is protecting itself; if `health` then goes
+`UNHEALTHY`, the source has been dropped and `POSITION_HORIZ` is gone. A
+`redatum` count that is *not* increasing during all of this is the design
+working — a disagreeing source is never adopted.
 
 ## Related
 
