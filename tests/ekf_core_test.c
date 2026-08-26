@@ -605,7 +605,19 @@ static void test_extnav_refuses_an_invalid_pose(void)
  * ResetPositionNE().
  */
 
-static void test_extnav_rejection_run_forces_a_redatum(void)
+/* A source that keeps talking and keeps disagreeing must NOT be given a
+ * datum, however long it goes on.
+ *
+ * This is the inverse of what this test used to assert, and the change is
+ * the reason for it. Re-datuming on disagreement is what turned a companion
+ * publishing a frozen position into a diverged filter: the reset snapped
+ * position back to the stale value, the strapdown kept integrating real
+ * motion, and the only way left to reconcile them was to grow accel bias
+ * until it hit its limit - taking attitude with it, because accel bias
+ * couples straight into the gravity reference.
+ */
+
+static void test_extnav_disagreement_never_redatums(void)
 {
   struct ekf_core_s ekf;
   uint64_t timestamp;
@@ -616,28 +628,397 @@ static void test_extnav_rejection_run_forces_a_redatum(void)
   assert(ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f,
                               true, false) == -2);
 
-  /* Tighten the position variance so a distant pose is genuinely outside
-   * the gate rather than merely surprising.
-   */
+  for (i = 0; i < 40; i++)
+    {
+      ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f, true, false);
+    }
+
+  assert(ekf.extnav_datum_count == 1);
+
+  /* Now it starts lying, and never stops. */
+
+  s.x = 500.0f;
+
+  for (i = 0; i < EKF_EXTNAV_REJECT_RUN_MAX * 4; i++)
+    {
+      int result = ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f,
+                                        true, false);
+
+      /* Rejected every time. Never -2, which would mean a new datum. */
+
+      assert(result == 0);
+    }
+
+  assert(ekf.extnav_datum_count == 1);
+
+  /* And the filter has not moved to where the source claims. */
+
+  assert(fabsf(ekf.position[0]) < 1.0f);
+}
+
+/* Silence is different from disagreement, and only silence earns a datum.
+ *
+ * A source that stopped and came back may legitimately have a new origin.
+ * This is ArduPilot's posTimeout, measured from the last pose that PASSED.
+ */
+
+static void test_extnav_dropout_does_redatum(void)
+{
+  struct ekf_core_s ekf;
+  uint64_t timestamp;
+  struct ekf_extnav_sample_s s = extnav_at(0.0f, 0.0f, 0.0f);
+  unsigned i;
+
+  extnav_align(&ekf, &timestamp);
+  ekf_core_set_extnav_config(&ekf, 1000000u);
+  assert(ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f,
+                              true, false) == -2);
 
   for (i = 0; i < 40; i++)
     {
       ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f, true, false);
     }
 
-  s.x = 500.0f;
+  assert(ekf.extnav_datum_count == 1);
 
-  for (i = 0; i < EKF_EXTNAV_REJECT_RUN_MAX; i++)
-    {
-      assert(ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f,
-                                  true, false) == 0);
-    }
+  /* Nothing arrives for longer than the timeout, then it comes back
+   * somewhere else entirely.
+   */
+
+  ekf.last_timestamp_sample = ekf.last_extnav_timestamp + 2000000ull;
+  s.x = 500.0f;
 
   assert(ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f,
                               true, false) == -2);
-  assert_near(ekf.position[0], 500.0f, 1.0e-3f);
   assert(ekf.extnav_datum_count == 2);
-  assert(ekf.extnav_consecutive_rejects == 0);
+  assert_near(ekf.position[0], 500.0f, 1.0e-3f);
+}
+
+/* Persistent disagreement condemns the source, and withdrawing
+ * POSITION_HORIZ is what tells autonomy to stop.
+ */
+
+static void test_extnav_persistent_disagreement_withdraws_position(void)
+{
+  struct ekf_core_s ekf;
+  uint64_t timestamp;
+  struct ekf_extnav_sample_s s = extnav_at(0.0f, 0.0f, 0.0f);
+  unsigned i;
+
+  extnav_align(&ekf, &timestamp);
+  ekf_core_set_extnav_config(&ekf, 1000000u);
+  ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f, true, false);
+
+  for (i = 0; i < 60; i++)
+    {
+      ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f, true, false);
+    }
+
+  assert(ekf.extnav_healthy);
+  assert((ekf_core_solution_status(&ekf) & EKF_SOLUTION_POSITION_HORIZ) != 0);
+
+  /* The vehicle moves; the source insists it has not. Advance filter time so
+   * the fault timer can expire.
+   */
+
+  s.x = 50.0f;
+
+  for (i = 0; i < 400; i++)
+    {
+      ekf.last_timestamp_sample += 10000ull;
+      ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f, true, false);
+    }
+
+  assert(!ekf.extnav_healthy);
+  assert(ekf.extnav_fault_count > 0);
+  assert((ekf_core_solution_status(&ekf) & EKF_SOLUTION_POSITION_HORIZ) == 0);
+
+  /* Attitude survives. Losing position must not cost roll and pitch, or a
+   * bad companion would take the whole solution with it.
+   */
+
+  assert((ekf_core_solution_status(&ekf) & EKF_SOLUTION_ATTITUDE) != 0);
+}
+
+/* Accelerometer bias must be FROZEN while the source is arguing with the
+ * IMU. This is the state whose corruption caused the divergence, so the
+ * guard is asserted directly rather than inferred from the outcome.
+ */
+
+/* Accelerometer bias must be FROZEN while the source is arguing with the
+ * IMU, and this has to be tested in the window where poses are STILL BEING
+ * FUSED. Once the source is condemned nothing is fused at all, so the bias
+ * would sit still whether the inhibit worked or not - a test that only
+ * looked there would pass with the guard removed.
+ */
+
+static void test_extnav_disagreement_freezes_accel_bias(void)
+{
+  struct ekf_core_s ekf;
+  uint64_t timestamp;
+  struct ekf_extnav_sample_s s = extnav_at(0.0f, 0.0f, 0.0f);
+  float bias_before[3];
+  unsigned i;
+  int axis;
+  bool fused_while_inhibited = false;
+
+  extnav_align(&ekf, &timestamp);
+  ekf_core_set_extnav_config(&ekf, 1000000u);
+
+  for (i = 0; i < 60; i++)
+    {
+      ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f, true, false);
+    }
+
+  assert(!ekf.extnav_bias_inhibited);
+  ekf.accel_bias[0] = 0.0f;
+  ekf.accel_bias[1] = 0.0f;
+  ekf.accel_bias[2] = 0.0f;
+
+  /* THE ACTUAL FAILURE: the vehicle moves and the source insists it has
+   * not. A constant offset would not do - the filter simply absorbs that as
+   * a datum shift and the innovation collapses. It is the GROWING
+   * disagreement that has nowhere to go except into accel bias.
+   *
+   * 0.4 m/s of drift keeps individual poses inside the gate, so fusion
+   * continues and the bias would be learned if nothing stopped it.
+   */
+
+  /* Give the bias a path to move through. A position measurement touches
+   * accel bias only via the P[bias][position] cross-covariance that
+   * strapdown propagation builds; this scenario drives fusion directly, so
+   * without seeding it the bias would sit still whether inhibited or not and
+   * the assertion below would prove nothing.
+   */
+
+  for (i = 0; i < 3; i++)
+    {
+      ekf.covariance[EKF_P_INDEX(12 + i, 6)] = 0.05f;
+      ekf.covariance[EKF_P_INDEX(6, 12 + i)] = 0.05f;
+    }
+
+  for (i = 0; i < 300; i++)
+    {
+      int result;
+
+      ekf.last_timestamp_sample += 10000ull;
+      ekf.position[0] += 0.004f;
+
+      /* Re-seeded every iteration, not once. Each Joseph update shrinks the
+       * cross term, so a single seed decays away long before the guard
+       * engages - and then the bias would sit still for want of a path
+       * rather than because anything stopped it, which is a test that passes
+       * with the guard deleted.
+       */
+
+      for (axis = 0; axis < 3; axis++)
+        {
+          ekf.covariance[EKF_P_INDEX(12 + axis, 6)] = 0.05f;
+          ekf.covariance[EKF_P_INDEX(6, 12 + axis)] = 0.05f;
+        }
+
+      result = ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f,
+                                    true, false);
+
+      if (!ekf.extnav_bias_inhibited)
+        {
+          /* Still learning, legitimately. Keep moving the reference: the
+           * claim is only that the bias stops once the guard engages.
+           */
+
+          memcpy(bias_before, ekf.accel_bias, sizeof(bias_before));
+          continue;
+        }
+
+      if (result == 1)
+        {
+          fused_while_inhibited = true;
+        }
+
+      /* Inhibited from here on: not one more count of movement, on any
+       * axis, however many poses are still being fused.
+       */
+
+      for (axis = 0; axis < 3; axis++)
+        {
+          assert_near(ekf.accel_bias[axis], bias_before[axis], 1.0e-9f);
+        }
+    }
+
+  /* The window this test exists for actually happened. */
+
+  assert(fused_while_inhibited);
+  assert(ekf.extnav_inhibit_count > 0);
+
+  /* And the mask reached the update rather than merely being set: this only
+   * moves when a gain row is actually zeroed.
+   */
+
+  assert(ekf.inhibit_applied_count > 0);
+}
+
+/* A condemned source is not fused even by a pose that would sail through the
+ * gate. Health is a separate verdict from the per-pose test, and it has to
+ * outrank it - otherwise a lying source that happens to drift back past the
+ * filter's position gets believed again on the strength of one agreement.
+ */
+
+static void test_unhealthy_source_is_not_fused_even_when_plausible(void)
+{
+  struct ekf_core_s ekf;
+  uint64_t timestamp;
+  struct ekf_extnav_sample_s s = extnav_at(0.0f, 0.0f, 0.0f);
+  unsigned i;
+
+  extnav_align(&ekf, &timestamp);
+  ekf_core_set_extnav_config(&ekf, 1000000u);
+  ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f, true, false);
+
+  s.x = 50.0f;
+
+  for (i = 0; i < 400; i++)
+    {
+      ekf.last_timestamp_sample += 10000ull;
+      ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f, true, false);
+    }
+
+  assert(!ekf.extnav_healthy);
+
+  /* Now hand it a pose exactly where the filter already thinks it is. The
+   * per-pose gate would pass this instantly.
+   */
+
+  s.x = ekf.position[0];
+  s.y = ekf.position[1];
+  ekf.last_timestamp_sample += 10000ull;
+
+  assert(ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f,
+                              true, false) == 0);
+}
+
+/* Health withdraws POSITION_HORIZ on its own, not merely as a side effect of
+ * the rejection counter also being high.
+ */
+
+static void test_health_alone_withdraws_position(void)
+{
+  struct ekf_core_s ekf;
+  uint64_t timestamp;
+  struct ekf_extnav_sample_s s = extnav_at(0.0f, 0.0f, 0.0f);
+  unsigned i;
+
+  extnav_align(&ekf, &timestamp);
+  ekf_core_set_extnav_config(&ekf, 1000000u);
+
+  for (i = 0; i < 60; i++)
+    {
+      ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f, true, false);
+    }
+
+  assert((ekf_core_solution_status(&ekf) & EKF_SOLUTION_POSITION_HORIZ) != 0);
+
+  /* Condemn the source without letting the rejection counter be the reason:
+   * clear it, so only health can withdraw the claim.
+   */
+
+  ekf.extnav_healthy = false;
+  ekf.extnav_consecutive_rejects = 0;
+
+  assert((ekf_core_solution_status(&ekf) & EKF_SOLUTION_POSITION_HORIZ) == 0);
+  assert((ekf_core_solution_status(&ekf) & EKF_SOLUTION_ATTITUDE) != 0);
+}
+
+/* The inhibit mask itself, tested on the mechanism rather than through a
+ * scenario.
+ *
+ * A position measurement has no direct coupling to accel bias - h is 1 on
+ * the position row and 0 everywhere else - so the bias only moves through
+ * the P[bias][position] cross-covariance that strapdown propagation builds
+ * up. That cross term is seeded explicitly here, because without it the
+ * bias gain is zero and the test would pass with the guard deleted.
+ */
+
+static void test_inhibit_mask_freezes_the_states_it_names(void)
+{
+  struct ekf_core_s ekf;
+  uint64_t timestamp;
+  float h[EKF_STATE_DIM];
+  float moved[3];
+  float frozen[3];
+  int axis;
+
+  memset(h, 0, sizeof(h));
+  h[6] = 1.0f;
+
+  /* Free to learn. */
+
+  extnav_align(&ekf, &timestamp);
+
+  for (axis = 0; axis < 3; axis++)
+    {
+      ekf.covariance[EKF_P_INDEX(12 + axis, 6)] = 0.05f;
+      ekf.covariance[EKF_P_INDEX(6, 12 + axis)] = 0.05f;
+      ekf.accel_bias[axis] = 0.0f;
+    }
+
+  ekf.inhibit_mask = 0;
+  assert(ekf_core_test_update_1d(&ekf, h, 1.0f, 0.01f, 1.0e6f, NULL) > 0);
+  memcpy(moved, ekf.accel_bias, sizeof(moved));
+
+  /* The cross term has to actually move it, or the comparison below proves
+   * nothing.
+   */
+
+  assert(fabsf(moved[0]) > 1.0e-4f);
+
+  /* Same setup, same update, bias inhibited. */
+
+  extnav_align(&ekf, &timestamp);
+
+  for (axis = 0; axis < 3; axis++)
+    {
+      ekf.covariance[EKF_P_INDEX(12 + axis, 6)] = 0.05f;
+      ekf.covariance[EKF_P_INDEX(6, 12 + axis)] = 0.05f;
+      ekf.accel_bias[axis] = 0.0f;
+    }
+
+  ekf.inhibit_mask = EKF_INHIBIT_ACCEL_BIAS;
+  assert(ekf_core_test_update_1d(&ekf, h, 1.0f, 0.01f, 1.0e6f, NULL) > 0);
+  memcpy(frozen, ekf.accel_bias, sizeof(frozen));
+
+  for (axis = 0; axis < 3; axis++)
+    {
+      assert_near(frozen[axis], 0.0f, 1.0e-9f);
+    }
+
+  /* And the gyro bias mask names different states. */
+
+  extnav_align(&ekf, &timestamp);
+
+  for (axis = 0; axis < 3; axis++)
+    {
+      ekf.covariance[EKF_P_INDEX(9 + axis, 6)] = 0.05f;
+      ekf.covariance[EKF_P_INDEX(6, 9 + axis)] = 0.05f;
+      ekf.gyro_bias[axis] = 0.0f;
+    }
+
+  ekf.inhibit_mask = EKF_INHIBIT_GYRO_BIAS;
+  assert(ekf_core_test_update_1d(&ekf, h, 1.0f, 0.01f, 1.0e6f, NULL) > 0);
+
+  for (axis = 0; axis < 3; axis++)
+    {
+      assert_near(ekf.gyro_bias[axis], 0.0f, 1.0e-9f);
+    }
+}
+
+/* The bias limit is a safety bound, not a tuning value: 2.0 m/s^2 is enough
+ * to hide 0.2 g of real acceleration.
+ */
+
+static void test_accel_bias_limit_is_tight(void)
+{
+  assert(EKF_ACCEL_BIAS_LIMIT <= 1.0f);
+  assert(EKF_GYRO_BIAS_LIMIT <= 0.2f);
 }
 
 /* The source telling us it relocalised is worth more than twenty gated
@@ -744,7 +1125,14 @@ int main(void)
   test_extnav_noise_floor_wins();
   test_extnav_honours_a_worse_reported_sigma();
   test_extnav_refuses_an_invalid_pose();
-  test_extnav_rejection_run_forces_a_redatum();
+  test_extnav_disagreement_never_redatums();
+  test_extnav_dropout_does_redatum();
+  test_extnav_persistent_disagreement_withdraws_position();
+  test_extnav_disagreement_freezes_accel_bias();
+  test_unhealthy_source_is_not_fused_even_when_plausible();
+  test_health_alone_withdraws_position();
+  test_inhibit_mask_freezes_the_states_it_names();
+  test_accel_bias_limit_is_tight();
   test_extnav_source_reset_forces_a_redatum();
   test_extnav_timeout_drops_horizontal_validity();
   test_extnav_datum_clears_on_restart();

@@ -149,6 +149,26 @@ static void print_status(void)
              core->extnav_consecutive_rejects, core->extnav_datum_count,
              (double)core->last_extnav_noise);
 
+      /* The health line is the one that explains a filter that has stopped
+       * trusting the companion. test_ratio is the low-passed innovation
+       * ratio against the IMU: above 1 the two disagree by more than the
+       * gate allows, and staying there is what condemns the source.
+       */
+
+      printf("    health  %s  test_ratio %.2f  faults %" PRIu32
+             "  accel-bias %s (%" PRIu32 ")\n",
+             core->extnav_healthy ? "OK" : "UNHEALTHY - NOT FUSED",
+             (double)core->extnav_test_ratio, core->extnav_fault_count,
+             core->extnav_bias_inhibited ? "FROZEN" : "learning",
+             core->extnav_inhibit_count);
+
+      if (!core->extnav_healthy)
+        {
+          printf("    the source disagrees with the IMU persistently. It is\n"
+                 "    no longer fused and POSITION_HORIZ is withdrawn, so\n"
+                 "    autonomy should stop. It re-earns trust by agreeing.\n");
+        }
+
       if (status.extnav_untimed > 0)
         {
           printf("    arrival-stamped %" PRIu32 " (source sent no "

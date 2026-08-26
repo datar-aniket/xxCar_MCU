@@ -46,8 +46,6 @@
 
 #define EKF_GRAVITY_MEAS_NOISE      0.35f
 #define EKF_MEASUREMENT_NIS_GATE    16.3f
-#define EKF_GYRO_BIAS_LIMIT         0.10f
-#define EKF_ACCEL_BIAS_LIMIT        2.00f
 #define EKF_GYRO_BIAS_LIMIT_VAR     (0.02f * 0.02f)
 #define EKF_ACCEL_BIAS_LIMIT_VAR    (0.20f * 0.20f)
 
@@ -397,6 +395,12 @@ static void restart_alignment(FAR struct ekf_core_s *ekf)
   /* The local frame is gone, so map coordinates for it would be a lie. */
 
   ekf->extnav_datum_set = false;
+  ekf->last_extnav_rx_timestamp = 0;
+  ekf->extnav_healthy = true;
+  ekf->extnav_test_ratio = 0.0f;
+  ekf->extnav_fault_since = 0;
+  ekf->extnav_bias_inhibited = false;
+  ekf->inhibit_mask = 0;
   ekf->have_extnav_reset = false;
   ekf->extnav_consecutive_rejects = 0;
   ekf->last_baro_height = 0.0f;
@@ -1375,6 +1379,23 @@ static int measurement_update_1d(FAR struct ekf_core_s *ekf,
   for (row = 0; row < EKF_STATE_DIM; row++)
     {
       gain[row] = pht[row] / innovation;
+
+      /* Freeze the states this update is not allowed to move.
+       *
+       * Zeroing the gain row rather than skipping the update is what
+       * ArduPilot does for inhibited states: the covariance update below
+       * still runs, so P stays consistent with the correction that was
+       * actually applied instead of claiming an information gain the state
+       * never received.
+       */
+
+      if (ekf->inhibit_mask != 0 && row >= 9 &&
+          (ekf->inhibit_mask & (1u << (row - 9))) != 0)
+        {
+          gain[row] = 0.0f;
+          ekf->inhibit_applied_count++;
+        }
+
       correction[row] = gain[row] * residual;
     }
 
@@ -2106,6 +2127,7 @@ uint8_t ekf_core_solution_status(FAR const struct ekf_core_s *ekf)
    */
 
   if (ekf->extnav_datum_set && ekf->extnav_accept_count > 0 &&
+      ekf->extnav_healthy &&
       ekf->extnav_consecutive_rejects < EKF_EXTNAV_REJECT_RUN_MAX &&
       ekf->extnav_timeout_us > 0 &&
       ekf->last_timestamp_sample >= ekf->last_extnav_timestamp &&
@@ -2223,6 +2245,83 @@ static void extnav_set_datum(FAR struct ekf_core_s *ekf,
   ekf->last_extnav_timestamp = ekf->last_timestamp_sample;
 }
 
+/* Has the source gone quiet, as opposed to gone wrong?
+ *
+ * Only silence earns a re-datum. This is ArduPilot's posTimeout - measured
+ * from the last time a pose PASSED, so a source that keeps sending poses the
+ * gate refuses never satisfies it.
+ */
+
+static bool extnav_dropped_out(FAR const struct ekf_core_s *ekf)
+{
+  uint64_t age;
+
+  if (ekf->last_extnav_rx_timestamp == 0 || ekf->extnav_timeout_us == 0)
+    {
+      return false;
+    }
+
+  if (ekf->last_timestamp_sample <= ekf->last_extnav_rx_timestamp)
+    {
+      return false;
+    }
+
+  age = ekf->last_timestamp_sample - ekf->last_extnav_rx_timestamp;
+  return age > (uint64_t)ekf->extnav_timeout_us;
+}
+
+/* Track how far the source and the strapdown disagree, over time.
+ *
+ * The gate already refuses individual poses. This is the separate question
+ * ArduPilot answers with a low-passed posTestRatio: whether the source is
+ * wrong as a matter of course. The IMU is taken as the reference because it
+ * is redundant at board level and its errors are bounded by calibration,
+ * while an external source can be arbitrarily wrong and still look
+ * plausible.
+ */
+
+static void extnav_track_ratio(FAR struct ekf_core_s *ekf, float ratio,
+                               uint64_t now)
+{
+  if (!isfinite(ratio))
+    {
+      return;
+    }
+
+  ekf->extnav_test_ratio += EKF_EXTNAV_RATIO_ALPHA *
+                            (ratio - ekf->extnav_test_ratio);
+
+  if (ekf->extnav_test_ratio <= EKF_EXTNAV_RATIO_FAULT)
+    {
+      ekf->extnav_fault_since = 0;
+
+      if (!ekf->extnav_healthy)
+        {
+          /* Recovering is allowed, but only by agreeing again for a while -
+           * the filtered ratio cannot fall below the threshold quickly.
+           */
+
+          ekf->extnav_healthy = true;
+        }
+
+      return;
+    }
+
+  if (ekf->extnav_fault_since == 0)
+    {
+      ekf->extnav_fault_since = now;
+      return;
+    }
+
+  if (now > ekf->extnav_fault_since &&
+      now - ekf->extnav_fault_since > (uint64_t)ekf->extnav_timeout_us &&
+      ekf->extnav_healthy)
+    {
+      ekf->extnav_healthy = false;
+      ekf->extnav_fault_count++;
+    }
+}
+
 int ekf_core_fuse_extnav(FAR struct ekf_core_s *ekf,
                          FAR const struct ekf_extnav_sample_s *s,
                          float pos_noise_floor, float pos_gate,
@@ -2280,13 +2379,35 @@ int ekf_core_fuse_extnav(FAR struct ekf_core_s *ekf,
       return -2;
     }
 
-  if (!ekf->extnav_datum_set ||
-      ekf->extnav_consecutive_rejects >= EKF_EXTNAV_REJECT_RUN_MAX)
-    {
-      extnav_set_datum(ekf, s, pos_noise, yaw_noise, want_position,
-                       want_yaw);
-      return -2;
-    }
+  /* A datum is granted for two reasons only: there has never been one, or
+   * the source went AWAY and came back. Never because it disagrees.
+   *
+   * The difference is everything. A source that stopped and restarted may
+   * legitimately have a new origin. A source that never stopped talking and
+   * is consistently wrong is simply wrong, and re-datuming to it hands the
+   * filter its error as truth - which is how a companion publishing a frozen
+   * position drove accel bias to its limit and took attitude with it.
+   */
+
+  {
+    /* Stamped BEFORE the datum decision, and read after, so this call's own
+     * arrival cannot make itself look like a dropout.
+     */
+
+    bool dropped = extnav_dropped_out(ekf);
+
+    ekf->last_extnav_rx_timestamp = ekf->last_timestamp_sample;
+
+    if (!ekf->extnav_datum_set || dropped)
+      {
+        extnav_set_datum(ekf, s, pos_noise, yaw_noise, want_position,
+                         want_yaw);
+        ekf->extnav_test_ratio = 0.0f;
+        ekf->extnav_fault_since = 0;
+        ekf->extnav_healthy = true;
+        return -2;
+      }
+  }
 
   ekf->last_extnav_noise = pos_noise;
 
@@ -2331,8 +2452,41 @@ int ekf_core_fuse_extnav(FAR struct ekf_core_s *ekf,
         }
 
       ratio = innovation_sq / (pos_gate * pos_gate * variance_sum);
+      extnav_track_ratio(ekf, ratio, ekf->last_timestamp_sample);
 
-      if (ratio >= 1.0f)
+      /* Freeze accelerometer bias while the source is arguing with the IMU.
+       *
+       * A large, persistent position innovation is precisely the error the
+       * filter would otherwise absorb into accel bias, and doing so is a
+       * one-way trip: the bias corrupts the gravity reference, which
+       * corrupts attitude, which corrupts the position it was meant to fix.
+       * Freezing costs nothing when the source is good - the bias is
+       * observable from many other updates.
+       */
+
+      ekf->inhibit_mask = 0;
+
+      if (ekf->extnav_test_ratio > EKF_EXTNAV_INHIBIT_RATIO ||
+          !ekf->extnav_healthy)
+        {
+          ekf->inhibit_mask = EKF_INHIBIT_ACCEL_BIAS;
+
+          if (!ekf->extnav_bias_inhibited)
+            {
+              ekf->extnav_bias_inhibited = true;
+              ekf->extnav_inhibit_count++;
+            }
+        }
+      else
+        {
+          ekf->extnav_bias_inhibited = false;
+        }
+
+      /* An unhealthy source is not fused at all. It still updates the ratio
+       * above, which is how it earns its way back.
+       */
+
+      if (ratio >= 1.0f || !ekf->extnav_healthy)
         {
           gated++;
         }
@@ -2366,24 +2520,39 @@ int ekf_core_fuse_extnav(FAR struct ekf_core_s *ekf,
         }
     }
 
+  ekf->inhibit_mask = 0;
+
   if (want_yaw)
     {
       float nis = 0.0f;
-      int result = fuse_yaw(ekf, s->yaw, yaw_noise, yaw_gate, &nis);
+      int result;
 
-      if (result < 0)
-        {
-          return -1;
-        }
+      /* Yaw from a source the position check has condemned is not
+       * trustworthy either - they come from the same estimate.
+       */
 
-      if (result == 0)
+      if (!ekf->extnav_healthy)
         {
           gated++;
         }
       else
         {
-          accepted++;
-          ekf->yaw_absolute = true;
+          result = fuse_yaw(ekf, s->yaw, yaw_noise, yaw_gate, &nis);
+
+          if (result < 0)
+            {
+              return -1;
+            }
+
+          if (result == 0)
+            {
+              gated++;
+            }
+          else
+            {
+              accepted++;
+              ekf->yaw_absolute = true;
+            }
         }
     }
 

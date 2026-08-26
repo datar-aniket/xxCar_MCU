@@ -128,12 +128,53 @@ struct ekf_core_s
   float    last_extnav_nis[2];
   float    last_extnav_noise;      /* m, AFTER the floor was applied */
   uint64_t last_extnav_timestamp;  /* filter time of the last acceptance */
+
+  /* Filter time a pose last ARRIVED, accepted or not.
+   *
+   * Separate from the acceptance time on purpose. Silence and disagreement
+   * must not look alike: a rejected source never updates the acceptance
+   * time, so measuring a dropout from that would declare a source that is
+   * present and arguing to be a source that has gone away - and hand it a
+   * re-datum, which is the failure the split exists to prevent.
+   */
+
+  uint64_t last_extnav_rx_timestamp;
   uint32_t extnav_timeout_us;      /* EK3_EXT_TIMEOUT, via the setter */
 
   uint32_t extnav_accept_count;
   uint32_t extnav_reject_count;
   uint32_t extnav_consecutive_rejects;
   uint32_t extnav_datum_count;
+
+  /* Source health, tracked continuously rather than sampled at fusion time.
+   *
+   * extnav_test_ratio is the low-passed joint position innovation ratio -
+   * ArduPilot's posTestRatio. Above 1 the source and the IMU disagree by
+   * more than the gate allows; staying there is what makes it a fault
+   * rather than a bad sample.
+   */
+
+  /* Bit per bias state, 0..2 gyro and 3..5 accel, that the NEXT measurement
+   * update must not move. Set around a fusion call and cleared after it.
+   */
+
+  uint8_t  inhibit_mask;
+
+  /* How many gain rows the mask has actually zeroed.
+   *
+   * Observability, not bookkeeping: without it "the mask was set" and "the
+   * update honoured it" cannot be told apart from outside, and a guard whose
+   * effect is invisible is a guard nobody can test.
+   */
+
+  uint32_t inhibit_applied_count;
+
+  float    extnav_test_ratio;
+  bool     extnav_healthy;
+  bool     extnav_bias_inhibited;  /* accel bias learning frozen */
+  uint64_t extnav_fault_since;     /* filter time the ratio went bad */
+  uint32_t extnav_fault_count;
+  uint32_t extnav_inhibit_count;
 
   uint32_t input_count;
   uint32_t predict_count;
@@ -195,11 +236,74 @@ struct ekf_output_s
 #define EKF_MAG_REJECT_RUN_MAX       20u
 
 /* A rejection run this long means the filter and the source disagree about
- * where the vehicle IS, not that one reading was bad. Re-datum rather than
- * going on rejecting every pose for ever - ArduPilot's ResetPositionNE().
+ * where the vehicle IS, not that one reading was bad.
+ *
+ * It does NOT re-datum. That distinction is the whole safety argument here:
+ * a source that has STOPPED and restarted somewhere else deserves a
+ * re-datum, but a source that is still talking and consistently wrong must
+ * not be believed just because it keeps repeating itself.
+ *
+ * Re-datuming on disagreement is what turned a companion publishing a frozen
+ * position into a diverged filter: the reset snapped position back to the
+ * stale value, the strapdown kept integrating real motion, and the only way
+ * left to reconcile the two was to grow the accelerometer bias until it hit
+ * its limit - at which point attitude went with it, because accel bias
+ * couples straight into the gravity reference.
+ *
+ * ArduPilot resets position on a TIMEOUT - lastPosPassTime_ms going stale -
+ * and separately requires the source to pass its own quality checks before
+ * it is allowed to supply a datum. This is that split.
  */
 
 #define EKF_EXTNAV_REJECT_RUN_MAX    20u
+
+/* Weight of one sample in the filtered innovation ratio.
+ *
+ * ArduPilot keeps a low-passed posTestRatio alongside the instantaneous one
+ * precisely because a single bad pose and a persistently wrong source need
+ * different responses: the gate handles the first, this handles the second.
+ */
+
+/* Hard bounds on the learned bias states.
+ *
+ * These are a SAFETY contract, not tuning. ArduPilot's EK3_ABIAS_LIM
+ * defaults to 1.0 and PX4's acc_bias_lim to 0.4; the accel bound here was
+ * 2.0, which is enough bias to hide a fifth of a g of real acceleration -
+ * and a filter that can absorb that much has no defence against an aiding
+ * source insisting the vehicle is stationary while it moves. Accel bias
+ * couples into the gravity reference, so letting it run corrupts attitude
+ * too, which is why the bound belongs in the header where a test can assert
+ * it rather than buried next to the arithmetic.
+ */
+
+#define EKF_GYRO_BIAS_LIMIT          0.10f
+#define EKF_ACCEL_BIAS_LIMIT         1.00f
+
+#define EKF_EXTNAV_RATIO_ALPHA       0.05f
+
+/* Filtered ratio above this for longer than the fault time means the source
+ * disagrees with the IMU as a matter of course, not occasionally.
+ */
+
+#define EKF_EXTNAV_RATIO_FAULT       1.0f
+
+/* While aiding looks like this, accelerometer bias learning is FROZEN.
+ *
+ * This is the specific guard for the divergence above. A large, persistent
+ * position innovation is exactly the signal the filter would otherwise
+ * absorb into accel bias, and the IMU is the more trustworthy of the two -
+ * it is redundant at board level and its errors are bounded by calibration,
+ * while an external source can be arbitrarily wrong. ArduPilot does the same
+ * thing from the other direction with inhibitDelVelBiasStates when it
+ * decides the IMU is the bad one.
+ */
+
+#define EKF_EXTNAV_INHIBIT_RATIO     0.5f
+
+/* inhibit_mask bits: the six bias states, in state order from index 9. */
+
+#define EKF_INHIBIT_GYRO_BIAS        0x07u
+#define EKF_INHIBIT_ACCEL_BIAS       0x38u
 
 /* An absolute pose from the companion computer.
  *
