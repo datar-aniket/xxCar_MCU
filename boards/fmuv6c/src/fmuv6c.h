@@ -405,6 +405,41 @@ void fmuv6c_pps_status(FAR struct fmuv6c_pps_status_s *status);
 #endif
 
 /****************************************************************************
+ * Name: fmuv6c_txtick_*
+ *
+ *   Fixed-rate tick for the companion downlink, on TIM6.
+ *
+ *   TIM6 is a basic timer - no channels, no pins - so it costs nothing that
+ *   another peripheral wanted. It free-runs: it is NOT locked to the
+ *   estimator, and against a faster estimator the phase slips, so the
+ *   downlink repeats or steps over a solution now and then. The counters
+ *   below expose that instead of hiding it.
+ ****************************************************************************/
+
+#ifdef CONFIG_XXCAR_COMPANION
+
+#ifdef CONFIG_STM32H7_TIM6
+#  error "TIM6 is reserved by the FMUv6C companion downlink tick"
+#endif
+
+struct fmuv6c_txtick_status_s
+{
+  bool     running;
+  uint32_t rate_hz;
+  uint32_t period_us;
+  uint32_t ticks;
+  uint32_t missed;         /* the downlink did not consume a tick in time */
+  uint64_t last_tick_us;
+};
+
+int fmuv6c_txtick_initialize(uint32_t rate_hz);
+int fmuv6c_txtick_uninitialize(void);
+int fmuv6c_txtick_wait(void);
+void fmuv6c_txtick_status(FAR struct fmuv6c_txtick_status_s *status);
+
+#endif
+
+/****************************************************************************
  * Name: stm32_spidev_initialize
  *
  * Description:

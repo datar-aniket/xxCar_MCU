@@ -413,7 +413,7 @@ static const struct param_def_s g_params[] =
    * to talk the filter into trusting it more than the operator configured.
    */
 
-  { "EXT_TX_RATE", PARAM_TYPE_INT32, I32(50), I32(1), I32(400),
+  { "EXT_TX_RATE", PARAM_TYPE_INT32, I32(200), I32(16), I32(1000),
     "Companion pose transmit rate (Hz)" },
   { "COMP_EN", PARAM_TYPE_INT32, I32(1), I32(0), I32(1),
     "Start the companion serial link at boot" },

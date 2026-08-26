@@ -32,6 +32,22 @@ static void usage(void)
          "    reboot\n", SER_FUNC_COMPANION, SER_FUNC_COMPANION);
 }
 
+/* Mirrors enum fmuv6c_pps_state_e without including the board header: this
+ * file only ever prints the value.
+ */
+
+static FAR const char *comp_pps_state_name(uint8_t state)
+{
+  switch (state)
+    {
+      case 0:  return "no-signal";
+      case 1:  return "acquiring";
+      case 2:  return "LOCKED";
+      case 3:  return "holdover";
+      default: return "unknown";
+    }
+}
+
 static void print_status(void)
 {
   struct companion_status_s s;
@@ -131,6 +147,42 @@ static void print_status(void)
   printf("  estimator  states %" PRIu32 "  nothing-new %" PRIu32 "%s\n",
          s.est_seen, s.tx_no_state,
          s.est_seen == 0 ? "   <- ekf3 is not publishing" : "");
+
+  printf("  tick       TIM6 %" PRIu32 " raised  %" PRIu32 " missed%s\n",
+         s.tick_ticks, s.tick_missed,
+         s.tick_missed > 0 ? "   <- downlink is behind the tick" : "");
+
+  /* The tick free-runs against the estimator, so the two slip. A repeat is a
+   * tick that found the same solution as the last; the gap is how far the
+   * sample time moved between the solutions actually sent. At 200 Hz against
+   * a 400 Hz estimator, expect a gap near 5000 us straddled by one estimator
+   * period either side - that spread IS the slip.
+   */
+
+  printf("  downlink   repeats %" PRIu32 "  sample gap %" PRIu32 "-%" PRIu32
+         " us\n", s.tx_repeat, s.tx_gap_min_us, s.tx_gap_max_us);
+
+  printf("  pps        %s  corrections %" PRIu32 "  last residual %+"
+         PRIi32 " us\n",
+         comp_pps_state_name(s.pps_state), s.pps_corrections,
+         s.pps_residual_us);
+
+  if (s.pps_corrections == 0)
+    {
+      printf("             not disciplining: needs PPS locked AND UTC "
+             "already known\n");
+    }
+
+  /* A solution cannot be newer than now. If this is climbing, the UTC offset
+   * is running ahead of the companion's clock and the PPS residual above is
+   * the measurement of by how much.
+   */
+
+  if (s.tx_future_clamped > 0)
+    {
+      printf("             %" PRIu32 " stamp(s) clamped back from the "
+             "future\n", s.tx_future_clamped);
+    }
 
   if (s.connects > 1 || s.disconnects > 0)
     {

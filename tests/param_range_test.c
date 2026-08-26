@@ -407,10 +407,36 @@ static void test_companion_parameters(void)
       }
   }
 
-  if (param_get_i32("EXT_TX_RATE", &v) < 0 || v != 50)
+  if (param_get_i32("EXT_TX_RATE", &v) < 0 || v != 200)
     {
-      fail("EXT_TX_RATE does not default to 50 Hz");
+      fail("EXT_TX_RATE does not default to 200 Hz");
     }
+
+  /* The rate has to fit down the wire, and that is not obvious by eye.
+   *
+   * An ESTIMATOR_POSE frame is 56 payload bytes plus 5 of framing, and a
+   * UART spends 10 bits on each byte once the start and stop bits are
+   * counted. At 200 Hz that is 122 kbit/s - which does NOT fit in the
+   * 115200 this port would run at if the baud were ever lowered to the
+   * common default, and the failure mode is not a clean error but a port
+   * that backs up until writes start failing.
+   *
+   * Checked at 2x so the reverse channel and any other message have room.
+   */
+
+  {
+    const int32_t frame_bits = (56 + 5) * 10;
+    int32_t baud = 0;
+
+    if (param_get_i32("SER_TEL2_BAUD", &baud) < 0)
+      {
+        fail("SER_TEL2_BAUD is missing");
+      }
+    else if (v * frame_bits * 2 > baud)
+      {
+        fail("EXT_TX_RATE does not fit in SER_TEL2_BAUD with 2x headroom");
+      }
+  }
 
   if (param_get_f32("EK3_EXT_M_NSE", &value) < 0 ||
       fabsf(value - 0.10f) > 1.0e-6f)

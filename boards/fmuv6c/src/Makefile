@@ -67,6 +67,12 @@ ifeq ($(CONFIG_XXCAR_PPS),y)
 CSRCS += fmuv6c_pps.c
 endif
 
+# TIM6 raises the companion downlink tick. A basic timer with no pins, taken
+# directly like TIM5 and TIM3 above rather than through a NuttX lower-half.
+ifeq ($(CONFIG_XXCAR_COMPANION),y)
+CSRCS += fmuv6c_txtick.c
+endif
+
 ifeq ($(CONFIG_SENSORS),y)
 CSRCS += fmuv6c_sensors.c
 CSRCS += ms5611.c ms5611_comp.c

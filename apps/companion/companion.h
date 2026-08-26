@@ -48,6 +48,32 @@ struct companion_status_s
   uint32_t rx_unsynced_stamp;   /* UTC arrived before a sync could use it */
   uint32_t est_seen;          /* estimator states actually read */
   uint32_t tx_no_state;       /* nothing new to send */
+
+  /* The downlink tick free-runs on TIM6 and is NOT locked to the estimator,
+   * so the two slip against each other. tx_repeat counts ticks that found
+   * the same solution as the previous one; gap_min/gap_max bracket how far
+   * the sample time moved between the solutions actually sent. At 200 Hz
+   * against a 400 Hz estimator the gap sits at one estimator period either
+   * side of 5 ms, and those numbers are how much slip is visible.
+   */
+
+  uint32_t tick_ticks;        /* TIM6 ticks raised */
+  uint32_t tick_missed;       /* the downlink did not consume one in time */
+  uint32_t tx_repeat;         /* same solution sent twice */
+  uint32_t tx_gap_min_us;
+  uint32_t tx_gap_max_us;
+
+  /* UTC discipline. The PPS comes FROM the companion, so its rising edge is
+   * the companion's own second boundary - which makes the residual below a
+   * direct measurement against the very clock the companion will compare
+   * our timestamps to.
+   */
+
+  uint8_t  pps_state;           /* enum fmuv6c_pps_state_e */
+  uint32_t pps_corrections;
+  int32_t  pps_residual_us;     /* last measured error, + means we ran fast */
+  uint64_t pps_edge_used;
+  uint32_t tx_future_clamped;   /* a stamp that would have led the clock */
   uint32_t connects;          /* hosts attached */
   uint32_t disconnects;
   bool     waiting_for_host;  /* removable port, nobody plugged in */
