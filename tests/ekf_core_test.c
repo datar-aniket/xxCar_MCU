@@ -1538,8 +1538,50 @@ static void test_position_hold_zero_disables(void)
 
 static void test_accel_bias_limit_is_tight(void)
 {
+  struct ekf_core_s ekf;
+  uint64_t timestamp;
+
+  /* The compiled ceilings are a safety bound, not tuning: 2.0 m/s^2 is
+   * enough bias to hide a fifth of a g of real acceleration.
+   */
+
   assert(EKF_ACCEL_BIAS_LIMIT <= 1.0f);
   assert(EKF_GYRO_BIAS_LIMIT <= 0.2f);
+
+  /* A parameter may tighten the bound. */
+
+  extnav_align(&ekf, &timestamp);
+  ekf_core_set_bias_limits(&ekf, 0.05f, 0.4f);
+  assert_near(ekf.accel_bias_limit, 0.4f, 1.0e-6f);
+  assert_near(ekf.gyro_bias_limit, 0.05f, 1.0e-6f);
+
+  /* It may NOT loosen it past the ceiling - beyond that the "bias" is big
+   * enough to be hiding a real acceleration, and a parameter is not
+   * evidence that it is not.
+   */
+
+  ekf_core_set_bias_limits(&ekf, 99.0f, 99.0f);
+  assert_near(ekf.accel_bias_limit, EKF_ACCEL_BIAS_LIMIT, 1.0e-6f);
+  assert_near(ekf.gyro_bias_limit, EKF_GYRO_BIAS_LIMIT, 1.0e-6f);
+
+  /* Nor does zero remove the bound, which would be the worst reading of
+   * "0 means unlimited" available here.
+   */
+
+  ekf_core_set_bias_limits(&ekf, 0.0f, 0.0f);
+  assert_near(ekf.accel_bias_limit, EKF_ACCEL_BIAS_LIMIT, 1.0e-6f);
+  assert_near(ekf.gyro_bias_limit, EKF_GYRO_BIAS_LIMIT, 1.0e-6f);
+
+  /* And the tightened bound is the one actually enforced. */
+
+  ekf_core_set_bias_limits(&ekf, 0.05f, 0.4f);
+  ekf.accel_bias[2] = 5.0f;
+  ekf.gyro_bias[0] = 5.0f;
+  constrain_position_for_test(&ekf);
+  ekf_core_test_update_1d(&ekf, (float[EKF_STATE_DIM]){0}, 0.0f, 1.0f,
+                          1.0e6f, NULL);
+  assert(fabsf(ekf.accel_bias[2]) <= 0.4f + 1.0e-4f);
+  assert(fabsf(ekf.gyro_bias[0]) <= 0.05f + 1.0e-6f);
 }
 
 /* The source telling us it relocalised is worth more than twenty gated

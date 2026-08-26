@@ -532,6 +532,26 @@ static const struct param_def_s g_params[] =
   { "EK3_POSHOLD_M", PARAM_TYPE_FLOAT, F32(2.0f), F32(0.0f), F32(1000.0f),
     "Position bound while unaided (m, 0 = free dead reckoning)" },
 
+  /* Bias bounds. Each may be TIGHTENED from here but never loosened past
+   * the ceiling compiled into ekf_core.h - beyond that a "bias" is large
+   * enough to be hiding a real acceleration, and a parameter is not
+   * evidence that it is not.
+   *
+   * ArduPilot's EK3_ABIAS_LIM defaults to 1.0 and PX4's acc_bias_lim to 0.4.
+   * 0.4 is the better default for a ground vehicle: an accelerometer that
+   * genuinely needs more than 0.4 m/s^2 of correction after calibration is
+   * telling you the calibration is wrong, and letting the filter absorb it
+   * hides that.
+   *
+   * A bias sitting exactly ON the limit is a fault report, not a converged
+   * estimate - see the "AT LIMIT" marker in `ekf3 status`.
+   */
+
+  { "EK3_ABIAS_LIM", PARAM_TYPE_FLOAT, F32(0.4f), F32(0.05f), F32(1.0f),
+    "Accelerometer bias bound (m/s^2)" },
+  { "EK3_GBIAS_LIM", PARAM_TYPE_FLOAT, F32(0.1f), F32(0.01f), F32(0.1f),
+    "Gyro bias bound (rad/s)" },
+
   { "EK3_EXT_TIMEOUT", PARAM_TYPE_INT32, I32(1000), I32(100), I32(10000),
     "External nav dropout before position is dropped (ms)" },
 

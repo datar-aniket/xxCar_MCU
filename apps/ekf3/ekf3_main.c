@@ -269,6 +269,35 @@ static void print_status(void)
   printf("  accel bias %+.4f %+.4f %+.4f m/s2\n",
          (double)core->accel_bias[0], (double)core->accel_bias[1],
          (double)core->accel_bias[2]);
+
+  /* A bias pinned at its bound is a FAULT REPORT, not a converged estimate.
+   * The filter wanted to go further and was stopped, which means it is
+   * trying to explain something with bias that is not bias - a wrong
+   * calibration, a drifting barometer, or an aiding source it should not
+   * be believing.
+   */
+
+  {
+    int axis;
+
+    for (axis = 0; axis < 3; axis++)
+      {
+        if (fabsf(core->accel_bias[axis]) >= core->accel_bias_limit - 1.0e-4f)
+          {
+            printf("             accel bias %c AT LIMIT (%.2f of %.2f m/s^2)"
+                   " - not a converged value\n",
+                   'x' + axis, (double)core->accel_bias[axis],
+                   (double)core->accel_bias_limit);
+          }
+
+        if (fabsf(core->gyro_bias[axis]) >= core->gyro_bias_limit - 1.0e-6f)
+          {
+            printf("             gyro bias %c AT LIMIT (%.4f of %.4f rad/s)"
+                   "\n", 'x' + axis, (double)core->gyro_bias[axis],
+                   (double)core->gyro_bias_limit);
+          }
+      }
+  }
   printf("  variance angle %.3g %.3g %.3g velocity %.3g %.3g %.3g\n",
          (double)core->covariance[EKF_P_INDEX(0, 0)],
          (double)core->covariance[EKF_P_INDEX(1, 1)],

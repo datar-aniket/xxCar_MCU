@@ -202,6 +202,13 @@ struct ekf_core_s
    * inventing the accelerometer bias that would explain the excursion.
    */
 
+  /* Effective bias bounds, set from parameters and never exceeding the hard
+   * ceilings above.
+   */
+
+  float    gyro_bias_limit;
+  float    accel_bias_limit;
+
   float    position_hold_limit;
   bool     position_holding;
   float    position_hold_latch[2];
@@ -326,6 +333,11 @@ struct ekf_output_s
 
 #define EKF_POSITION_HOLD_VAR        (10.0f * 10.0f)
 
+/* Hard ceilings. A runtime limit may be tighter than these but never looser:
+ * past them the "bias" is large enough to be hiding a real acceleration, and
+ * no amount of operator confidence makes that safe.
+ */
+
 #define EKF_GYRO_BIAS_LIMIT          0.10f
 #define EKF_ACCEL_BIAS_LIMIT         1.00f
 
@@ -445,6 +457,13 @@ void ekf_core_set_height_limit(FAR struct ekf_core_s *ekf, float limit_m);
  */
 
 void ekf_core_set_position_hold(FAR struct ekf_core_s *ekf, float limit_m);
+
+/* Bias bounds. Each is clamped to the compile-time ceiling; zero or a
+ * nonsense value leaves the ceiling in force rather than removing the bound.
+ */
+
+void ekf_core_set_bias_limits(FAR struct ekf_core_s *ekf, float gyro_limit,
+                              float accel_limit);
 
 /* Is a position source actually correcting right now?
  *

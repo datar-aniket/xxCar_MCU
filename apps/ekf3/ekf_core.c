@@ -442,6 +442,15 @@ void ekf_core_init(FAR struct ekf_core_s *ekf)
 {
   memset(ekf, 0, sizeof(*ekf));
   ekf->quaternion[0] = 1.0f;
+
+  /* AFTER the memset, obviously - and set here rather than in
+   * restart_alignment because these are configuration: a re-alignment must
+   * not silently discard an operator's tightened bound and go back to the
+   * compiled ceiling. Same reasoning as the mag and extnav config setters.
+   */
+
+  ekf->gyro_bias_limit = EKF_GYRO_BIAS_LIMIT;
+  ekf->accel_bias_limit = EKF_ACCEL_BIAS_LIMIT;
 }
 
 static bool sample_valid(FAR const struct ekf_imu_sample_s *sample)
@@ -1042,6 +1051,28 @@ bool ekf_core_position_aided(FAR const struct ekf_core_s *ekf)
            (uint64_t)ekf->extnav_timeout_us;
 }
 
+void ekf_core_set_bias_limits(FAR struct ekf_core_s *ekf, float gyro_limit,
+                              float accel_limit)
+{
+  if (ekf == NULL)
+    {
+      return;
+    }
+
+  /* A limit may be tightened but never loosened. Past the ceiling the
+   * "bias" is big enough to be hiding a real acceleration, and a parameter
+   * is not evidence that it is not.
+   */
+
+  ekf->gyro_bias_limit =
+    (gyro_limit > 0.0f && gyro_limit < EKF_GYRO_BIAS_LIMIT) ?
+      gyro_limit : EKF_GYRO_BIAS_LIMIT;
+
+  ekf->accel_bias_limit =
+    (accel_limit > 0.0f && accel_limit < EKF_ACCEL_BIAS_LIMIT) ?
+      accel_limit : EKF_ACCEL_BIAS_LIMIT;
+}
+
 void ekf_core_set_position_hold(FAR struct ekf_core_s *ekf, float limit_m)
 {
   if (ekf != NULL)
@@ -1181,25 +1212,25 @@ static void constrain_biases(FAR struct ekf_core_s *ekf)
 
   for (axis = 0; axis < 3; axis++)
     {
-      if (ekf->gyro_bias[axis] > EKF_GYRO_BIAS_LIMIT)
+      if (ekf->gyro_bias[axis] > ekf->gyro_bias_limit)
         {
-          ekf->gyro_bias[axis] = EKF_GYRO_BIAS_LIMIT;
+          ekf->gyro_bias[axis] = ekf->gyro_bias_limit;
           ekf->bias_limit_count++;
         }
-      else if (ekf->gyro_bias[axis] < -EKF_GYRO_BIAS_LIMIT)
+      else if (ekf->gyro_bias[axis] < -ekf->gyro_bias_limit)
         {
-          ekf->gyro_bias[axis] = -EKF_GYRO_BIAS_LIMIT;
+          ekf->gyro_bias[axis] = -ekf->gyro_bias_limit;
           ekf->bias_limit_count++;
         }
 
-      if (ekf->accel_bias[axis] > EKF_ACCEL_BIAS_LIMIT)
+      if (ekf->accel_bias[axis] > ekf->accel_bias_limit)
         {
-          ekf->accel_bias[axis] = EKF_ACCEL_BIAS_LIMIT;
+          ekf->accel_bias[axis] = ekf->accel_bias_limit;
           ekf->bias_limit_count++;
         }
-      else if (ekf->accel_bias[axis] < -EKF_ACCEL_BIAS_LIMIT)
+      else if (ekf->accel_bias[axis] < -ekf->accel_bias_limit)
         {
-          ekf->accel_bias[axis] = -EKF_ACCEL_BIAS_LIMIT;
+          ekf->accel_bias[axis] = -ekf->accel_bias_limit;
           ekf->bias_limit_count++;
         }
 
