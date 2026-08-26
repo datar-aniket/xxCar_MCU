@@ -304,11 +304,31 @@ static const struct param_def_s g_params[] =
   /* Native-rate software filters for the corrected/controller signal.  These
    * never alter sensor_accel/sensor_gyro, which remain the estimator/logger
    * source.  A zero cutoff/centre disables the corresponding filter.
+   *
+   * THE SPLIT IS DELIBERATE, and it is ArduPilot's: the estimator runs on
+   * the raw calibrated stream while the rate loop runs on a filtered one.
+   *
+   * imu_delta subscribes to sensor_gyro directly and applies its own
+   * calibration, so nothing here reaches the EKF - a filter in the
+   * estimator's path would add phase lag to the very signal the attitude
+   * solution integrates, and the filter's own delayed-fusion horizon already
+   * handles what the filter would be there to fix. The corrected topics feed
+   * control and the companion's VEHICLE_STATE twist, where lag costs less
+   * than noise does.
+   *
+   * SENS_GYR_LPF at 20 Hz matches ArduPilot's INS_GYRO_FILTER default. It
+   * doubles as the anti-alias filter for the companion downlink, which
+   * samples these 2 kHz topics at 200 Hz: two poles at 20 Hz put the 100 Hz
+   * Nyquist 28 dB down.
+   *
+   * SENS_ACC_LPF stays at 100 Hz, which is only 3 dB down at that same
+   * Nyquist. That is a bandwidth-versus-aliasing choice rather than an
+   * oversight; lower it if the accel channel in VEHICLE_STATE looks noisy.
    */
 
   { "SENS_ACC_LPF", PARAM_TYPE_FLOAT, F32(100.0f), F32(0.0f), F32(800.0f),
     "Corrected accel 2-pole low-pass cutoff (Hz, 0=off)" },
-  { "SENS_GYR_LPF", PARAM_TYPE_FLOAT, F32(0.0f), F32(0.0f), F32(800.0f),
+  { "SENS_GYR_LPF", PARAM_TYPE_FLOAT, F32(20.0f), F32(0.0f), F32(800.0f),
     "Corrected gyro 2-pole low-pass cutoff (Hz, 0=off)" },
   { "SENS_GYR_NF_FRQ", PARAM_TYPE_FLOAT, F32(0.0f), F32(0.0f), F32(800.0f),
     "Corrected gyro notch centre (Hz, 0=off)" },

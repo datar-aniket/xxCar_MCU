@@ -407,6 +407,35 @@ static void test_companion_parameters(void)
       }
   }
 
+  /* The gyro filter is ON, and low enough to anti-alias the companion
+   * downlink.
+   *
+   * It feeds the corrected topics only - imu_delta subscribes to sensor_gyro
+   * directly, so the estimator never sees it. That split is ArduPilot's, and
+   * the value matches INS_GYRO_FILTER.
+   *
+   * The downlink samples these 2 kHz topics at 200 Hz, so the cutoff has to
+   * sit well under the 100 Hz Nyquist or the twist carries folded noise.
+   * Two poles at 20 Hz put 100 Hz down 28 dB; at 50 Hz only 12.
+   */
+
+  {
+    float lpf = 0.0f;
+
+    if (param_get_f32("SENS_GYR_LPF", &lpf) < 0)
+      {
+        fail("SENS_GYR_LPF is missing");
+      }
+    else if (!(lpf > 0.0f))
+      {
+        fail("SENS_GYR_LPF is off; the corrected gyro is unfiltered");
+      }
+    else if (lpf > 40.0f)
+      {
+        fail("SENS_GYR_LPF is too high to anti-alias the 200 Hz downlink");
+      }
+  }
+
   if (param_get_i32("EXT_TX_RATE", &v) < 0 || v != 200)
     {
       fail("EXT_TX_RATE does not default to 200 Hz");

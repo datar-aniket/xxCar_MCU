@@ -367,6 +367,19 @@ static int imu_delta_daemon(int argc, FAR char *argv[])
   status.board_rotation = board_rot;
 
   accel_meta = orb_get_meta("sensor_accel");
+  /* sensor_gyro and sensor_accel, the RAW driver topics - deliberately not
+   * vehicle_gyro/vehicle_accel.
+   *
+   * Those carry SENS_GYR_LPF and SENS_ACC_LPF, which exist for the rate loop
+   * and the companion twist. A low-pass here would add phase lag to the very
+   * signal the attitude solution integrates, and the delayed-fusion horizon
+   * already handles what such a filter would be there to fix. ArduPilot
+   * draws the same line between INS_GYRO_FILTER and the estimator's input.
+   *
+   * Calibration is applied below, by correct_pair(), so this path is raw
+   * CALIBRATED rather than raw uncorrected.
+   */
+
   gyro_meta = orb_get_meta("sensor_gyro");
 
   if (accel_meta == NULL || gyro_meta == NULL)

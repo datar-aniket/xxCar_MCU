@@ -390,18 +390,39 @@ is the correct small step, exactly as it would be for an angle, provided the
 subtraction is unsigned. After a gap of more than 500 ms the filter restarts
 rather than emitting one enormous value.
 
-### A note on angular_velocity
+### angular_velocity and accel: filtered, and deliberately not the EKF's
 
-`SENS_GYR_LPF` defaults to **0.0, which means the software low-pass is off**.
-So this field carries the gyro with only the ICM42688's hardware anti-alias
-filter applied, not a software-filtered signal. Set `SENS_GYR_LPF` if you
-want one — but note it feeds the estimator too, so it is not a
-downlink-only choice.
+The board keeps **two** IMU streams, the way ArduPilot separates
+`INS_GYRO_FILTER` from what the estimator consumes:
 
-`SENS_ACC_LPF` does default to 100 Hz, so `accel` is filtered. Both are
-sampled at 2 kHz and delivered here at 200 Hz, and a 100 Hz cutoff sits
-exactly at the 200 Hz Nyquist — it is −3 dB where it would need to be
-stopping things.
+| Stream | Filtering | Consumer |
+|---|---|---|
+| `sensor_gyro` / `sensor_accel` (raw driver topics) | calibration only | `imu_delta` → EKF3 |
+| `vehicle_gyro` / `vehicle_accel` (corrected topics) | `SENS_GYR_LPF`, `SENS_ACC_LPF`, optional notch | this packet's twist and accel |
+
+`angular_velocity` and `accel` in `VEHICLE_STATE` come from the **filtered**
+side. The estimator never sees those filters: `imu_delta` subscribes to
+`sensor_gyro` directly and applies its own calibration.
+
+That is not an accident of wiring. A low-pass in the estimator's path adds
+phase lag to the very signal the attitude solution integrates, and the
+filter's delayed-fusion horizon already handles the problem a filter would be
+there to solve. On the control and telemetry side the trade runs the other
+way: lag costs less than noise.
+
+**Defaults:** `SENS_GYR_LPF` is 20 Hz, matching ArduPilot's
+`INS_GYRO_FILTER`. It doubles as the anti-alias filter for this downlink,
+which samples the 2 kHz corrected topics at 200 Hz — two poles at 20 Hz put
+the 100 Hz Nyquist 28 dB down.
+
+`SENS_ACC_LPF` is 100 Hz, which is only 3 dB down at that same Nyquist. That
+is a bandwidth-versus-aliasing choice rather than an oversight: lower it if
+the `accel` channel looks noisy, at the cost of acceleration bandwidth.
+
+`SENS_GYR_NF_FRQ` adds a notch for a known vibration line, off by default.
+
+**Changing these does not change the estimator.** If you filter the twist
+hard for a rate loop, EKF3 is unaffected.
 
 ### source_valid
 
