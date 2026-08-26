@@ -134,7 +134,8 @@ static_assert(offsetof(struct vesc_status_s, tachometer)       == 16, "layout");
 static_assert(offsetof(struct vesc_status_s, current_a)        == 20, "layout");
 static_assert(offsetof(struct vesc_status_s, adc_volts)        == 24, "layout");
 static_assert(offsetof(struct vesc_status_s, controller_id)    == 28, "layout");
-static_assert(sizeof(struct vesc_status_s)                     == 32, "layout");
+static_assert(offsetof(struct vesc_status_s, speed_cps)        == 32, "layout");
+static_assert(sizeof(struct vesc_status_s)                     == 40, "layout");
 
 static_assert(offsetof(struct actuator_command_s, timestamp) ==  0, "layout");
 static_assert(offsetof(struct actuator_command_s, motor)     ==  8, "layout");
@@ -232,7 +233,8 @@ static const char vesc_status_format[] =
   ",timestamp_sample:%" PRIu64
   ",tachometer:%" PRIi32
   ",current_a:%hf,adc_volts:%hf"
-  ",controller_id:%hhu";
+  ",controller_id:%hhu"
+  ",speed_cps:%hf";
 
 static const char actuator_command_format[] =
   "timestamp:%" PRIu64

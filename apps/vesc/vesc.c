@@ -23,6 +23,7 @@
 
 #include "vesc.h"
 #include "vesc_cmd.h"
+#include "vesc_speed.h"
 #include "../param/param.h"
 #include "../uorb_msgs/uorb_msgs.h"
 
@@ -68,6 +69,12 @@ static volatile bool g_armed;
 
 static uint32_t g_cmd_timeout_ms;
 static struct vesc_daemon_status_s g_status;
+
+/* Every decoded STATUS_5 reaches this, at the full 400 Hz - which is the
+ * only place that rate still exists, since vesc_status has no queue.
+ */
+
+static struct vesc_speed_s g_speed;
 
 static uint64_t vesc_now_us(void)
 {
@@ -168,6 +175,18 @@ static void vesc_handle(FAR const struct fdcan_frame_s *frame, int pub,
   out.current_a = decoded.current_a;
   out.adc_volts = decoded.adc_volts;
   out.controller_id = controller_id;
+
+  /* Differentiate and filter here, on every frame, before anything
+   * downsamples this topic.
+   */
+
+  /* sample_us, not now: the ISR timestamp comes from TIM5 in microseconds
+   * while CLOCK_MONOTONIC advances in 1 ms steps. Differentiating a 2.5 ms
+   * interval against a 1 ms clock reads it as 2 or 3 ms, a 20% error on
+   * every single sample.
+   */
+
+  out.speed_cps = vesc_speed_update(&g_speed, decoded.tachometer, sample_us);
 
   if (vesc_status_publish(pub, &out) < 0)
     {
@@ -329,6 +348,8 @@ static int vesc_daemon(int argc, FAR char *argv[])
   status.limits.steer_min = (uint16_t)param_i32("VESC_STEER_MIN");
   status.limits.steer_trim = (uint16_t)param_i32("VESC_STEER_TRIM");
   status.limits.steer_max = (uint16_t)param_i32("VESC_STEER_MAX");
+  vesc_speed_init(&g_speed, (float)param_i32("VESC_TLM_HZ"),
+                  param_f32("VESC_SPD_LPF"));
 
   ret = fdcan_init(status.bitrate);
 

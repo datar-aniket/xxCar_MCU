@@ -69,8 +69,6 @@ static float g_torque_k = 1.0f;
 static float g_steer_k = 1.0f;
 static float g_speed_k = 1.0f;
 
-static struct comp_speed_filter_s g_speed;
-static uint64_t g_speed_last_stamp;
 
 static int64_t g_utc_offset_us;
 static bool    g_utc_valid;
@@ -541,18 +539,13 @@ static void comp_transmit(int fd, int est_sub, int gyro_sub,
       in.current_a = vesc.current_a;
       in.adc_volts = vesc.adc_volts;
 
-      /* Only differentiate a reading we have not already used. orb_copy
-       * hands back the newest message whether or not it changed.
+      /* Already differentiated and filtered by the VESC daemon, which sees
+       * every STATUS_5 at 400 Hz. Doing it here would be too late: this
+       * topic has no queue, so reading it at 200 Hz has already dropped half
+       * the samples.
        */
 
-      if (vesc.timestamp_sample != g_speed_last_stamp)
-        {
-          g_speed_last_stamp = vesc.timestamp_sample;
-          comp_speed_update(&g_speed, vesc.tachometer,
-                            vesc.timestamp_sample);
-        }
-
-      in.motor_counts_per_s = g_speed.value;
+      in.motor_counts_per_s = vesc.speed_cps;
     }
 
   /* UTC on the wire once synced. Before that the companion gets the board's
@@ -810,7 +803,6 @@ static int companion_daemon(int argc, FAR char *argv[])
   g_torque_k = param_f32("VESC_TORQUE_K");
   g_steer_k = param_f32("VESC_STEER_K");
   g_speed_k = param_f32("VESC_SPEED_K");
-  comp_speed_init(&g_speed, param_f32("VESC_SPD_LPF"));
 
   /* The tick is the downlink's clock from here on. Failing to start it is
    * fatal to this daemon rather than a quiet fall back to some other
@@ -939,8 +931,6 @@ static int companion_daemon(int argc, FAR char *argv[])
 
       g_tx_stop = false;
       g_tx_last_sample = 0;
-      comp_speed_reset(&g_speed);
-      g_speed_last_stamp = 0;
       tx_args.fd = fd;
       tx_args.est_sub = est_sub;
       tx_args.gyro_sub = gyro_sub;

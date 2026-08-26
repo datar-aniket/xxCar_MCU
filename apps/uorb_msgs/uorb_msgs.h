@@ -225,6 +225,18 @@ struct vesc_status_s
   float    adc_volts;             /* 24: V, ADC1 - steering feedback */
   uint8_t  controller_id;         /* 28: which VESC */
   uint8_t  pad[3];                /* 29 */
+
+  /* Filtered motor speed in tachometer counts per second.
+   *
+   * Differentiated and filtered HERE rather than by consumers, because this
+   * topic is advertised without a queue: STATUS_5 arrives at 400 Hz and a
+   * subscriber reading at 200 sees only the newest message, so half the
+   * samples are gone before it ever runs. Anti-aliasing has to happen where
+   * every sample still exists.
+   */
+
+  float    speed_cps;             /* 32 */
+  uint8_t  pad2[4];               /* 36 */
 };
 
 /* A command for the actuators: one drive motor and one steering servo.

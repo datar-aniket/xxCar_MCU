@@ -292,45 +292,52 @@ raw 9.8 m/s² as vehicle acceleration.
 | `wheel_torque_nm` | `vesc_status.current_a` | `VESC_TORQUE_K` | 1.0 |
 | `steering_angle` | `vesc_status.adc_volts` | `VESC_STEER_K` | 1.0 |
 | `motor_speed_ms` | tachometer rate | `VESC_SPEED_K` | 1.0 |
-| (filter cutoff) | — | `VESC_SPD_LPF` | 10 Hz |
+| (filter cutoff) | — | `VESC_SPD_LPF` | 100 Hz |
+| (expected telemetry rate) | — | `VESC_TLM_HZ` | 400 Hz |
 
 All three scalars default to **1.0**, so until the vehicle is characterised
 these carry raw amps, raw volts and raw counts per second. That is
 deliberate: a guessed gear ratio is worse than an honest raw number, because
 it looks calibrated.
 
-`motor_speed_ms` is the time derivative of the tachometer, differentiated
-**when a `STATUS_5` frame arrives** and not on the downlink tick — VESC
-telemetry comes in at tens of hertz against a 200 Hz downlink, so
-differentiating per tick would sample an unchanged count most of the time and
-produce zeros punctuated by spikes.
+`motor_speed_ms` is the time derivative of the tachometer, and it is computed
+**in the VESC daemon, not here.** That placement is the point:
 
-It is then low-passed by two cascaded one-pole sections (−40 dB/decade) with
-cutoff `VESC_SPD_LPF`, default 10 Hz. The sections recompute their
-coefficient from each measured interval rather than being designed for a
-fixed rate, because CAN telemetry does not arrive on one — a biquad built for
-50 Hz and fed at 43 Hz has neither the cutoff nor the damping it was designed
-for.
+`STATUS_5` arrives at **400 Hz** and this downlink runs at 200, and
+`vesc_status` is advertised without a queue — so a subscriber reading at
+200 Hz sees only the newest message and **every other sample is already gone**
+before it runs. Filtering on the consumer side cannot anti-alias a stream it
+never received. The daemon sees every decoded frame, so the derivative and
+the filter both live there and the topic carries the finished `speed_cps`.
 
-The requested cutoff is **clamped at runtime to 40% of the measured arrival
-rate**. A cutoff at or above Nyquist is not a filter: at 100 Hz against 20 Hz
-arrivals the coefficient reaches 0.97 and 94% of a step passes straight
-through. Asking for more than the data rate supports is therefore harmless
-rather than silently ineffective.
+The derivative comes first, the filter second: filtering the accumulated
+count would smooth a *position*.
 
-> **What this cannot do.** The VESC samples the tachometer at its own rate,
-> so any wheel content above that Nyquist has *already* folded down before
-> the count reaches us. No filter on this side can undo it; that would have
-> to happen inside the VESC.
->
-> Note also that the 200 Hz downlink cannot itself alias this. Holding a
-> slower signal at a faster rate produces images, not aliases, and the output
-> can carry no content above the VESC Nyquist regardless.
+**The filter is the anti-alias filter for this downlink.** Two cascaded
+one-pole sections, −40 dB/decade, cutoff `VESC_SPD_LPF` default **100 Hz** —
+the 200 Hz downlink's Nyquist. Without it, everything between 100 and 200 Hz
+in the 400 Hz stream folds down into the band you care about.
 
-The tachometer is a 32-bit accumulator and it does wrap; the difference is
-taken in unsigned arithmetic so the wrap is a small step rather than a
-4.3-billion-count spike. After a gap of more than 500 ms the filter restarts
-instead of emitting one enormous value.
+The interval used is an **exponential moving average**, seeded from
+`VESC_TLM_HZ` (default 400) and following the real stream from there. This
+matters because the count is an integer: at 400 Hz a single interval carries
+only a few counts, and dividing a constant delta by a jittering timestamp
+manufactures a speed ripple that is not there. An interval outside 0.25× to
+4× the nominal is refused rather than averaged in, so one late frame cannot
+drag the timebase.
+
+Timestamps come from the FDCAN interrupt (TIM5, microseconds), not from
+`CLOCK_MONOTONIC` — which advances in 1 ms steps here, and would read a
+2.5 ms interval as 2 or 3 ms, a 20% error on every sample.
+
+The requested cutoff is clamped to 40% of the measured rate. A cutoff at or
+above Nyquist is not a filter: it does not go unstable, it simply stops
+filtering.
+
+The tachometer wraps, and that is fine — a finite difference across the wrap
+is the correct small step, exactly as it would be for an angle, provided the
+subtraction is unsigned. After a gap of more than 500 ms the filter restarts
+rather than emitting one enormous value.
 
 ### A note on angular_velocity
 
