@@ -183,6 +183,17 @@ struct ekf_core_s
   uint32_t extnav_fault_count;
   uint32_t extnav_inhibit_count;
 
+  /* Height bound, metres above the alignment point. Zero disables it.
+   *
+   * A ground vehicle does not leave the ground, so an unbounded vertical
+   * state is a place for divergence to hide: a bad accel bias or a bad baro
+   * reference walks z away, and nothing in the filter objects because
+   * nothing tells it the vehicle is on a road.
+   */
+
+  float    height_limit;
+  uint32_t height_clamp_count;
+
   uint32_t tilt_update_count;    /* attitude-only lanes: accepted tilt fixes */
   uint32_t tilt_skipped_count;   /* too far from gravity to be usable */
 
@@ -285,6 +296,12 @@ struct ekf_output_s
  * too, which is why the bound belongs in the header where a test can assert
  * it rather than buried next to the arithmetic.
  */
+
+/* Variance floor applied when the height bound is holding the state. The
+ * clamp makes the number right; this makes the uncertainty honest.
+ */
+
+#define EKF_HEIGHT_LIMIT_VAR         (2.0f * 2.0f)
 
 #define EKF_GYRO_BIAS_LIMIT          0.10f
 #define EKF_ACCEL_BIAS_LIMIT         1.00f
@@ -392,6 +409,13 @@ int ekf_core_fuse_extnav(FAR struct ekf_core_s *ekf,
  */
 
 void ekf_core_set_attitude_only(FAR struct ekf_core_s *ekf, bool enable);
+
+/* Bound the vertical state to +/- limit_m of the alignment point. Zero
+ * disables it, which is the behaviour of every filter that has no idea what
+ * vehicle it is flying.
+ */
+
+void ekf_core_set_height_limit(FAR struct ekf_core_s *ekf, float limit_m);
 
 /* Where "up" points in BODY coordinates, from a body-to-ENU quaternion.
  *

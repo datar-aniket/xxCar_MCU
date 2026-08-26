@@ -492,6 +492,24 @@ static const struct param_def_s g_params[] =
     "External position innovation gate (sigma)" },
   { "EK3_EXT_YAW_NSE", PARAM_TYPE_FLOAT, F32(0.05f), F32(0.01f), F32(1.5f),
     "External yaw measurement noise floor (rad)" },
+  /* Vertical bound, metres either side of where the filter aligned.
+   *
+   * A ground vehicle does not leave the ground, and saying so gives
+   * divergence one less place to hide: a bad accel bias or a drifting baro
+   * reference otherwise integrates into height unopposed.
+   *
+   * 50 m by default, which no road journey will reach in the local frame but
+   * a runaway crosses in seconds - so it guards against divergence without
+   * ever arguing with real terrain. Tighten it to a metre or so for flat or
+   * indoor running and it becomes a genuine height lock. Zero disables it.
+   *
+   * It is a bound, not a measurement: when it engages, the vertical variance
+   * is floored so the solution stops claiming a confidence it does not have.
+   */
+
+  { "EK3_HGT_LIM", PARAM_TYPE_FLOAT, F32(50.0f), F32(0.0f), F32(1000.0f),
+    "Height bound above the alignment point (m, 0 = off)" },
+
   { "EK3_EXT_TIMEOUT", PARAM_TYPE_INT32, I32(1000), I32(100), I32(10000),
     "External nav dropout before position is dropped (ms)" },
 

@@ -995,6 +995,70 @@ static void reset_yaw_absolute(FAR struct ekf_core_s *ekf, float yaw,
   ekf->covariance[EKF_P_INDEX(2, 2)] = variance;
 }
 
+/* Hold the vertical state inside its bound.
+ *
+ * A car stays on the road. Without something saying so, z is free to walk -
+ * a mis-estimated accel bias or a drifting baro reference integrates into
+ * height and nothing in the filter objects, because nothing in the filter
+ * knows what the vehicle is.
+ *
+ * Three things happen together, and the third is the one that matters:
+ *
+ *   the state is clamped, so the published height stops being nonsense;
+ *   the vertical velocity is zeroed IF it is still pushing outwards, so the
+ *     clamp is not re-violated on the very next step;
+ *   the vertical variance is floored, so the filter reports that it does not
+ *     actually know where it is.
+ *
+ * Clamping the state alone would be a lie: the covariance would go on
+ * claiming a confident height while the number was being held in place by
+ * hand. Anything reading position_variance to decide whether to trust the
+ * solution has to see this.
+ *
+ * Velocity is zeroed only when it points further out. A vehicle at the bound
+ * on a slope may legitimately be coming back, and stopping that would fight
+ * the recovery.
+ */
+
+static void constrain_height(FAR struct ekf_core_s *ekf)
+{
+  float excess;
+
+  if (!(ekf->height_limit > 0.0f))
+    {
+      return;
+    }
+
+  if (fabsf(ekf->position[2]) <= ekf->height_limit)
+    {
+      return;
+    }
+
+  excess = ekf->position[2] > 0.0f ? 1.0f : -1.0f;
+  ekf->position[2] = excess * ekf->height_limit;
+
+  if (ekf->velocity[2] * excess > 0.0f)
+    {
+      ekf->velocity[2] = 0.0f;
+    }
+
+  if (ekf->covariance[EKF_P_INDEX(8, 8)] < EKF_HEIGHT_LIMIT_VAR)
+    {
+      ekf->covariance[EKF_P_INDEX(8, 8)] = EKF_HEIGHT_LIMIT_VAR;
+    }
+
+  ekf->height_clamp_count++;
+}
+
+void ekf_core_set_height_limit(FAR struct ekf_core_s *ekf, float limit_m)
+{
+  if (ekf != NULL)
+    {
+      ekf->height_limit = (limit_m > 0.0f && isfinite(limit_m)) ?
+                          limit_m : 0.0f;
+    }
+}
+
 static void constrain_biases(FAR struct ekf_core_s *ekf)
 {
   int axis;
@@ -1286,6 +1350,7 @@ static int measurement_update_3d(
     }
 
   constrain_biases(ekf);
+  constrain_height(ekf);
 
   for (row = 0; row < EKF_STATE_DIM; row++)
     {
@@ -1445,6 +1510,7 @@ static int measurement_update_1d(FAR struct ekf_core_s *ekf,
     }
 
   constrain_biases(ekf);
+  constrain_height(ekf);
 
   for (row = 0; row < EKF_STATE_DIM; row++)
     {
@@ -1948,6 +2014,13 @@ int ekf_core_process(FAR struct ekf_core_s *ekf,
       restart_alignment(ekf);
       return EKF_PROCESS_REJECTED;
     }
+
+  /* Also after the strapdown. The update paths constrain height too, but a
+   * filter coasting with no aiding never reaches them, and coasting is
+   * exactly when the vertical state runs away.
+   */
+
+  constrain_height(ekf);
 
   /* Yaw pinned at zero, once per sample and after the strapdown - which is
    * where yaw actually accumulates, from the z gyro.

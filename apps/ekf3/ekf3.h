@@ -67,6 +67,7 @@ struct ekf3_status_s
   uint32_t stale_count;
   uint32_t reset_requests;
   uint32_t horizon_ms;        /* EK3_DELAY_MS as read at start */
+  float    height_limit;      /* EK3_HGT_LIM, m; 0 = unbounded */
   float    alt_noise;         /* EK3_ALT_M_NSE as read at start */
   float    alt_gate;          /* EK3_ALT_I_GATE as read at start */
   float    declination;       /* EK3_MAG_DEC, radians */

@@ -294,6 +294,23 @@ static void print_status(void)
          core->duplicate_count, core->backward_count, core->gap_count,
          core->source_reset_count, core->numerical_reset_count,
          status.publish_errors);
+  /* The vertical bound. A clamp count that is climbing says the filter is
+   * being held on the road by hand, which is a fault report, not a feature
+   * working - the height it publishes is a bound, not an estimate.
+   */
+
+  if (status.height_limit > 0.0f)
+    {
+      printf("  height     bound %.1f m  clamped %" PRIu32 "%s\n",
+             (double)status.height_limit, core->height_clamp_count,
+             core->height_clamp_count > 0 ?
+               "   <- height is being held, not estimated" : "");
+    }
+  else
+    {
+      printf("  height     unbounded (EK3_HGT_LIM=0)\n");
+    }
+
   /* The attitude monitor.
    *
    * Two questions, and the lane pairing is what separates them: "aiding" is

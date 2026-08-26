@@ -1175,6 +1175,135 @@ static void test_up_in_body_is_yaw_free(void)
   assert_near(up_a[2], 1.0f, 1.0e-5f);
 }
 
+/* The height bound holds the vertical state, and says so in the covariance.
+ *
+ * Clamping the number alone would be a lie: the filter would go on reporting
+ * a confident height while it was being held in place by hand, and anything
+ * reading position_variance to decide whether to trust the solution would be
+ * misled by exactly the fault the clamp exists for.
+ */
+
+static void test_height_limit_clamps_and_admits_it(void)
+{
+  struct ekf_core_s ekf;
+  uint64_t timestamp;
+  struct ekf_extnav_sample_s s = extnav_at(0.0f, 0.0f, 0.0f);
+
+  extnav_align(&ekf, &timestamp);
+  ekf_core_set_height_limit(&ekf, 2.0f);
+
+  /* The first pose only establishes the datum and returns before any
+   * update runs, so nothing is constrained on that call. Poking the state
+   * before it would be testing the datum path, not the bound.
+   */
+
+  assert(ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f,
+                              true, false) == -2);
+
+  ekf.covariance[EKF_P_INDEX(8, 8)] = 0.01f;
+
+  /* Inside the bound: untouched, and no admission made. */
+
+  ekf.position[2] = 1.5f;
+  ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f, true, false);
+  assert_near(ekf.position[2], 1.5f, 1.0e-6f);
+  assert(ekf.height_clamp_count == 0);
+
+  /* Outside: clamped to the bound, and the variance floored. */
+
+  ekf.position[2] = 9.0f;
+  ekf.velocity[2] = 3.0f;
+  ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f, true, false);
+
+  assert_near(ekf.position[2], 2.0f, 1.0e-6f);
+  assert(ekf.height_clamp_count > 0);
+  assert(ekf.covariance[EKF_P_INDEX(8, 8)] >= EKF_HEIGHT_LIMIT_VAR);
+
+  /* Velocity still pushing outwards is stopped, or the clamp would be
+   * re-violated on the very next step and achieve nothing.
+   */
+
+  assert_near(ekf.velocity[2], 0.0f, 1.0e-6f);
+}
+
+/* Both signs. A bound that only holds upwards is half a bound. */
+
+static void test_height_limit_is_symmetric(void)
+{
+  struct ekf_core_s ekf;
+  uint64_t timestamp;
+  struct ekf_extnav_sample_s s = extnav_at(0.0f, 0.0f, 0.0f);
+
+  extnav_align(&ekf, &timestamp);
+  ekf_core_set_height_limit(&ekf, 2.0f);
+
+  /* Establish the datum first: that call returns before any update. */
+
+  ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f, true, false);
+
+  ekf.position[2] = -9.0f;
+  ekf.velocity[2] = -3.0f;
+  ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f, true, false);
+
+  assert_near(ekf.position[2], -2.0f, 1.0e-6f);
+  assert_near(ekf.velocity[2], 0.0f, 1.0e-6f);
+}
+
+/* Velocity bringing the vehicle BACK inside must not be zeroed. A car at the
+ * bound on a slope may legitimately be recovering, and stopping that would
+ * fight the recovery rather than the fault.
+ */
+
+static void test_height_limit_allows_recovery(void)
+{
+  struct ekf_core_s ekf;
+  uint64_t timestamp;
+  struct ekf_extnav_sample_s s = extnav_at(0.0f, 0.0f, 0.0f);
+
+  extnav_align(&ekf, &timestamp);
+  ekf_core_set_height_limit(&ekf, 2.0f);
+
+  /* Establish the datum first: that call returns before any update. */
+
+  ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f, true, false);
+
+  ekf.position[2] = 9.0f;
+  ekf.velocity[2] = -3.0f;            /* heading back down */
+  ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f, true, false);
+
+  assert_near(ekf.position[2], 2.0f, 1.0e-6f);
+  assert_near(ekf.velocity[2], -3.0f, 1.0e-6f);
+}
+
+/* Zero disables it, which is what a filter with no idea what vehicle it is
+ * flying should do.
+ */
+
+static void test_height_limit_zero_disables(void)
+{
+  struct ekf_core_s ekf;
+  uint64_t timestamp;
+  struct ekf_extnav_sample_s s = extnav_at(0.0f, 0.0f, 0.0f);
+
+  extnav_align(&ekf, &timestamp);
+  ekf_core_set_height_limit(&ekf, 0.0f);
+
+  /* Establish the datum first: that call returns before any update. */
+
+  ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f, true, false);
+
+  ekf.position[2] = 900.0f;
+  ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f, true, false);
+
+  assert_near(ekf.position[2], 900.0f, 1.0e-3f);
+  assert(ekf.height_clamp_count == 0);
+
+  /* And a nonsense limit is refused rather than believed. */
+
+  ekf_core_set_height_limit(&ekf, -5.0f);
+  assert(ekf.height_limit == 0.0f);
+}
+
 /* The bias limit is a safety bound, not a tuning value: 2.0 m/s^2 is enough
  * to hide 0.2 g of real acceleration.
  */
@@ -1302,6 +1431,10 @@ int main(void)
   test_tilt_difference_resolves_small_angles();
   test_tilt_difference_never_reports_yaw();
   test_up_in_body_is_yaw_free();
+  test_height_limit_clamps_and_admits_it();
+  test_height_limit_is_symmetric();
+  test_height_limit_allows_recovery();
+  test_height_limit_zero_disables();
   test_accel_bias_limit_is_tight();
   test_extnav_source_reset_forces_a_redatum();
   test_extnav_timeout_drops_horizontal_validity();

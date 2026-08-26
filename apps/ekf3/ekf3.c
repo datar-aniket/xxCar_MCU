@@ -637,6 +637,8 @@ static int ekf3_daemon(int argc, FAR char *argv[])
   status.ext_yaw_noise = param_f32("EK3_EXT_YAW_NSE");
   status.ext_timeout_ms = (uint32_t)param_i32("EK3_EXT_TIMEOUT");
   ekf_core_set_extnav_config(&status.core, status.ext_timeout_ms * 1000u);
+  status.height_limit = param_f32("EK3_HGT_LIM");
+  ekf_core_set_height_limit(&status.core, status.height_limit);
   status.declination = param_f32("EK3_MAG_DEC") * 0.017453292519943295f;
   status.yaw_noise = param_f32("EK3_YAW_M_NSE");
   status.yaw_gate = param_f32("EK3_YAW_I_GATE");
