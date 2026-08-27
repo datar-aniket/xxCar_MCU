@@ -1909,6 +1909,73 @@ static void test_freezing_holds_rather_than_zeroes(void)
   assert((ekf.bias_learn_inhibit & EKF_INHIBIT_GYRO_BIAS) != 0);
 }
 
+/* Process noise is settable, and a nonsense value falls back to the
+ * compiled default rather than being taken literally.
+ *
+ * Zero matters most: it would tell the filter its own propagation is
+ * perfect, the covariance would stop growing, and every measurement would
+ * eventually be gated out as the gain went to nothing. A parameter left
+ * unset must not be able to do that.
+ */
+
+static void test_process_noise_is_settable_and_guarded(void)
+{
+  struct ekf_core_s ekf;
+
+  ekf_core_init(&ekf);
+
+  assert_near(ekf.gyro_noise, EKF_GYRO_NOISE, 1.0e-9f);
+  assert_near(ekf.accel_noise, EKF_ACCEL_NOISE, 1.0e-9f);
+
+  ekf_core_set_process_noise(&ekf, 0.02f, 0.5f, 0.001f, 0.02f);
+  assert_near(ekf.gyro_noise, 0.02f, 1.0e-9f);
+  assert_near(ekf.accel_noise, 0.5f, 1.0e-9f);
+  assert_near(ekf.gyro_bias_rw, 0.001f, 1.0e-9f);
+  assert_near(ekf.accel_bias_rw, 0.02f, 1.0e-9f);
+
+  ekf_core_set_process_noise(&ekf, 0.0f, -1.0f, 0.0f, 0.0f);
+  assert_near(ekf.gyro_noise, EKF_GYRO_NOISE, 1.0e-9f);
+  assert_near(ekf.accel_noise, EKF_ACCEL_NOISE, 1.0e-9f);
+  assert_near(ekf.gyro_bias_rw, EKF_GYRO_BIAS_RW, 1.0e-9f);
+  assert_near(ekf.accel_bias_rw, EKF_ACCEL_BIAS_RW, 1.0e-9f);
+}
+
+/* More process noise must actually grow the covariance faster - the setter
+ * storing a number is not the same as the propagation using it.
+ */
+
+static void test_process_noise_reaches_the_propagation(void)
+{
+  float grown[2];
+  int mode;
+
+  for (mode = 0; mode < 2; mode++)
+    {
+      struct ekf_core_s ekf;
+      struct ekf_imu_sample_s imu;
+      uint64_t timestamp = 1000000ull;
+      const float zero_gyro[3] = {0.0f, 0.0f, 0.0f};
+      const float accel[3] = {0.0f, 0.0f, TEST_GRAVITY};
+      unsigned i;
+
+      ekf_core_init(&ekf);
+      initialize_tilted(&ekf, &timestamp, 0.0f, 0.0f, zero_gyro);
+      ekf_core_set_process_noise(&ekf, 0.015f,
+                                 mode ? 1.0f : 0.1f, 0.001f, 0.001f);
+
+      for (i = 0; i < 200; i++)
+        {
+          timestamp += TEST_DT_US;
+          make_sample(&imu, timestamp, accel, zero_gyro);
+          ekf_core_process(&ekf, &imu);
+        }
+
+      grown[mode] = ekf.covariance[EKF_P_INDEX(3, 3)];
+    }
+
+  assert(grown[1] > grown[0]);
+}
+
 /* A zero-velocity update pulls velocity to zero and needs no calibration.
  *
  * This is the aid that bounds the drift an unaided inertial solution
@@ -2294,6 +2361,8 @@ int main(void)
   test_disagreeing_source_is_followed_not_chased();
   test_bias_learning_can_be_frozen();
   test_freezing_holds_rather_than_zeroes();
+  test_process_noise_is_settable_and_guarded();
+  test_process_noise_reaches_the_propagation();
   test_zero_velocity_update_pulls_velocity_down();
   test_zero_velocity_update_leaves_attitude_and_position();
   test_zero_velocity_raises_observability();

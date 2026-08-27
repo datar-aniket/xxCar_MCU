@@ -172,6 +172,13 @@ struct ekf_core_s
 
   bool     tilt_fusion_moving;
 
+  /* Process noise, set from parameters. Zero leaves the compiled default. */
+
+  float    gyro_noise;
+  float    accel_noise;
+  float    gyro_bias_rw;
+  float    accel_bias_rw;
+
   /* Wheel-speed zero-velocity aiding. The wheels not turning is the only
    * direct velocity measurement a car has that needs no calibration.
    */
@@ -393,6 +400,18 @@ struct ekf_output_s
  * no amount of operator confidence makes that safe.
  */
 
+/* Process-noise fallbacks, used when a parameter is unset or nonsense.
+ *
+ * In the header rather than beside the arithmetic because they are the
+ * documented floor of a runtime setting now, and a test should be able to
+ * assert that an unset parameter lands on them rather than on zero.
+ */
+
+#define EKF_GYRO_NOISE               0.015f
+#define EKF_ACCEL_NOISE              0.35f
+#define EKF_GYRO_BIAS_RW             0.00010f
+#define EKF_ACCEL_BIAS_RW            0.010f
+
 #define EKF_GYRO_BIAS_LIMIT          0.10f
 #define EKF_ACCEL_BIAS_LIMIT         1.00f
 
@@ -505,6 +524,16 @@ void ekf_core_set_attitude_only(FAR struct ekf_core_s *ekf, bool enable);
  */
 
 void ekf_core_set_tilt_fusion_moving(FAR struct ekf_core_s *ekf, bool enable);
+
+/* Process noise. Any argument that is not positive and finite leaves that
+ * term at its compiled default rather than disabling it - a zero process
+ * noise tells the filter its model is perfect, which is the one thing no
+ * model is.
+ */
+
+void ekf_core_set_process_noise(FAR struct ekf_core_s *ekf, float gyro,
+                                float accel, float gyro_bias_rw,
+                                float accel_bias_rw);
 
 /* Fuse "the vehicle is not moving" - a zero-velocity update.
  *

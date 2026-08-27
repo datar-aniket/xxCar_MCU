@@ -57,10 +57,6 @@
  * later stages will expose bounded parameters and vibration adaptation.
  */
 
-#define EKF_GYRO_NOISE              0.015f
-#define EKF_ACCEL_NOISE             0.35f
-#define EKF_GYRO_BIAS_RW            0.00010f
-#define EKF_ACCEL_BIAS_RW           0.010f
 #define EKF_CLIP_NOISE_SCALE        10.0f
 #define EKF_MIN_VARIANCE            1.0e-10f
 
@@ -525,6 +521,8 @@ void ekf_core_init(FAR struct ekf_core_s *ekf)
 
   ekf->gyro_bias_limit = EKF_GYRO_BIAS_LIMIT;
   ekf->accel_bias_limit = EKF_ACCEL_BIAS_LIMIT;
+
+  ekf_core_set_process_noise(ekf, 0.0f, 0.0f, 0.0f, 0.0f);
 }
 
 static bool sample_valid(FAR const struct ekf_imu_sample_s *sample)
@@ -866,9 +864,9 @@ static bool covariance_predict(FAR struct ekf_core_s *ekf)
   for (axis = 0; axis < 3; axis++)
     {
       ekf->covariance[EKF_P_INDEX(axis, axis)] +=
-        EKF_GYRO_NOISE * EKF_GYRO_NOISE * noise_scale * dt;
+        ekf->gyro_noise * ekf->gyro_noise * noise_scale * dt;
       ekf->covariance[EKF_P_INDEX(3 + axis, 3 + axis)] +=
-        EKF_ACCEL_NOISE * EKF_ACCEL_NOISE * noise_scale * dt;
+        ekf->accel_noise * ekf->accel_noise * noise_scale * dt;
       ekf->covariance[EKF_P_INDEX(9 + axis, 9 + axis)] +=
         EKF_GYRO_BIAS_RW * EKF_GYRO_BIAS_RW * dt;
       ekf->covariance[EKF_P_INDEX(12 + axis, 12 + axis)] +=
@@ -2041,6 +2039,26 @@ static bool attitude_only_tilt_update(FAR struct ekf_core_s *ekf)
     }
 
   return true;
+}
+
+static float noise_or_default(float value, float fallback)
+{
+  return (value > 0.0f && isfinite(value)) ? value : fallback;
+}
+
+void ekf_core_set_process_noise(FAR struct ekf_core_s *ekf, float gyro,
+                                float accel, float gyro_bias_rw,
+                                float accel_bias_rw)
+{
+  if (ekf == NULL)
+    {
+      return;
+    }
+
+  ekf->gyro_noise = noise_or_default(gyro, EKF_GYRO_NOISE);
+  ekf->accel_noise = noise_or_default(accel, EKF_ACCEL_NOISE);
+  ekf->gyro_bias_rw = noise_or_default(gyro_bias_rw, EKF_GYRO_BIAS_RW);
+  ekf->accel_bias_rw = noise_or_default(accel_bias_rw, EKF_ACCEL_BIAS_RW);
 }
 
 void ekf_core_set_tilt_fusion_moving(FAR struct ekf_core_s *ekf, bool enable)

@@ -591,6 +591,39 @@ static const struct param_def_s g_params[] =
    * survive a vehicle rocking on its suspension.
    */
 
+  /* Process noise. How much the filter distrusts its own propagation, which
+   * is what sets how quickly a measurement is allowed to move the state.
+   *
+   * The two sensor terms go UP from the ArduPilot and PX4 reference values
+   * of 0.015 and 0.35. Those are written for aircraft; a ground vehicle on
+   * a rough surface feeds its accelerometers far more broadband vibration
+   * than a propeller does, and a filter that is too sure of its prediction
+   * answers a good measurement slowly - which is the lag that a position fix
+   * then over-corrects.
+   *
+   * The gyro bias walk goes up TENFOLD, to the reference value it should
+   * always have had. At 1e-4 the bias moved so slowly that a real thermal
+   * drift outran the estimate for minutes at a time.
+   *
+   * The accel bias walk goes up too, and that one deserves its reason
+   * stated, because on its own it is the wrong direction: a loose accel bias
+   * is what let this estimate reach its limit in the first place. What makes
+   * it right now is that the bias is no longer unobserved. Every stop feeds
+   * it a real measurement through the zero-velocity update, so the walk is
+   * what lets it TRACK that measurement instead of being pinned by an
+   * over-tight prior. Raising it without EK3_ZUPT_EN on would simply let it
+   * wander faster.
+   */
+
+  { "EK3_GYR_P_NSE", PARAM_TYPE_FLOAT, F32(0.02f), F32(0.0001f), F32(1.0f),
+    "Gyro process noise (rad/s)" },
+  { "EK3_ACC_P_NSE", PARAM_TYPE_FLOAT, F32(0.5f), F32(0.01f), F32(5.0f),
+    "Accelerometer process noise (m/s^2)" },
+  { "EK3_GBIAS_P_NSE", PARAM_TYPE_FLOAT, F32(0.001f), F32(1.0e-6f),
+    F32(0.1f), "Gyro bias random walk (rad/s^2)" },
+  { "EK3_ABIAS_P_NSE", PARAM_TYPE_FLOAT, F32(0.02f), F32(1.0e-5f), F32(1.0f),
+    "Accelerometer bias random walk (m/s^3)" },
+
   { "EK3_ZUPT_EN", PARAM_TYPE_INT32, I32(1), I32(0), I32(1),
     "Fuse zero velocity when the wheels are stopped" },
   { "EK3_ZUPT_CPS", PARAM_TYPE_FLOAT, F32(50.0f), F32(0.0f), F32(100000.0f),
