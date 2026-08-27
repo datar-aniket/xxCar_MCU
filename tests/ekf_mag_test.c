@@ -528,6 +528,55 @@ static void test_yaw_fusion_leaves_roll_pitch(void)
   assert(fabsf(wrap_pi(after[2] - before[2])) > 5.0f * DEG);
 }
 
+/* At nonzero tilt, navigation up has components in all three body error
+ * axes. A yaw update must therefore project its gain onto that physical axis,
+ * not merely update error-state index 2. Deliberate attitude/yaw covariance
+ * makes an unprojected gain disturb roll and pitch.
+ */
+
+static void test_tilted_yaw_gain_is_about_navigation_up(void)
+{
+  struct ekf_core_s ekf;
+  const float roll = 18.0f * DEG;
+  const float pitch = -14.0f * DEG;
+  float level[3];
+  float field[3];
+  float before[3];
+  float after[3];
+  float p00;
+  float p11;
+  float p22;
+  int i;
+
+  align_with_mag(&ekf, 0.0f);
+  quaternion_from_euler_test(roll, pitch, 0.0f, ekf.quaternion);
+
+  p00 = ekf.covariance[EKF_P_INDEX(0, 0)];
+  p11 = ekf.covariance[EKF_P_INDEX(1, 1)];
+  p22 = ekf.covariance[EKF_P_INDEX(2, 2)];
+  ekf.covariance[EKF_P_INDEX(0, 2)] = 0.40f * sqrtf(p00 * p22);
+  ekf.covariance[EKF_P_INDEX(2, 0)] =
+    ekf.covariance[EKF_P_INDEX(0, 2)];
+  ekf.covariance[EKF_P_INDEX(1, 2)] = -0.30f * sqrtf(p11 * p22);
+  ekf.covariance[EKF_P_INDEX(2, 1)] =
+    ekf.covariance[EKF_P_INDEX(1, 2)];
+
+  level_field(20.0f * DEG, level);
+  tilt_into_body(roll, pitch, level, field);
+  ekf_core_euler(&ekf, before);
+
+  for (i = 0; i < 10; i++)
+    {
+      assert(ekf_core_fuse_mag(&ekf, field, 0.0f, FIELD_TOTAL, 0.5f,
+                               5.0f) == 1);
+    }
+
+  ekf_core_euler(&ekf, after);
+  assert(close_angle(after[0], before[0], 1.0e-4f));
+  assert(close_angle(after[1], before[1], 1.0e-4f));
+  assert(fabsf(wrap_pi(after[2] - before[2])) > 2.0f * DEG);
+}
+
 /* A re-alignment throws the datum away with everything else. */
 
 static void test_realignment_clears_absolute(void)
@@ -570,6 +619,7 @@ int main(void)
   test_sustained_rejection_drops_absolute();
   test_accept_clears_run();
   test_yaw_fusion_leaves_roll_pitch();
+  test_tilted_yaw_gain_is_about_navigation_up();
   test_realignment_clears_absolute();
 
   puts("ekf_mag: tilt compensation, init and gated yaw fusion verified - OK");

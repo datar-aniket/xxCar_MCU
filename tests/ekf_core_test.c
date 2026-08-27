@@ -1909,6 +1909,125 @@ static void test_freezing_holds_rather_than_zeroes(void)
   assert((ekf.bias_learn_inhibit & EKF_INHIBIT_GYRO_BIAS) != 0);
 }
 
+/* A zero-velocity update pulls velocity to zero and needs no calibration.
+ *
+ * This is the aid that bounds the drift an unaided inertial solution
+ * accumulates. The vehicle below is stationary but the filter believes it is
+ * moving, which is exactly the state a stop arrives in.
+ */
+
+static void test_zero_velocity_update_pulls_velocity_down(void)
+{
+  struct ekf_core_s ekf;
+  uint64_t timestamp;
+  const float zero_gyro[3] = {0.0f, 0.0f, 0.0f};
+  unsigned i;
+
+  ekf_core_init(&ekf);
+  initialize_tilted(&ekf, &timestamp, 0.0f, 0.0f, zero_gyro);
+
+  ekf.velocity[0] = 2.0f;
+  ekf.velocity[1] = -1.0f;
+  ekf.velocity[2] = 0.5f;
+
+  for (i = 0; i < 50; i++)
+    {
+      assert(ekf_core_fuse_zero_velocity(&ekf, 0.05f, 5.0f) >= 0);
+    }
+
+  assert(fabsf(ekf.velocity[0]) < 0.05f);
+  assert(fabsf(ekf.velocity[1]) < 0.05f);
+  assert(fabsf(ekf.velocity[2]) < 0.05f);
+  assert(ekf.zupt_accept_count > 0);
+}
+
+/* It must not move position or attitude.
+ *
+ * Stationary wheels do not always mean a stationary vehicle - a skid, a tow
+ * or a jacked-up axle all read the same - so the one lie this measurement
+ * can tell must stay out of roll and pitch. Gravity is the better tilt
+ * reference at a standstill anyway, and the low-dynamics update already
+ * takes it at exactly that moment.
+ */
+
+static void test_zero_velocity_update_leaves_attitude_and_position(void)
+{
+  struct ekf_core_s ekf;
+  uint64_t timestamp;
+  const float zero_gyro[3] = {0.0f, 0.0f, 0.0f};
+  float euler_before[3];
+  float euler_after[3];
+  float position_before[3];
+  unsigned i;
+
+  ekf_core_init(&ekf);
+  initialize_tilted(&ekf, &timestamp, 0.05f, -0.03f, zero_gyro);
+
+  ekf.velocity[0] = 2.0f;
+  ekf.position[0] = 17.0f;
+  ekf.position[1] = -4.0f;
+
+  /* Give attitude and position a path to move through, or this passes with
+   * the gain mask deleted - a state with no cross-covariance to the
+   * measurement sits still whether it is permitted to move or not.
+   */
+
+  ekf.covariance[EKF_P_INDEX(1, 3)] = 0.02f;   /* pitch <-> vx */
+  ekf.covariance[EKF_P_INDEX(3, 1)] = 0.02f;
+  ekf.covariance[EKF_P_INDEX(0, 4)] = 0.02f;   /* roll  <-> vy */
+  ekf.covariance[EKF_P_INDEX(4, 0)] = 0.02f;
+  ekf.covariance[EKF_P_INDEX(6, 3)] = 0.02f;   /* posE  <-> vx */
+  ekf.covariance[EKF_P_INDEX(3, 6)] = 0.02f;
+
+  ekf_core_euler(&ekf, euler_before);
+  memcpy(position_before, ekf.position, sizeof(position_before));
+
+  for (i = 0; i < 50; i++)
+    {
+      ekf.covariance[EKF_P_INDEX(1, 3)] = 0.02f;
+      ekf.covariance[EKF_P_INDEX(3, 1)] = 0.02f;
+      ekf.covariance[EKF_P_INDEX(0, 4)] = 0.02f;
+      ekf.covariance[EKF_P_INDEX(4, 0)] = 0.02f;
+      ekf.covariance[EKF_P_INDEX(6, 3)] = 0.02f;
+      ekf.covariance[EKF_P_INDEX(3, 6)] = 0.02f;
+
+      ekf_core_fuse_zero_velocity(&ekf, 0.05f, 5.0f);
+    }
+
+  ekf_core_euler(&ekf, euler_after);
+
+  assert_near(euler_after[0], euler_before[0], 1.0e-9f);
+  assert_near(euler_after[1], euler_before[1], 1.0e-9f);
+  assert_near(ekf.position[0], position_before[0], 1.0e-9f);
+  assert_near(ekf.position[1], position_before[1], 1.0e-9f);
+}
+
+/* A recent stop makes velocity observable, which is the middle tier that
+ * had no source until now.
+ */
+
+static void test_zero_velocity_raises_observability(void)
+{
+  struct ekf_core_s ekf;
+  uint64_t timestamp;
+  const float zero_gyro[3] = {0.0f, 0.0f, 0.0f};
+
+  ekf_core_init(&ekf);
+  initialize_tilted(&ekf, &timestamp, 0.0f, 0.0f, zero_gyro);
+  ekf_core_set_extnav_config(&ekf, 1000000u);
+  ekf_core_set_position_hold(&ekf, 2.0f);
+
+  assert(ekf_core_observability(&ekf) == EKF_OBS_ATTITUDE);
+
+  ekf_core_fuse_zero_velocity(&ekf, 0.05f, 5.0f);
+  assert(ekf_core_observability(&ekf) == EKF_OBS_VELOCITY);
+
+  /* And it goes stale like any other aid. */
+
+  ekf.last_timestamp_sample += 5000000ull;
+  assert(ekf_core_observability(&ekf) == EKF_OBS_ATTITUDE);
+}
+
 /* A moving vehicle must keep a tilt reference.
  *
  * The standstill update does not run while driving, so without this roll and
@@ -2175,6 +2294,9 @@ int main(void)
   test_disagreeing_source_is_followed_not_chased();
   test_bias_learning_can_be_frozen();
   test_freezing_holds_rather_than_zeroes();
+  test_zero_velocity_update_pulls_velocity_down();
+  test_zero_velocity_update_leaves_attitude_and_position();
+  test_zero_velocity_raises_observability();
   test_tilt_reference_while_moving();
   test_observability_tiers_nest();
   test_unaided_states_still_propagate();

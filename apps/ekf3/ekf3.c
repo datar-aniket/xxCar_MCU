@@ -488,6 +488,34 @@ static void monitor_compare(FAR struct ekf3_status_s *status,
    */
 }
 
+/* Take the newest wheel rate and decide whether the vehicle is stopped.
+ *
+ * The threshold is in tachometer COUNTS PER SECOND on purpose. Zero is zero
+ * at any scale, so this decision does not depend on VESC_SPEED_K and stays
+ * correct before that scale has ever been calibrated - which is the whole
+ * reason a zero-velocity update is worth having early.
+ */
+
+static void drain_wheel(int sub, FAR struct ekf3_status_s *status)
+{
+  struct vesc_status_s wheel;
+
+  if (sub < 0 || !status->zupt_enabled)
+    {
+      return;
+    }
+
+  if (orb_copy(ORB_ID(vesc_status), sub, &wheel) < 0)
+    {
+      return;
+    }
+
+  status->wheel_available = true;
+  status->last_wheel_cps = wheel.speed_cps;
+  status->zupt_stopped =
+    fabsf(wheel.speed_cps) <= status->zupt_threshold_cps;
+}
+
 static void publish_output(int publisher, FAR struct ekf3_status_s *status,
                            uint64_t now)
 {
@@ -552,6 +580,7 @@ static int ekf3_daemon(int argc, FAR char *argv[])
   int baro_sub = -1;
   int extnav_sub = -1;
   int mon_sub = -1;
+  int wheel_sub = -1;
   int publisher = -1;
   int result = EXIT_FAILURE;
 
@@ -598,6 +627,24 @@ static int ekf3_daemon(int argc, FAR char *argv[])
   mag_sub = orb_subscribe(ORB_ID(vehicle_mag));
   baro_sub = orb_subscribe(ORB_ID(vehicle_baro));
   extnav_sub = orb_subscribe(ORB_ID(external_pose));
+
+  /* Read before the subscription that depends on it, which the parameter
+   * block further down is too late for.
+   */
+
+  status.zupt_enabled = param_i32("EK3_ZUPT_EN") != 0;
+  status.zupt_threshold_cps = param_f32("EK3_ZUPT_CPS");
+  status.zupt_noise = param_f32("EK3_ZUPT_NSE");
+  status.zupt_gate = param_f32("EK3_ZUPT_GATE");
+
+  /* The wheels. Absent if the VESC link is not running, which costs the
+   * zero-velocity aid and nothing else.
+   */
+
+  if (status.zupt_enabled)
+    {
+      wheel_sub = orb_subscribe(ORB_ID(vesc_status));
+    }
 
   /* Instance 1 of vehicle_imu, the secondary IMU. Absent if imu_delta's
    * second lane did not start, which is not a failure here: the estimator
@@ -768,6 +815,21 @@ static int ekf3_daemon(int argc, FAR char *argv[])
            * and report a misleading overflow.
            */
 
+          /* Zero velocity, while the wheels say the vehicle is stopped.
+           *
+           * Fused per released IMU sample rather than per wheel message so
+           * it keeps pulling for as long as the vehicle is stationary - a
+           * single update at the moment of stopping would be undone by the
+           * next second of accelerometer error.
+           */
+
+          if (status.zupt_enabled && status.zupt_stopped &&
+              status.wheel_available)
+            {
+              ekf_core_fuse_zero_velocity(&status.core, status.zupt_noise,
+                                          status.zupt_gate);
+            }
+
           while (ekf_delay_next_baro(&g_delay, sample.timestamp_sample,
                                      EKF3_BARO_MAX_AGE_US, &baro))
             {
@@ -839,6 +901,7 @@ static int ekf3_daemon(int argc, FAR char *argv[])
        * iteration.
        */
 
+      drain_wheel(wheel_sub, &status);
       drain_monitor_imu(mon_sub, &status);
       publish_output(publisher, &status, now);
 
@@ -877,6 +940,11 @@ out:
   if (mon_sub >= 0)
     {
       orb_unsubscribe(mon_sub);
+    }
+
+  if (wheel_sub >= 0)
+    {
+      orb_unsubscribe(wheel_sub);
     }
 
   if (publisher >= 0)

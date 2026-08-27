@@ -67,6 +67,14 @@ struct ekf3_status_s
   uint32_t stale_count;
   uint32_t reset_requests;
   uint32_t horizon_ms;        /* EK3_DELAY_MS as read at start */
+  bool     zupt_enabled;
+  float    zupt_threshold_cps;
+  float    zupt_noise;
+  float    zupt_gate;
+  bool     zupt_stopped;      /* wheels currently reading stopped */
+  bool     wheel_available;   /* vesc_status is being received */
+  float    last_wheel_cps;
+
   float    height_limit;      /* EK3_HGT_LIM, m; 0 = unbounded */
   float    position_hold_limit; /* EK3_POSHOLD_M, m; 0 = free */
   float    alt_noise;         /* EK3_ALT_M_NSE as read at start */

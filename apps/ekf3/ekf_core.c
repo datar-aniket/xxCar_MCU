@@ -1123,11 +1123,18 @@ uint8_t ekf_core_observability(FAR const struct ekf_core_s *ekf)
       return EKF_OBS_POSITION;
     }
 
-  /* Nothing between the two yet. Optical flow and wheel speed both belong
-   * here when they arrive - each measures motion without measuring where,
-   * which is exactly EKF_OBS_VELOCITY - and adding one means returning it
-   * from this branch and nothing else.
+  /* A recent zero-velocity update measures motion without measuring where,
+   * which is exactly this tier. Optical flow belongs here too when it
+   * arrives.
    */
+
+  if (ekf->last_zupt_timestamp != 0 && ekf->extnav_timeout_us > 0 &&
+      ekf->last_timestamp_sample >= ekf->last_zupt_timestamp &&
+      ekf->last_timestamp_sample - ekf->last_zupt_timestamp <
+        (uint64_t)ekf->extnav_timeout_us)
+    {
+      return EKF_OBS_VELOCITY;
+    }
 
   return EKF_OBS_ATTITUDE;
 }
@@ -2758,6 +2765,77 @@ float ekf_baro_height(float pressure_hpa, float reference_hpa)
 
   return 44330.77f * (1.0f - powf(pressure_hpa / reference_hpa,
                                   0.1902632f));
+}
+
+int ekf_core_fuse_zero_velocity(FAR struct ekf_core_s *ekf, float noise,
+                                float gate)
+{
+  float h[EKF_STATE_DIM];
+  int accepted = 0;
+  int axis;
+
+  if (ekf == NULL || !ekf->initialized || !(noise > 0.0f) ||
+      !isfinite(noise) || !(gate > 0.0f))
+    {
+      return -1;
+    }
+
+  /* Measured in the NAV frame, not the body frame, and that is the whole
+   * economy of it: a stationary vehicle has zero velocity in every frame, so
+   * there is no rotation to apply and no attitude error to leak in. A
+   * body-frame wheel-speed measurement would need both.
+   */
+
+  for (axis = 0; axis < 3; axis++)
+    {
+      int result;
+
+      memset(h, 0, sizeof(h));
+      h[3 + axis] = 1.0f;
+
+      /* Velocity and accelerometer bias only.
+       *
+       * Bias is the prize: a standstill is the one regime where it is
+       * cleanly separable from tilt, which is why the low-dynamics update
+       * goes after it too.
+       *
+       * Attitude is deliberately NOT permitted. Gravity is a better tilt
+       * measurement than one inferred from velocity, the low-dynamics
+       * update already takes it at exactly this moment, and stationary
+       * wheels do not always mean a stationary vehicle - a skid, a tow, or
+       * a jacked-up axle would otherwise put that lie straight into roll
+       * and pitch. Position is not permitted either: this says the vehicle
+       * is not moving, not where it is.
+       */
+
+      result = measurement_update_1d(ekf, h, -ekf->velocity[axis],
+                                     noise * noise, gate,
+                                     &ekf->last_zupt_nis[axis],
+                                     EKF_GAIN_VELOCITY_XY |
+                                     EKF_GAIN_VELOCITY_Z |
+                                     EKF_GAIN_ACCEL_BIAS,
+                                     NULL);
+
+      if (result < 0)
+        {
+          return -1;
+        }
+
+      if (result > 0)
+        {
+          accepted++;
+        }
+    }
+
+  if (accepted == 0)
+    {
+      ekf->zupt_reject_count++;
+      return 0;
+    }
+
+  ekf->zupt_accept_count++;
+  ekf->last_zupt_timestamp = ekf->last_timestamp_sample;
+  return 1;
 }
 
 int ekf_core_fuse_baro(FAR struct ekf_core_s *ekf, float pressure_hpa,

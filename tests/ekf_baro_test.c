@@ -203,6 +203,60 @@ static void test_reduces_vertical_velocity_variance(void)
   assert(g_core.covariance[EKF_P_INDEX(5, 5)] < before);
 }
 
+/* A height observation may correct only the vertical state family. Seed
+ * covariance from height into every other state so this verifies the gain
+ * mask rather than relying on naturally small cross-terms.
+ */
+
+static void test_height_masks_attitude_and_horizontal_gain(void)
+{
+  struct ekf_core_s before;
+  int state;
+  int axis;
+
+  align_core();
+  assert(ekf_core_fuse_baro(&g_core, 1013.25f, 2.0f, 5.0f) == -2);
+
+  for (state = 0; state < EKF_STATE_DIM; state++)
+    {
+      float cross;
+
+      if (state == 8)
+        {
+          continue;
+        }
+
+      cross = 0.10f * sqrtf(
+        g_core.covariance[EKF_P_INDEX(state, state)] *
+        g_core.covariance[EKF_P_INDEX(8, 8)]);
+      g_core.covariance[EKF_P_INDEX(state, 8)] = cross;
+      g_core.covariance[EKF_P_INDEX(8, state)] = cross;
+    }
+
+  before = g_core;
+  assert(ekf_core_fuse_baro(&g_core, 1013.20f, 2.0f, 5.0f) == 1);
+  assert(fabsf(g_core.position[2] - before.position[2]) > 1.0e-4f);
+
+  for (state = 0; state < 4; state++)
+    {
+      assert(CLOSE(g_core.quaternion[state], before.quaternion[state],
+                   1.0e-7f));
+    }
+
+  for (axis = 0; axis < 2; axis++)
+    {
+      assert(CLOSE(g_core.velocity[axis], before.velocity[axis], 1.0e-7f));
+      assert(CLOSE(g_core.position[axis], before.position[axis], 1.0e-7f));
+      assert(CLOSE(g_core.accel_bias[axis], before.accel_bias[axis],
+                   1.0e-7f));
+    }
+
+  for (axis = 0; axis < 3; axis++)
+    {
+      assert(CLOSE(g_core.gyro_bias[axis], before.gyro_bias[axis], 1.0e-7f));
+    }
+}
+
 /* The reference is tied to the alignment point, so losing alignment must
  * discard it. Keeping it would silently re-datum the height to whatever the
  * pressure was when the filter last aligned somewhere else.
@@ -301,6 +355,7 @@ int main(void)
   test_gate_rejects_and_counts();
   test_accept_clears_run();
   test_reduces_vertical_velocity_variance();
+  test_height_masks_attitude_and_horizontal_gain();
   test_realignment_discards_reference();
   test_uninitialised_refuses();
   test_solution_status_vertical();

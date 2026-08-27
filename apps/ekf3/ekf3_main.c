@@ -333,6 +333,29 @@ static void print_status(void)
          core->duplicate_count, core->backward_count, core->gap_count,
          core->source_reset_count, core->numerical_reset_count,
          status.publish_errors);
+  /* The wheels. The threshold is in counts per second, not m/s, so it does
+   * not depend on VESC_SPEED_K - which is what lets this work before that
+   * scale has been calibrated.
+   */
+
+  if (!status.zupt_enabled)
+    {
+      printf("  wheels     zero-velocity aiding off (EK3_ZUPT_EN=0)\n");
+    }
+  else if (!status.wheel_available)
+    {
+      printf("  wheels     no vesc_status - zero-velocity aiding inactive\n");
+    }
+  else
+    {
+      printf("  wheels     %.1f counts/s  %s (threshold %.1f)  zupt %"
+             PRIu32 " / %" PRIu32 " rejected\n",
+             (double)status.last_wheel_cps,
+             status.zupt_stopped ? "STOPPED" : "moving",
+             (double)status.zupt_threshold_cps,
+             core->zupt_accept_count, core->zupt_reject_count);
+    }
+
   /* What the current sensors can actually support. An IMU alone observes
    * attitude; velocity and position need a source that measures motion or
    * says where you are.

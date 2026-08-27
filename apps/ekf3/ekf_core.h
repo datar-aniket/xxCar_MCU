@@ -172,6 +172,15 @@ struct ekf_core_s
 
   bool     tilt_fusion_moving;
 
+  /* Wheel-speed zero-velocity aiding. The wheels not turning is the only
+   * direct velocity measurement a car has that needs no calibration.
+   */
+
+  uint32_t zupt_accept_count;
+  uint32_t zupt_reject_count;
+  uint64_t last_zupt_timestamp;
+  float    last_zupt_nis[3];
+
   uint8_t  inhibit_mask;
 
   /* Persistent inhibit from EK3_ABIAS_EN / EK3_GBIAS_EN. ORed with the
@@ -496,6 +505,24 @@ void ekf_core_set_attitude_only(FAR struct ekf_core_s *ekf, bool enable);
  */
 
 void ekf_core_set_tilt_fusion_moving(FAR struct ekf_core_s *ekf, bool enable);
+
+/* Fuse "the vehicle is not moving" - a zero-velocity update.
+ *
+ * The strongest aid a wheeled vehicle has, and the cheapest: stationary
+ * wheels mean zero velocity in EVERY direction, so the measurement is the
+ * full nav-frame velocity vector against zero and needs no rotation, no
+ * scale factor and no calibration. Detecting it costs one comparison
+ * against a tachometer rate.
+ *
+ * It is what bounds the velocity drift that an unaided inertial solution
+ * accumulates, and it makes accelerometer bias observable at every stop -
+ * which is the one regime where bias is cleanly separable from tilt.
+ *
+ * Returns 1 fused, 0 gated, -1 unusable.
+ */
+
+int ekf_core_fuse_zero_velocity(FAR struct ekf_core_s *ekf, float noise,
+                                float gate);
 
 /* Bound the vertical state to +/- limit_m of the alignment point. Zero
  * disables it, which is the behaviour of every filter that has no idea what

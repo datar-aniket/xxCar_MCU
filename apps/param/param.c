@@ -572,6 +572,34 @@ static const struct param_def_s g_params[] =
    * those observe accelerometer bias as well as tilt.
    */
 
+  /* Zero-velocity aiding from the wheels.
+   *
+   * The strongest aid a car has and the cheapest: stationary wheels mean
+   * zero velocity in every direction, so the measurement needs no rotation,
+   * no scale factor and no calibration. It is what bounds the velocity drift
+   * an unaided inertial solution accumulates, and it makes accelerometer
+   * bias observable at every stop.
+   *
+   * EK3_ZUPT_CPS is in tachometer COUNTS PER SECOND, deliberately not m/s.
+   * The threshold must not depend on VESC_SPEED_K, because zero is zero at
+   * any scale - so this works correctly before that scale is ever
+   * calibrated. Set it just above the noise floor of the tachometer at rest;
+   * `vesc status` shows the rate directly.
+   *
+   * The noise is what the filter is told a "stationary" reading is worth.
+   * 0.05 m/s is tight enough to pull velocity down hard and loose enough to
+   * survive a vehicle rocking on its suspension.
+   */
+
+  { "EK3_ZUPT_EN", PARAM_TYPE_INT32, I32(1), I32(0), I32(1),
+    "Fuse zero velocity when the wheels are stopped" },
+  { "EK3_ZUPT_CPS", PARAM_TYPE_FLOAT, F32(50.0f), F32(0.0f), F32(100000.0f),
+    "Wheel rate below which the vehicle is stopped (counts/s)" },
+  { "EK3_ZUPT_NSE", PARAM_TYPE_FLOAT, F32(0.05f), F32(0.001f), F32(5.0f),
+    "Zero-velocity measurement noise (m/s)" },
+  { "EK3_ZUPT_GATE", PARAM_TYPE_FLOAT, F32(5.0f), F32(1.0f), F32(100.0f),
+    "Zero-velocity innovation gate (sigma)" },
+
   { "EK3_TILT_MOVE", PARAM_TYPE_INT32, I32(1), I32(0), I32(1),
     "Fuse gravity as a tilt reference while moving" },
 

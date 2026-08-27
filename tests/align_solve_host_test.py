@@ -11,8 +11,9 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "tools"))
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
 from align_solve import (GRAVITY, POSITIONS, SNAP_LIMIT_DEG, AlignError,
-                         accel_rotation, integrate_attitude, is_mirrored,
-                         earth_up, mag_rotation, orthonormalise,
+                         accel_rotation, accel_sign_rotation,
+                         integrate_attitude, is_mirrored, earth_up,
+                         mag_rotation, orthonormalise,
                          rate_rotation, snap, solve_alignment)
 from rotation_table import ROTATIONS
 
@@ -260,6 +261,74 @@ def test_accel_refuses_non_perpendicular_axes():
         assert "perpendicular" in str(exc)
     else:
         assert False, "accepted non-perpendicular axes"
+
+
+def _sign_positions_for(rotation, negate=False, bias=(0.0, 0.0, 0.0)):
+    """The requested nose-down, left-down and vehicle-Z-down poses."""
+    full = _positions_for(rotation, bias=bias)
+    out = {"nose_down": full["nose_down"],
+           "left_down": full["left_down"],
+           "z_down": full["inverted"]}
+
+    if negate:
+        out = {name: -reading for name, reading in out.items()}
+
+    return out
+
+
+def test_accel_sign_check_recovers_every_rotation():
+    for value, matrix in ROTATIONS.items():
+        got = accel_sign_rotation(_sign_positions_for(matrix))
+        assert got["enum"] == CANONICAL.get(value, value), (value,
+                                                            got["enum"])
+        assert not got["mirrored"]
+        assert got["residual_g"] < 1e-9
+
+
+def test_accel_sign_check_exposes_an_all_axis_negation():
+    """The reported field failure: accel is -physical while gyro is right.
+
+    -I times any proper sensor rotation has determinant -1.  Snapping that to
+    a SENS_IMU*_ROT value would necessarily leave one axis wrong and would
+    also change the already-correct gyro frame.
+    """
+    for value in (0, 2, 8, 24):
+        got = accel_sign_rotation(
+            _sign_positions_for(ROTATIONS[value], negate=True))
+        assert got["mirrored"]
+        assert got["enum"] is None
+        assert np.allclose(got["matrix"], -ROTATIONS[value])
+
+
+def test_accel_sign_check_tolerates_small_uncancelled_bias():
+    got = accel_sign_rotation(
+        _sign_positions_for(ROTATIONS[2], bias=(0.15, -0.20, 0.10)))
+    assert got["enum"] == 2
+    assert got["residual_g"] < 0.04
+
+
+def test_accel_sign_check_refuses_a_repeated_pose():
+    bad = _sign_positions_for(ROTATIONS[0])
+    bad["left_down"] = bad["nose_down"]
+
+    try:
+        accel_sign_rotation(bad)
+    except AlignError as exc:
+        assert "same sensor axis" in str(exc)
+    else:
+        assert False, "accepted a repeated three-pose position"
+
+
+def test_accel_sign_check_refuses_a_large_one_sided_residual():
+    bad = _sign_positions_for(ROTATIONS[0])
+    bad["nose_down"] = np.array((-GRAVITY, 0.0, 3.6))
+
+    try:
+        accel_sign_rotation(bad)
+    except AlignError as exc:
+        assert "residual" in str(exc)
+    else:
+        assert False, "accepted a bad three-pose gravity residual"
 
 
 def _sweep(count=600, dt=0.02, seed=11):
@@ -553,6 +622,11 @@ def main():
     test_accel_refuses_a_missing_position()
     test_accel_refuses_two_positions_on_the_same_axis()
     test_accel_refuses_non_perpendicular_axes()
+    test_accel_sign_check_recovers_every_rotation()
+    test_accel_sign_check_exposes_an_all_axis_negation()
+    test_accel_sign_check_tolerates_small_uncancelled_bias()
+    test_accel_sign_check_refuses_a_repeated_pose()
+    test_accel_sign_check_refuses_a_large_one_sided_residual()
     test_mag_recovers_every_representable_rotation()
     test_mag_recovers_the_field_magnitude()
     test_mag_detects_a_mirrored_sensor()
@@ -567,7 +641,7 @@ def main():
     test_solve_flags_a_gyro_cross_check_disagreement()
     test_solve_isolates_one_bad_sensor()
     test_end_to_end_through_the_runner()
-    print("align_solve: rotations, gravity columns, magnetometer dip "
+    print("align_solve: rotations, gravity columns/signs, magnetometer dip "
           "and every refusal path verified - OK")
 
 
