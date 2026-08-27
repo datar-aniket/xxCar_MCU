@@ -519,7 +519,21 @@ static void test_extnav_first_pose_sets_the_datum(void)
   assert_near(ekf.position[2], 0.0f, 1.0e-6f);
   assert_near(euler[0], 0.0f, 1.0e-3f);
   assert_near(euler[1], 0.0f, 1.0e-3f);
-  assert(ekf.extnav_accept_count == 0);
+
+  /* A datum COUNTS as position aiding, which reverses what this used to
+   * assert.
+   *
+   * It is the strongest position information the filter ever receives - the
+   * state is set to the fix outright rather than nudged towards it - so
+   * reporting "not aided" until some later pose happened to pass a gate had
+   * it backwards. It mattered once the position hold existed: the hold
+   * engaged on the step after a datum and floored the very covariance the
+   * datum had just reset.
+   */
+
+  assert(ekf.extnav_accept_count == 1);
+  assert(ekf_core_position_aided(&ekf));
+  assert(ekf_core_observability(&ekf) == EKF_OBS_POSITION);
 }
 
 static void test_extnav_fuses_after_the_datum(void)
@@ -537,7 +551,9 @@ static void test_extnav_fuses_after_the_datum(void)
   s.x = 10.05f;
   assert(ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f,
                               true, true) == 1);
-  assert(ekf.extnav_accept_count == 1);
+  /* Two now, not one: the datum itself counts as the first. */
+
+  assert(ekf.extnav_accept_count == 2);
   assert(ekf.covariance[EKF_P_INDEX(6, 6)] < before);
   assert_covariance_positive_definite(&ekf);
 }
@@ -1515,6 +1531,135 @@ static void test_disagreeing_source_is_followed_not_chased(void)
   assert(ekf.position_snap_count > 1);
 }
 
+/* The strapdown must not INTEGRATE an unobservable state, which is a
+ * stronger claim than bounding it afterwards.
+ *
+ * With no fix, an IMU observes attitude and nothing else. Pushing it on into
+ * velocity and position is not a degraded estimate but a fabricated one: the
+ * error grows without bound and never returns, and the filter then learns an
+ * accelerometer bias to explain the result, corrupting the attitude that WAS
+ * observable.
+ */
+
+static void test_unobservable_states_are_not_integrated(void)
+{
+  struct ekf_core_s ekf;
+  uint64_t timestamp;
+  struct ekf_extnav_sample_s s = extnav_at(0.0f, 0.0f, 0.0f);
+  struct ekf_imu_sample_s imu;
+  float held_position[3];
+  float held_velocity[3];
+  unsigned i;
+
+  extnav_align(&ekf, &timestamp);
+  ekf_core_set_extnav_config(&ekf, 1000000u);
+  ekf_core_set_position_hold(&ekf, 2.0f);
+  ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f, true, false);
+
+  assert(ekf_core_observability(&ekf) == EKF_OBS_POSITION);
+
+  /* Lose the fix. */
+
+  ekf.last_timestamp_sample += 5000000ull;
+  assert(ekf_core_observability(&ekf) == EKF_OBS_ATTITUDE);
+
+  /* Carry the sample clock forward with the filter's, or the samples read
+   * as going backwards and are refused before they reach the strapdown -
+   * which would leave the states unchanged for the wrong reason entirely.
+   */
+
+  timestamp = ekf.last_timestamp_sample;
+
+  memcpy(held_position, ekf.position, sizeof(held_position));
+  memcpy(held_velocity, ekf.velocity, sizeof(held_velocity));
+
+  /* Feed a full second of samples with a large, constant lateral specific
+   * force - the accelerometer error a free strapdown would integrate into
+   * metres of position.
+   */
+
+  for (i = 0; i < 400; i++)
+    {
+      const float accel[3] = {2.0f, 0.0f, TEST_GRAVITY};
+      const float gyro[3] = {0.0f, 0.0f, 0.0f};
+
+      timestamp += TEST_DT_US;
+      make_sample(&imu, timestamp, accel, gyro);
+      ekf_core_process(&ekf, &imu);
+    }
+
+  /* Neither is INTEGRATED. Free strapdown would have put velocity at 2 m/s
+   * and position a metre out after this second, and would keep going
+   * quadratically; what remains is a small residue from the gravity update,
+   * which legitimately corrects these states rather than integrating them.
+   *
+   * So the assertion is about ORDER, not equality - two decades of margin on
+   * velocity and three on position against what free integration gives.
+   */
+
+  assert(fabsf(ekf.velocity[0] - held_velocity[0]) < 0.1f);
+  assert(fabsf(ekf.position[0] - held_position[0]) < 0.01f);
+  assert(ekf.propagate_frozen_count > 0);
+
+  /* And the covariance says so, rather than reporting the confidence it had
+   * when the fix was lost.
+   */
+
+  assert(ekf.covariance[EKF_P_INDEX(6, 6)] >= EKF_POSITION_HOLD_VAR);
+  assert(ekf.covariance[EKF_P_INDEX(3, 3)] >= EKF_VELOCITY_HOLD_VAR);
+}
+
+/* Attitude is still observable and must still track, or the monitor lanes
+ * and everything downstream would freeze with it.
+ */
+
+static void test_attitude_still_propagates_when_unaided(void)
+{
+  struct ekf_core_s ekf;
+  uint64_t timestamp;
+  struct ekf_imu_sample_s imu;
+  float euler[3];
+  unsigned i;
+
+  extnav_align(&ekf, &timestamp);
+  ekf_core_set_position_hold(&ekf, 2.0f);
+
+  assert(ekf_core_observability(&ekf) == EKF_OBS_ATTITUDE);
+
+  for (i = 0; i < 400; i++)
+    {
+      const float accel[3] = {0.0f, 0.0f, TEST_GRAVITY};
+      const float gyro[3] = {0.0f, 0.0f, 0.5f};    /* yawing */
+
+      timestamp += TEST_DT_US;
+      make_sample(&imu, timestamp, accel, gyro);
+      ekf_core_process(&ekf, &imu);
+    }
+
+  ekf_core_euler(&ekf, euler);
+  assert(fabsf(euler[2]) > 0.2f);
+}
+
+/* The tiers nest, which is the property the gating relies on: asking
+ * "observability >= VELOCITY" has to be true whenever position is available.
+ */
+
+static void test_observability_tiers_nest(void)
+{
+  assert(EKF_OBS_ATTITUDE < EKF_OBS_VELOCITY);
+  assert(EKF_OBS_VELOCITY < EKF_OBS_POSITION);
+}
+
+/* NOTE: EKF_OBS_VELOCITY is not reachable today.
+ *
+ * ekf_core_observability returns ATTITUDE or POSITION and nothing between,
+ * because no velocity-only source is wired in yet - optical flow and wheel
+ * speed both belong there. The velocity gate in strapdown_step is therefore
+ * dead code at present, kept so that adding such a source is a single return
+ * statement, and it is deliberately NOT covered by a test that would only be
+ * testing a constant.
+ */
+
 /* Zero restores free dead reckoning, for anything that is not a car. */
 
 static void test_position_hold_zero_disables(void)
@@ -1704,6 +1849,9 @@ int main(void)
   test_position_held_when_unaided();
   test_position_snaps_back_on_recovery();
   test_disagreeing_source_is_followed_not_chased();
+  test_observability_tiers_nest();
+  test_unobservable_states_are_not_integrated();
+  test_attitude_still_propagates_when_unaided();
   test_position_hold_zero_disables();
   test_height_limit_clamps_and_admits_it();
   test_height_limit_is_symmetric();

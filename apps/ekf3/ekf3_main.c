@@ -323,6 +323,22 @@ static void print_status(void)
          core->duplicate_count, core->backward_count, core->gap_count,
          core->source_reset_count, core->numerical_reset_count,
          status.publish_errors);
+  /* What the current sensors can actually support. An IMU alone observes
+   * attitude; velocity and position need a source that measures motion or
+   * says where you are.
+   */
+
+  {
+    uint8_t obs = core->observability;
+
+    printf("  observable %s%s\n",
+           obs >= EKF_OBS_POSITION ? "attitude + velocity + position" :
+           obs >= EKF_OBS_VELOCITY ? "attitude + velocity" :
+                                     "attitude only",
+           obs < EKF_OBS_POSITION ?
+             "   (position is held, not integrated)" : "");
+  }
+
   /* The horizontal hold. Holding is not a fault in itself - it is the
    * correct response to having no fix - but a solution in hold is one whose
    * position is a bound rather than an estimate, and nothing should be

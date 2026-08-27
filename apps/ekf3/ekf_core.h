@@ -206,6 +206,16 @@ struct ekf_core_s
    * ceilings above.
    */
 
+  /* How much of the state the available sensors can actually support.
+   *
+   * Nested, because the tiers genuinely nest: a position source gives
+   * velocity by derivative, and every source needs attitude. See
+   * ekf_core_observability.
+   */
+
+  uint8_t  observability;
+  uint32_t propagate_frozen_count;
+
   float    gyro_bias_limit;
   float    accel_bias_limit;
 
@@ -332,6 +342,30 @@ struct ekf_output_s
  */
 
 #define EKF_POSITION_HOLD_VAR        (10.0f * 10.0f)
+
+/* Variance floor on a velocity that is being held rather than estimated. */
+
+#define EKF_VELOCITY_HOLD_VAR        (5.0f * 5.0f)
+
+/* What the current sensor set can observe. Nested: each level includes the
+ * ones below it.
+ *
+ *   ATTITUDE  gyro and the gravity vector. Always available.
+ *   VELOCITY  needs a source that measures motion - optical flow, wheel
+ *             speed, or a position fix differentiated.
+ *   POSITION  needs an absolute fix. External navigation, here.
+ *
+ * The point of naming these is that an IMU alone observes ATTITUDE and
+ * nothing else. Integrating it into velocity and position anyway is not a
+ * degraded estimate, it is a fabricated one: the error grows without bound
+ * and never comes back, and worse, the filter will learn an accelerometer
+ * bias to explain the result - which corrupts the attitude that WAS
+ * observable.
+ */
+
+#define EKF_OBS_ATTITUDE             0u
+#define EKF_OBS_VELOCITY             1u
+#define EKF_OBS_POSITION             2u
 
 /* Hard ceilings. A runtime limit may be tighter than these but never looser:
  * past them the "bias" is large enough to be hiding a real acceleration, and
@@ -474,6 +508,12 @@ void ekf_core_set_bias_limits(FAR struct ekf_core_s *ekf, float gyro_limit,
  */
 
 bool ekf_core_position_aided(FAR const struct ekf_core_s *ekf);
+
+/* What the currently healthy sources can support: EKF_OBS_ATTITUDE,
+ * _VELOCITY or _POSITION.
+ */
+
+uint8_t ekf_core_observability(FAR const struct ekf_core_s *ekf);
 
 /* Where "up" points in BODY coordinates, from a body-to-ENU quaternion.
  *

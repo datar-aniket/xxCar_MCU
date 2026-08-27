@@ -1029,6 +1029,40 @@ static void reset_yaw_absolute(FAR struct ekf_core_s *ekf, float yaw,
  * the recovery.
  */
 
+uint8_t ekf_core_observability(FAR const struct ekf_core_s *ekf)
+{
+  if (ekf == NULL)
+    {
+      return EKF_OBS_ATTITUDE;
+    }
+
+  /* EK3_POSHOLD_M at zero is the escape hatch: it restores unrestricted
+   * inertial dead reckoning by declaring everything observable. Kept so the
+   * old behaviour can still be reproduced for comparison, not because it is
+   * a reasonable way to run a car.
+   */
+
+  if (!(ekf->position_hold_limit > 0.0f))
+    {
+      return EKF_OBS_POSITION;
+    }
+
+  /* An absolute fix gives position, and velocity with it by derivative. */
+
+  if (ekf_core_position_aided(ekf))
+    {
+      return EKF_OBS_POSITION;
+    }
+
+  /* Nothing between the two yet. Optical flow and wheel speed both belong
+   * here when they arrive - each measures motion without measuring where,
+   * which is exactly EKF_OBS_VELOCITY - and adding one means returning it
+   * from this branch and nothing else.
+   */
+
+  return EKF_OBS_ATTITUDE;
+}
+
 bool ekf_core_position_aided(FAR const struct ekf_core_s *ekf)
 {
   if (ekf == NULL)
@@ -1102,13 +1136,7 @@ static void constrain_position(FAR struct ekf_core_s *ekf)
 {
   int axis;
 
-  if (!(ekf->position_hold_limit > 0.0f))
-    {
-      ekf->position_holding = false;
-      return;
-    }
-
-  if (ekf_core_position_aided(ekf))
+  if (!(ekf->position_hold_limit > 0.0f) || ekf_core_position_aided(ekf))
     {
       ekf->position_holding = false;
       return;
@@ -1130,6 +1158,48 @@ static void constrain_position(FAR struct ekf_core_s *ekf)
 
   ekf->inhibit_mask |= EKF_INHIBIT_ACCEL_BIAS;
 
+  /* The strapdown no longer integrates these - see the observability check
+   * in strapdown_step - so what is left here is to say so in the
+   * covariance. A held state whose variance keeps reporting the confidence
+   * it had when the fix was lost is the more dangerous half of the problem:
+   * the number is merely stale, but the claim about it is false, and
+   * anything choosing whether to trust the solution reads the claim.
+   */
+
+  for (axis = 0; axis < 2; axis++)
+    {
+      if (ekf->covariance[EKF_P_INDEX(6 + axis, 6 + axis)] <
+          EKF_POSITION_HOLD_VAR)
+        {
+          ekf->covariance[EKF_P_INDEX(6 + axis, 6 + axis)] =
+            EKF_POSITION_HOLD_VAR;
+        }
+    }
+
+  if (ekf->observability < EKF_OBS_VELOCITY)
+    {
+      for (axis = 0; axis < 3; axis++)
+        {
+          if (ekf->covariance[EKF_P_INDEX(3 + axis, 3 + axis)] <
+              EKF_VELOCITY_HOLD_VAR)
+            {
+              ekf->covariance[EKF_P_INDEX(3 + axis, 3 + axis)] =
+                EKF_VELOCITY_HOLD_VAR;
+            }
+        }
+    }
+
+  /* The bound is now a BACKSTOP rather than the mechanism. Nothing should
+   * be moving position while it is held, so a breach means something wrote
+   * to it outside the strapdown - a fusion path that should have been gated,
+   * most likely. Worth clamping, and worth counting.
+   */
+
+  if (!(ekf->position_hold_limit > 0.0f))
+    {
+      return;
+    }
+
   for (axis = 0; axis < 2; axis++)
     {
       float excursion = ekf->position[axis] - ekf->position_hold_latch[axis];
@@ -1144,25 +1214,9 @@ static void constrain_position(FAR struct ekf_core_s *ekf)
       ekf->position[axis] = ekf->position_hold_latch[axis] +
                             sign * ekf->position_hold_limit;
 
-      /* Only the outward component. A vehicle at the bound may be coming
-       * back, and stopping that would fight the recovery.
-       */
-
       if (ekf->velocity[axis] * sign > 0.0f)
         {
           ekf->velocity[axis] = 0.0f;
-        }
-
-      /* The number is now held by hand, so the covariance must stop
-       * claiming otherwise - anything reading position_variance to decide
-       * whether to trust this has to see it.
-       */
-
-      if (ekf->covariance[EKF_P_INDEX(6 + axis, 6 + axis)] <
-          EKF_POSITION_HOLD_VAR)
-        {
-          ekf->covariance[EKF_P_INDEX(6 + axis, 6 + axis)] =
-            EKF_POSITION_HOLD_VAR;
         }
     }
 }
@@ -1956,7 +2010,8 @@ static bool strapdown_step(FAR float quaternion[4], FAR float velocity[3],
                            FAR float position[3],
                            FAR const float gyro_bias[3],
                            FAR const float accel_bias[3],
-                           FAR const struct ekf_imu_sample_s *sample)
+                           FAR const struct ekf_imu_sample_s *sample,
+                           uint8_t observability)
 {
   float corrected_angle[3];
   float corrected_velocity[3];
@@ -2002,11 +2057,28 @@ static bool strapdown_step(FAR float quaternion[4], FAR float velocity[3],
 
   nav_delta_velocity[2] -= EKF_GRAVITY * dt;
 
+  /* Only integrate what the sensors can observe.
+   *
+   * An IMU alone observes attitude. Pushing it on into velocity and then
+   * position is not a degraded estimate but a fabricated one: the error
+   * grows without bound and never returns, and the filter then learns an
+   * accelerometer bias to explain the result, which corrupts the attitude
+   * that WAS observable. Holding the unobservable states still costs an
+   * answer that is stale; integrating them costs the answer that was good.
+   */
+
   for (axis = 0; axis < 3; axis++)
     {
-      velocity[axis] += nav_delta_velocity[axis];
-      position[axis] +=
-        (old_velocity[axis] + 0.5f * nav_delta_velocity[axis]) * dt;
+      if (observability >= EKF_OBS_VELOCITY)
+        {
+          velocity[axis] += nav_delta_velocity[axis];
+        }
+
+      if (observability >= EKF_OBS_POSITION)
+        {
+          position[axis] +=
+            (old_velocity[axis] + 0.5f * nav_delta_velocity[axis]) * dt;
+        }
     }
 
   rotation_vector_quaternion(corrected_angle, increment);
@@ -2024,7 +2096,8 @@ static bool nominal_predict(FAR struct ekf_core_s *ekf,
   int axis;
 
   if (!strapdown_step(ekf->quaternion, ekf->velocity, ekf->position,
-                      ekf->gyro_bias, ekf->accel_bias, sample))
+                      ekf->gyro_bias, ekf->accel_bias, sample,
+                      ekf->observability))
     {
       return false;
     }
@@ -2153,6 +2226,17 @@ int ekf_core_process(FAR struct ekf_core_s *ekf,
     {
       return alignment_add(ekf, sample) ? EKF_PROCESS_INITIALIZED :
              EKF_PROCESS_ALIGNING;
+    }
+
+  /* Decided once per sample, BEFORE propagating, so the strapdown and the
+   * output predictor agree about what they are allowed to integrate.
+   */
+
+  ekf->observability = ekf_core_observability(ekf);
+
+  if (ekf->observability < EKF_OBS_POSITION)
+    {
+      ekf->propagate_frozen_count++;
     }
 
   if (!nominal_predict(ekf, sample))
@@ -2615,8 +2699,14 @@ void ekf_core_output_predict(FAR const struct ekf_core_s *ekf,
        * They change on the scale of minutes; the replay spans milliseconds.
        */
 
+      /* The output predictor replays the same samples forward, so it has to
+       * fabricate exactly as little as the filter did - otherwise the
+       * published position would run away from the one the filter holds.
+       */
+
       if (!strapdown_step(out->quaternion, out->velocity, out->position,
-                          ekf->gyro_bias, ekf->accel_bias, sample))
+                          ekf->gyro_bias, ekf->accel_bias, sample,
+                          ekf->observability))
         {
           out->valid = false;
           return;
@@ -2686,6 +2776,19 @@ static void extnav_set_datum(FAR struct ekf_core_s *ekf,
   ekf->extnav_consecutive_rejects = 0;
   ekf->last_extnav_noise = pos_noise;
   ekf->last_extnav_timestamp = ekf->last_timestamp_sample;
+
+  /* A datum counts as position aiding. It is the STRONGEST position
+   * information the filter ever gets - the state is set to the fix outright
+   * rather than nudged towards it - so reporting "not aided" until some
+   * later pose happens to pass a gate had it exactly backwards. Left as it
+   * was, the hold engaged on the step after a datum and floored the very
+   * covariance the datum had just reset.
+   */
+
+  if (want_position)
+    {
+      ekf->extnav_accept_count++;
+    }
 }
 
 /* Has the source gone quiet, as opposed to gone wrong?
