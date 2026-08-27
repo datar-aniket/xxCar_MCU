@@ -71,6 +71,9 @@ struct companion_status_s
 
   uint8_t  pps_state;           /* enum fmuv6c_pps_state_e */
   uint32_t pps_corrections;
+  uint32_t pps_rejected;        /* residual too large to be a refinement */
+  uint32_t pps_max_correction_us;
+  int32_t  pps_worst_us;        /* largest residual seen, applied or not */
   int32_t  pps_residual_us;     /* last measured error, + means we ran fast */
   uint64_t pps_edge_used;
   uint32_t tx_future_clamped;   /* a stamp that would have led the clock */

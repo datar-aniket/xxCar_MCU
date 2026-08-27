@@ -7,6 +7,7 @@
 #include <nuttx/config.h>
 
 #include <errno.h>
+#include <stdlib.h>
 #include <fcntl.h>
 #include <inttypes.h>
 #include <poll.h>
@@ -482,9 +483,38 @@ static void comp_pps_discipline(FAR struct companion_status_s *s)
       residual -= 1000000ll;
     }
 
-  g_utc_offset_us -= residual;
   s->pps_edge_used = pps.last_edge_us;
   s->pps_residual_us = (int32_t)residual;
+
+  if (labs((long)residual) > labs((long)s->pps_worst_us))
+    {
+      s->pps_worst_us = (int32_t)residual;
+    }
+
+  /* PPS REFINES an offset; it does not establish one.
+   *
+   * A timesync burst already puts the offset within a few milliseconds, so a
+   * residual far outside that is not this link's clock being imprecise - it
+   * is the pulse arriving somewhere other than the second boundary it claims
+   * to mark. A PPS generated from userspace on a non-realtime host does
+   * exactly that, by however long the scheduler took.
+   *
+   * Applying such a correction would drag the board's clock away from UTC by
+   * the pulse's own latency, and the symptom is a solution time that lags
+   * the host by tens of milliseconds - worse than having no PPS at all,
+   * which is the wrong way for a refinement to fail.
+   *
+   * So it is refused, counted, and the residual is reported. The timesync
+   * offset stands.
+   */
+
+  if (labs((long)residual) > (long)s->pps_max_correction_us)
+    {
+      s->pps_rejected++;
+      return;
+    }
+
+  g_utc_offset_us -= residual;
   s->pps_corrections++;
 }
 
@@ -846,6 +876,7 @@ static int companion_daemon(int argc, FAR char *argv[])
   g_torque_k = param_f32("VESC_TORQUE_K");
   g_steer_k = param_f32("VESC_STEER_K");
   g_speed_k = param_f32("VESC_SPEED_K");
+  status.pps_max_correction_us = (uint32_t)param_i32("PPS_MAX_COR_US");
 
   /* The tick is the downlink's clock from here on. Failing to start it is
    * fatal to this daemon rather than a quiet fall back to some other

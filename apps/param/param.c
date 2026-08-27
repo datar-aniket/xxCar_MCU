@@ -484,6 +484,26 @@ static const struct param_def_s g_params[] =
 
   { "COMP_EN", PARAM_TYPE_INT32, I32(1), I32(0), I32(1),
     "Start the companion serial link at boot" },
+  /* Largest PPS residual that will be believed as a refinement.
+   *
+   * A timesync burst already puts the UTC offset within a few milliseconds,
+   * so a residual far outside that is not imprecision - it is the pulse
+   * arriving somewhere other than the second boundary it claims to mark. A
+   * PPS generated from userspace on a non-realtime host does exactly that,
+   * late by however long the scheduler took.
+   *
+   * Applying such a correction drags the board's clock away from UTC by the
+   * pulse's own latency, which shows up as a solution time lagging the host
+   * by tens of milliseconds - worse than no PPS at all. Beyond this bound
+   * the edge is refused and the timesync offset stands.
+   *
+   * 10 ms: comfortably above timesync round-trip error, far below the
+   * scheduling latency of a userspace pulse.
+   */
+
+  { "PPS_MAX_COR_US", PARAM_TYPE_INT32, I32(10000), I32(100), I32(500000),
+    "Largest PPS correction believed as a refinement (us)" },
+
   { "PPS_EN", PARAM_TYPE_INT32, I32(1), I32(0), I32(1),
     "Capture Jetson PPS on TELEM2 CTS at boot" },
   { "EK3_EXT_M_NSE", PARAM_TYPE_FLOAT, F32(0.10f), F32(0.01f), F32(10.0f),

@@ -170,6 +170,22 @@ static void print_status(void)
   printf("  clocks     TIM5 - MONOTONIC %+" PRIi64 " us\n",
          s.clock_skew_us);
 
+  if (s.pps_rejected > 0)
+    {
+      printf("  pps        REFUSED %" PRIu32 " correction(s); worst residual"
+             " %+" PRIi32 " us\n"
+             "             the pulse is %+.1f ms from the second it claims "
+             "to mark.\n"
+             "             That is the generating host's latency, not this "
+             "board's clock -\n"
+             "             a userspace PPS cannot be trusted to the "
+             "millisecond. The timesync\n"
+             "             offset is being used instead, which is why "
+             "disabling PPS looks better.\n",
+             s.pps_rejected, s.pps_worst_us,
+             (double)s.pps_worst_us / 1000.0);
+    }
+
   printf("  pps        %s  corrections %" PRIu32 "  last residual %+"
          PRIi32 " us\n",
          comp_pps_state_name(s.pps_state), s.pps_corrections,
