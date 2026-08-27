@@ -180,12 +180,24 @@ static void print_status(void)
        * is not corrected - saying so stops it being read as an error.
        */
 
-      if (labs((long)s.pps_phase_ref_us) > 1000)
+      if (!s.pps_absolute_phase && labs((long)s.pps_phase_ref_us) > 1000)
         {
-          printf("             that offset is the pulse's own phase, not a "
-                 "clock error.\n"
-                 "             Timesync owns the phase; PPS only corrects "
-                 "drift from it.\n");
+          printf("             timesync and the pulse disagree by that much,"
+                 " and one of them is wrong.\n"
+                 "             If the companion's OWN clock is disciplined to"
+                 " this same pulse, then\n"
+                 "             the pulse defines the second and timesync is"
+                 " the weaker measurement -\n"
+                 "             set PPS_ABS_PHASE=1 to trust the pulse"
+                 " instead. If not, leave it: the\n"
+                 "             offset is the pulse's own phase and is"
+                 " correctly being ignored.\n");
+        }
+
+      if (s.pps_absolute_phase)
+        {
+          printf("             PPS_ABS_PHASE=1: the pulse is treated as the"
+                 " true second.\n");
         }
     }
 

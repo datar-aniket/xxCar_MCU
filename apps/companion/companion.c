@@ -517,7 +517,28 @@ static void comp_pps_discipline(FAR struct companion_status_s *s)
     {
       s->pps_phase_ref_us = (int32_t)residual;
       s->pps_phase_valid = true;
-      return;
+
+      /* PPS_ABS_PHASE says the pulse marks the true second, so its phase is
+       * authoritative and the disagreement with timesync is timesync's
+       * error to give up. Fall through and correct it.
+       *
+       * Otherwise the phase is merely established here and only drift from
+       * it is corrected afterwards.
+       */
+
+      if (!s->pps_absolute_phase)
+        {
+          return;
+        }
+    }
+
+  if (s->pps_absolute_phase)
+    {
+      /* The pulse IS the second. Null the residual outright rather than
+       * measuring drift against a phase that is defined to be zero.
+       */
+
+      s->pps_phase_ref_us = 0;
     }
 
   residual -= (int64_t)s->pps_phase_ref_us;
@@ -917,6 +938,7 @@ static int companion_daemon(int argc, FAR char *argv[])
   g_steer_k = param_f32("VESC_STEER_K");
   g_speed_k = param_f32("VESC_SPEED_K");
   status.pps_max_correction_us = (uint32_t)param_i32("PPS_MAX_COR_US");
+  status.pps_absolute_phase = param_i32("PPS_ABS_PHASE") != 0;
 
   /* The tick is the downlink's clock from here on. Failing to start it is
    * fatal to this daemon rather than a quiet fall back to some other

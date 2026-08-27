@@ -185,7 +185,7 @@ struct ekf_core_s
 
   float    extnav_test_ratio;
   bool     extnav_healthy;
-  bool     extnav_bias_inhibited;  /* accel bias learning frozen */
+  bool     extnav_bias_inhibited;  /* redundant extnav guard active */
   uint64_t extnav_fault_since;     /* filter time the ratio went bad */
   uint32_t extnav_fault_count;
   uint32_t extnav_inhibit_count;
@@ -217,11 +217,11 @@ struct ekf_core_s
    *
    * Nested, because the tiers genuinely nest: a position source gives
    * velocity by derivative, and every source needs attitude. See
-   * ekf_core_observability.
+   * ekf_core_observability. This reports validity; it does not gate the
+   * inertial process model.
    */
 
   uint8_t  observability;
-  uint32_t propagate_frozen_count;
 
   float    gyro_bias_limit;
   float    accel_bias_limit;
@@ -355,19 +355,17 @@ struct ekf_output_s
 #define EKF_VELOCITY_HOLD_VAR        (5.0f * 5.0f)
 
 /* What the current sensor set can observe. Nested: each level includes the
- * ones below it.
+ * ones below it. This describes solution support; inertial propagation always
+ * follows the process model.
  *
  *   ATTITUDE  gyro and the gravity vector. Always available.
  *   VELOCITY  needs a source that measures motion - optical flow, wheel
  *             speed, or a position fix differentiated.
  *   POSITION  needs an absolute fix. External navigation, here.
  *
- * The point of naming these is that an IMU alone observes ATTITUDE and
- * nothing else. Integrating it into velocity and position anyway is not a
- * degraded estimate, it is a fabricated one: the error grows without bound
- * and never comes back, and worse, the filter will learn an accelerometer
- * bias to explain the result - which corrupts the attitude that WAS
- * observable.
+ * An IMU alone observes ATTITUDE and nothing else. Velocity and position are
+ * still propagated, but are not advertised as valid; the optional
+ * ground-vehicle holds bound their unaided drift.
  */
 
 #define EKF_OBS_ATTITUDE             0u

@@ -43,6 +43,10 @@
 #define EKF_DYNAMICS_ACCEL_RMS_OUT  1.00f
 #define EKF_DYNAMICS_GYRO_RMS_IN    0.03f
 #define EKF_DYNAMICS_GYRO_RMS_OUT   0.08f
+#define EKF_DYNAMICS_SPEED_IN        0.15f
+#define EKF_DYNAMICS_SPEED_OUT       0.35f
+#define EKF_DYNAMICS_LINEAR_ACCEL_IN 0.60f
+#define EKF_DYNAMICS_LINEAR_ACCEL_OUT 1.20f
 
 #define EKF_GRAVITY_MEAS_NOISE      0.35f
 #define EKF_MEASUREMENT_NIS_GATE    16.3f
@@ -59,6 +63,36 @@
 #define EKF_ACCEL_BIAS_RW           0.010f
 #define EKF_CLIP_NOISE_SCALE        10.0f
 #define EKF_MIN_VARIANCE            1.0e-10f
+
+/* Kalman-gain row masks.
+ *
+ * Measurement availability is a state-update contract, not a hope that the
+ * corresponding covariance cross-terms happen to be zero.  ArduPilot makes
+ * this explicit with its kalman_mask before applying each innovation.  This
+ * error-state core does the same: each fusion path names the state families
+ * that observation is allowed to correct, and every other gain row is zeroed
+ * before both the nominal-state and Joseph covariance updates.
+ */
+
+#define EKF_GAIN_BIT(state)         ((uint16_t)1u << (state))
+#define EKF_GAIN_ALL                ((uint16_t)((1u << EKF_STATE_DIM) - 1u))
+#define EKF_GAIN_ATTITUDE           ((uint16_t)0x0007u)
+#define EKF_GAIN_VELOCITY_XY        ((uint16_t)0x0018u)
+#define EKF_GAIN_VELOCITY_Z         EKF_GAIN_BIT(5)
+#define EKF_GAIN_POSITION_XY        ((uint16_t)0x00c0u)
+#define EKF_GAIN_POSITION_Z         EKF_GAIN_BIT(8)
+#define EKF_GAIN_GYRO_BIAS          ((uint16_t)0x0e00u)
+#define EKF_GAIN_ACCEL_BIAS         ((uint16_t)0x7000u)
+#define EKF_GAIN_ACCEL_BIAS_Z       EKF_GAIN_BIT(14)
+
+#define EKF_GAIN_GRAVITY \
+  (EKF_GAIN_ATTITUDE | EKF_GAIN_GYRO_BIAS | EKF_GAIN_ACCEL_BIAS)
+#define EKF_GAIN_YAW \
+  (EKF_GAIN_ATTITUDE | EKF_GAIN_GYRO_BIAS)
+#define EKF_GAIN_HORIZONTAL_POSITION \
+  (EKF_GAIN_VELOCITY_XY | EKF_GAIN_POSITION_XY)
+#define EKF_GAIN_HEIGHT \
+  (EKF_GAIN_VELOCITY_Z | EKF_GAIN_POSITION_Z | EKF_GAIN_ACCEL_BIAS_Z)
 
 static bool vector_finite(FAR const float value[3])
 {
@@ -259,6 +293,9 @@ static void dynamics_update(FAR struct ekf_core_s *ekf,
   float alpha;
   bool entry_candidate;
   bool remain_candidate;
+  bool position_aided;
+  float horizontal_speed;
+  float linear_accel = 0.0f;
   int axis;
 
   for (axis = 0; axis < 3; axis++)
@@ -308,13 +345,48 @@ static void dynamics_update(FAR struct ekf_core_s *ekf,
       gyro_variance += ekf->dynamics_gyro_variance[axis];
     }
 
+  /* Low IMU variance is not the same thing as stationary. A car under smooth,
+   * constant acceleration has an accelerometer norm close to one g and almost
+   * zero variance - exactly the case that used to pass these tests and feed
+   * its longitudinal acceleration into the gravity/tilt update. Once an
+   * absolute position source makes speed observable, use that independent
+   * evidence to refuse the standstill pseudo-measurement while moving.
+   */
+
+  position_aided = ekf->initialized && ekf_core_position_aided(ekf);
+  horizontal_speed = sqrtf(ekf->velocity[0] * ekf->velocity[0] +
+                           ekf->velocity[1] * ekf->velocity[1]);
+
+  if (position_aided)
+    {
+      float rotation[3][3];
+      float nongravity[3];
+
+      quaternion_to_rotation(ekf->quaternion, rotation);
+
+      for (axis = 0; axis < 3; axis++)
+        {
+          /* R_nb' * [0, 0, g] is the accelerometer value expected from
+           * gravity alone.  Unlike |accel|-g, this catches smooth horizontal
+           * acceleration immediately while still allowing a stationary car
+           * parked on a slope.
+           */
+
+          nongravity[axis] = accel[axis] - rotation[2][axis] * EKF_GRAVITY;
+        }
+
+      linear_accel = vector_norm(nongravity);
+    }
+
   entry_candidate =
     sample->clipping == 0 &&
     fabsf(vector_norm(accel) - EKF_GRAVITY) <
       EKF_DYNAMICS_ACCEL_DEV_IN &&
     vector_norm(gyro) < EKF_DYNAMICS_GYRO_IN &&
     sqrtf(accel_variance) < EKF_DYNAMICS_ACCEL_RMS_IN &&
-    sqrtf(gyro_variance) < EKF_DYNAMICS_GYRO_RMS_IN;
+    sqrtf(gyro_variance) < EKF_DYNAMICS_GYRO_RMS_IN &&
+    (!position_aided || linear_accel < EKF_DYNAMICS_LINEAR_ACCEL_IN) &&
+    (!position_aided || horizontal_speed < EKF_DYNAMICS_SPEED_IN);
 
   remain_candidate =
     sample->clipping == 0 &&
@@ -322,7 +394,9 @@ static void dynamics_update(FAR struct ekf_core_s *ekf,
       EKF_DYNAMICS_ACCEL_DEV_OUT &&
     vector_norm(gyro) < EKF_DYNAMICS_GYRO_OUT &&
     sqrtf(accel_variance) < EKF_DYNAMICS_ACCEL_RMS_OUT &&
-    sqrtf(gyro_variance) < EKF_DYNAMICS_GYRO_RMS_OUT;
+    sqrtf(gyro_variance) < EKF_DYNAMICS_GYRO_RMS_OUT &&
+    (!position_aided || linear_accel < EKF_DYNAMICS_LINEAR_ACCEL_OUT) &&
+    (!position_aided || horizontal_speed < EKF_DYNAMICS_SPEED_OUT);
 
   if (ekf->low_dynamics)
     {
@@ -673,18 +747,24 @@ static bool covariance_predict(FAR struct ekf_core_s *ekf)
   /* -R_nb * skew(f_b), coupling attitude error into navigation-frame
    * velocity. The frame is ENU - east, north, up - not NED; see
    * uorb_msgs.h.
+   *
+   * The nominal quaternion and correction are both right-multiplied, so the
+   * error is body-frame and R_true = R_nom * (I + skew(dtheta)). Therefore
+   * dv = -R_nom * skew(f_b) * dtheta. Reversing this sign reverses the
+   * position/attitude cross-covariance and makes a later position innovation
+   * push tilt away from the physically consistent direction.
    */
 
   for (row = 0; row < 3; row++)
     {
       velocity_attitude[row][0] =
-        rotation[row][1] * specific_force[2] -
+       -rotation[row][1] * specific_force[2] +
         rotation[row][2] * specific_force[1];
       velocity_attitude[row][1] =
-       -rotation[row][0] * specific_force[2] +
+        rotation[row][0] * specific_force[2] -
         rotation[row][2] * specific_force[0];
       velocity_attitude[row][2] =
-        rotation[row][0] * specific_force[1] -
+       -rotation[row][0] * specific_force[1] +
         rotation[row][1] * specific_force[0];
     }
 
@@ -1036,17 +1116,6 @@ uint8_t ekf_core_observability(FAR const struct ekf_core_s *ekf)
       return EKF_OBS_ATTITUDE;
     }
 
-  /* EK3_POSHOLD_M at zero is the escape hatch: it restores unrestricted
-   * inertial dead reckoning by declaring everything observable. Kept so the
-   * old behaviour can still be reproduced for comparison, not because it is
-   * a reasonable way to run a car.
-   */
-
-  if (!(ekf->position_hold_limit > 0.0f))
-    {
-      return EKF_OBS_POSITION;
-    }
-
   /* An absolute fix gives position, and velocity with it by derivative. */
 
   if (ekf_core_position_aided(ekf))
@@ -1185,12 +1254,10 @@ static void constrain_position(FAR struct ekf_core_s *ekf)
 
   ekf->inhibit_mask |= EKF_INHIBIT_ACCEL_BIAS;
 
-  /* The strapdown no longer integrates these - see the observability check
-   * in strapdown_step - so what is left here is to say so in the
-   * covariance. A held state whose variance keeps reporting the confidence
-   * it had when the fix was lost is the more dangerous half of the problem:
-   * the number is merely stale, but the claim about it is false, and
-   * anything choosing whether to trust the solution reads the claim.
+  /* The inertial equations continue propagating, as they do in ArduPilot;
+   * observability controls fusion, never the process model. The hold is a
+   * bounded fallback around that propagation. Its covariance must admit that
+   * an unaided position is not known.
    */
 
   for (axis = 0; axis < 2; axis++)
@@ -1203,23 +1270,19 @@ static void constrain_position(FAR struct ekf_core_s *ekf)
         }
     }
 
-  if (ekf->observability < EKF_OBS_VELOCITY)
+  for (axis = 0; axis < 2; axis++)
     {
-      for (axis = 0; axis < 3; axis++)
+      if (ekf->covariance[EKF_P_INDEX(3 + axis, 3 + axis)] <
+          EKF_VELOCITY_HOLD_VAR)
         {
-          if (ekf->covariance[EKF_P_INDEX(3 + axis, 3 + axis)] <
-              EKF_VELOCITY_HOLD_VAR)
-            {
-              ekf->covariance[EKF_P_INDEX(3 + axis, 3 + axis)] =
-                EKF_VELOCITY_HOLD_VAR;
-            }
+          ekf->covariance[EKF_P_INDEX(3 + axis, 3 + axis)] =
+            EKF_VELOCITY_HOLD_VAR;
         }
     }
 
-  /* The bound is now a BACKSTOP rather than the mechanism. Nothing should
-   * be moving position while it is held, so a breach means something wrote
-   * to it outside the strapdown - a fusion path that should have been gated,
-   * most likely. Worth clamping, and worth counting.
+  /* The bound is a backstop around the propagated position. Crossing it is
+   * expected during prolonged unaided motion, but the state is not allowed
+   * to run farther away or retain an outward horizontal velocity.
    */
 
   if (!(ekf->position_hold_limit > 0.0f))
@@ -1356,7 +1419,8 @@ static int measurement_update_3d(
   FAR struct ekf_core_s *ekf,
   FAR const float h[3][EKF_STATE_DIM],
   FAR const float residual[3], float noise_variance, FAR float *nis,
-  FAR const float unobservable_axis[3], FAR float *suppressed_correction)
+  FAR const float unobservable_axis[3], FAR float *suppressed_correction,
+  uint16_t gain_mask)
 {
   float pht[EKF_STATE_DIM][3];
   float innovation[3][3];
@@ -1372,6 +1436,12 @@ static int measurement_update_3d(
   int measurement;
   int inner;
   int axis;
+
+  if (ekf == NULL || h == NULL || residual == NULL || nis == NULL ||
+      !isfinite(noise_variance) || noise_variance <= 0.0f)
+    {
+      return -1;
+    }
 
   if (suppressed_correction != NULL)
     {
@@ -1445,6 +1515,19 @@ static int measurement_update_3d(
             {
               gain[row][measurement] +=
                 pht[row][inner] * innovation_inverse[inner][measurement];
+            }
+        }
+
+      /* An observation may only update the state families its fusion path
+       * made available. Do this before every projection and correction so
+       * the same gain reaches the state and Joseph covariance updates.
+       */
+
+      if ((gain_mask & EKF_GAIN_BIT(row)) == 0)
+        {
+          for (measurement = 0; measurement < 3; measurement++)
+            {
+              gain[row][measurement] = 0.0f;
             }
         }
     }
@@ -1656,7 +1739,9 @@ static int measurement_update_3d(
 static int measurement_update_1d(FAR struct ekf_core_s *ekf,
                                  FAR const float h[EKF_STATE_DIM],
                                  float residual, float noise_variance,
-                                 float gate_sigma, FAR float *nis)
+                                 float gate_sigma, FAR float *nis,
+                                 uint16_t gain_mask,
+                                 FAR const float attitude_axis[3])
 {
   float pht[EKF_STATE_DIM];
   float gain[EKF_STATE_DIM];
@@ -1670,7 +1755,8 @@ static int measurement_update_1d(FAR struct ekf_core_s *ekf,
   int inner;
 
   if (ekf == NULL || h == NULL || !isfinite(residual) ||
-      !isfinite(noise_variance) || noise_variance <= 0.0f)
+      !isfinite(noise_variance) || noise_variance <= 0.0f ||
+      !isfinite(gate_sigma) || gate_sigma <= 0.0f)
     {
       return -1;
     }
@@ -1716,6 +1802,11 @@ static int measurement_update_1d(FAR struct ekf_core_s *ekf,
     {
       gain[row] = pht[row] / innovation;
 
+      if ((gain_mask & EKF_GAIN_BIT(row)) == 0)
+        {
+          gain[row] = 0.0f;
+        }
+
       /* Freeze the states this update is not allowed to move.
        *
        * Zeroing the gain row rather than skipping the update is what
@@ -1731,7 +1822,36 @@ static int measurement_update_1d(FAR struct ekf_core_s *ekf,
           gain[row] = 0.0f;
           ekf->inhibit_applied_count++;
         }
+    }
 
+  /* A yaw innovation is observable only about navigation up. In a
+   * right-error state that direction is expressed in body axes and generally
+   * has x/y components when tilted, so zeroing error-state indices 0 and 1
+   * would be wrong. Project attitude and gyro-bias gain onto the physical yaw
+   * axis instead; the resulting quaternion correction preserves roll/pitch.
+   */
+
+  if (attitude_axis != NULL)
+    {
+      float attitude_component = 0.0f;
+      float bias_component = 0.0f;
+      int axis;
+
+      for (axis = 0; axis < 3; axis++)
+        {
+          attitude_component += attitude_axis[axis] * gain[axis];
+          bias_component += attitude_axis[axis] * gain[9 + axis];
+        }
+
+      for (axis = 0; axis < 3; axis++)
+        {
+          gain[axis] = attitude_axis[axis] * attitude_component;
+          gain[9 + axis] = attitude_axis[axis] * bias_component;
+        }
+    }
+
+  for (row = 0; row < EKF_STATE_DIM; row++)
+    {
       correction[row] = gain[row] * residual;
     }
 
@@ -1895,7 +2015,7 @@ static bool attitude_only_tilt_update(FAR struct ekf_core_s *ekf)
 
   result = measurement_update_3d(ekf, h, residual, noise * noise,
                                  &ekf->last_gravity_nis, gravity_axis,
-                                 &suppressed_correction);
+                                 &suppressed_correction, EKF_GAIN_GRAVITY);
 
   ekf->inhibit_mask = 0;
 
@@ -2039,7 +2159,8 @@ static bool low_dynamics_updates(FAR struct ekf_core_s *ekf)
   result = measurement_update_3d(
     ekf, h, residual,
     EKF_GRAVITY_MEAS_NOISE * EKF_GRAVITY_MEAS_NOISE,
-    &ekf->last_gravity_nis, gravity_axis, &suppressed_correction);
+    &ekf->last_gravity_nis, gravity_axis, &suppressed_correction,
+    EKF_GAIN_GRAVITY);
 
   if (result < 0)
     {
@@ -2079,42 +2200,37 @@ static bool strapdown_step(FAR float quaternion[4], FAR float velocity[3],
                            FAR float position[3],
                            FAR const float gyro_bias[3],
                            FAR const float accel_bias[3],
-                           FAR const struct ekf_imu_sample_s *sample,
-                           uint8_t observability)
+                           FAR const struct ekf_imu_sample_s *sample)
 {
   float corrected_angle[3];
   float corrected_velocity[3];
-  float half_angle[3];
   float increment[4];
-  float half_increment[4];
-  float midpoint[4];
   float next_quaternion[4];
   float rotation[3][3];
   float nav_delta_velocity[3];
   float old_velocity[3];
-  float dt = sample->delta_angle_dt;
+  float angle_dt = sample->delta_angle_dt;
+  float velocity_dt = sample->delta_velocity_dt;
   int row;
   int axis;
 
   for (axis = 0; axis < 3; axis++)
     {
       corrected_angle[axis] = sample->delta_angle[axis] -
-                              gyro_bias[axis] * dt;
+                              gyro_bias[axis] * angle_dt;
       corrected_velocity[axis] = sample->delta_velocity[axis] -
-                                 accel_bias[axis] * dt;
-      half_angle[axis] = 0.5f * corrected_angle[axis];
+                                 accel_bias[axis] * velocity_dt;
       old_velocity[axis] = velocity[axis];
     }
 
-  rotation_vector_quaternion(half_angle, half_increment);
-  quaternion_multiply(quaternion, half_increment, midpoint);
+  /* vehicle_imu delta_velocity is already sculling-corrected and expressed
+   * in the body frame at the START of the packet. imu_integrator rotated each
+   * native-rate increment into that frame while accumulating it. Rotating it
+   * with a packet-midpoint attitude here applies half of the packet rotation
+   * a second time; use the matching start attitude exactly once.
+   */
 
-  if (!quaternion_normalize(midpoint))
-    {
-      return false;
-    }
-
-  quaternion_to_rotation(midpoint, rotation);
+  quaternion_to_rotation(quaternion, rotation);
 
   for (row = 0; row < 3; row++)
     {
@@ -2124,30 +2240,21 @@ static bool strapdown_step(FAR float quaternion[4], FAR float velocity[3],
         rotation[row][2] * corrected_velocity[2];
     }
 
-  nav_delta_velocity[2] -= EKF_GRAVITY * dt;
+  nav_delta_velocity[2] -= EKF_GRAVITY * velocity_dt;
 
-  /* Only integrate what the sensors can observe.
-   *
-   * An IMU alone observes attitude. Pushing it on into velocity and then
-   * position is not a degraded estimate but a fabricated one: the error
-   * grows without bound and never returns, and the filter then learns an
-   * accelerometer bias to explain the result, which corrupts the attitude
-   * that WAS observable. Holding the unobservable states still costs an
-   * answer that is stale; integrating them costs the answer that was good.
+  /* Propagation is the process model and is independent of which
+   * measurements happen to be available. Stopping velocity or position when
+   * aiding disappears makes the nominal state follow different dynamics from
+   * the covariance (which still applies F), and it is not how ArduPilot's EKF
+   * handles loss of aiding. Availability is enforced by fusion gain masks;
+   * the ground-vehicle position hold bounds unaided drift afterwards.
    */
 
   for (axis = 0; axis < 3; axis++)
     {
-      if (observability >= EKF_OBS_VELOCITY)
-        {
-          velocity[axis] += nav_delta_velocity[axis];
-        }
-
-      if (observability >= EKF_OBS_POSITION)
-        {
-          position[axis] +=
-            (old_velocity[axis] + 0.5f * nav_delta_velocity[axis]) * dt;
-        }
+      velocity[axis] += nav_delta_velocity[axis];
+      position[axis] +=
+        (old_velocity[axis] + 0.5f * nav_delta_velocity[axis]) * velocity_dt;
     }
 
   rotation_vector_quaternion(corrected_angle, increment);
@@ -2165,8 +2272,7 @@ static bool nominal_predict(FAR struct ekf_core_s *ekf,
   int axis;
 
   if (!strapdown_step(ekf->quaternion, ekf->velocity, ekf->position,
-                      ekf->gyro_bias, ekf->accel_bias, sample,
-                      ekf->observability))
+                      ekf->gyro_bias, ekf->accel_bias, sample))
     {
       return false;
     }
@@ -2297,16 +2403,12 @@ int ekf_core_process(FAR struct ekf_core_s *ekf,
              EKF_PROCESS_ALIGNING;
     }
 
-  /* Decided once per sample, BEFORE propagating, so the strapdown and the
-   * output predictor agree about what they are allowed to integrate.
+  /* Snapshot which solution components have measurement support. This is a
+   * validity classification only; propagation always follows the same
+   * inertial process model.
    */
 
   ekf->observability = ekf_core_observability(ekf);
-
-  if (ekf->observability < EKF_OBS_POSITION)
-    {
-      ekf->propagate_frozen_count++;
-    }
 
   if (!nominal_predict(ekf, sample))
     {
@@ -2515,7 +2617,7 @@ static int fuse_yaw(FAR struct ekf_core_s *ekf, float yaw_meas, float noise,
     }
 
   return measurement_update_1d(ekf, h, residual, noise * noise, gate_sigma,
-                               nis);
+                               nis, EKF_GAIN_YAW, h);
 }
 
 int ekf_core_fuse_mag(FAR struct ekf_core_s *ekf,
@@ -2658,7 +2760,8 @@ int ekf_core_fuse_baro(FAR struct ekf_core_s *ekf, float pressure_hpa,
   residual = height - ekf->position[2];
 
   result = measurement_update_1d(ekf, h, residual, noise * noise,
-                                 gate_sigma, &ekf->last_baro_nis);
+                                 gate_sigma, &ekf->last_baro_nis,
+                                 EKF_GAIN_HEIGHT, NULL);
 
   if (result == 1)
     {
@@ -2768,14 +2871,12 @@ void ekf_core_output_predict(FAR const struct ekf_core_s *ekf,
        * They change on the scale of minutes; the replay spans milliseconds.
        */
 
-      /* The output predictor replays the same samples forward, so it has to
-       * fabricate exactly as little as the filter did - otherwise the
-       * published position would run away from the one the filter holds.
+      /* Replay the same process model as the core so the delayed state and
+       * published state remain dynamically consistent.
        */
 
       if (!strapdown_step(out->quaternion, out->velocity, out->position,
-                          ekf->gyro_bias, ekf->accel_bias, sample,
-                          ekf->observability))
+                          ekf->gyro_bias, ekf->accel_bias, sample))
         {
           out->valid = false;
           return;
@@ -2799,7 +2900,7 @@ int ekf_core_test_update_1d(FAR struct ekf_core_s *ekf,
                             float gate_sigma, FAR float *nis)
 {
   return measurement_update_1d(ekf, h, residual, noise_variance,
-                               gate_sigma, nis);
+                               gate_sigma, nis, EKF_GAIN_ALL, NULL);
 }
 
 int ekf_core_test_update_3d(FAR struct ekf_core_s *ekf,
@@ -2808,7 +2909,7 @@ int ekf_core_test_update_3d(FAR struct ekf_core_s *ekf,
                             float noise_variance, FAR float *nis)
 {
   return measurement_update_3d(ekf, h, residual, noise_variance, nis,
-                               NULL, NULL);
+                               NULL, NULL, EKF_GAIN_ALL);
 }
 
 #endif
@@ -2832,6 +2933,17 @@ static void extnav_set_datum(FAR struct ekf_core_s *ekf,
       ekf->position[0] = s->x;
       ekf->position[1] = s->y;
       covariance_reset_position_xy(ekf, pos_noise * pos_noise);
+
+      ekf->extnav_datum_set = true;
+      ekf->extnav_datum_count++;
+      ekf->extnav_consecutive_rejects = 0;
+      ekf->last_extnav_noise = pos_noise;
+      ekf->last_extnav_timestamp = ekf->last_timestamp_sample;
+      ekf->last_extnav_rx_timestamp = ekf->last_timestamp_sample;
+
+      /* A datum is the strongest possible accepted position update. */
+
+      ekf->extnav_accept_count++;
     }
 
   if (want_yaw)
@@ -2839,32 +2951,13 @@ static void extnav_set_datum(FAR struct ekf_core_s *ekf,
       reset_yaw_absolute(ekf, s->yaw, yaw_noise * yaw_noise);
       ekf->yaw_absolute = true;
     }
-
-  ekf->extnav_datum_set = true;
-  ekf->extnav_datum_count++;
-  ekf->extnav_consecutive_rejects = 0;
-  ekf->last_extnav_noise = pos_noise;
-  ekf->last_extnav_timestamp = ekf->last_timestamp_sample;
-
-  /* A datum counts as position aiding. It is the STRONGEST position
-   * information the filter ever gets - the state is set to the fix outright
-   * rather than nudged towards it - so reporting "not aided" until some
-   * later pose happens to pass a gate had it exactly backwards. Left as it
-   * was, the hold engaged on the step after a datum and floored the very
-   * covariance the datum had just reset.
-   */
-
-  if (want_position)
-    {
-      ekf->extnav_accept_count++;
-    }
 }
 
 /* Has the source gone quiet, as opposed to gone wrong?
  *
- * Only silence earns a re-datum. This is ArduPilot's posTimeout - measured
- * from the last time a pose PASSED, so a source that keeps sending poses the
- * gate refuses never satisfies it.
+ * Only silence earns a re-datum. This is measured from the last received
+ * horizontal pose, so a source that keeps sending poses the gate refuses
+ * never looks like it disconnected and cannot silently acquire a new datum.
  */
 
 static bool extnav_dropped_out(FAR const struct ekf_core_s *ekf)
@@ -2948,12 +3041,19 @@ int ekf_core_fuse_extnav(FAR struct ekf_core_s *ekf,
   float h[EKF_STATE_DIM];
   int accepted = 0;
   int gated = 0;
+  bool position_accepted = false;
+  bool position_gated = false;
   int axis;
 
   if (ekf == NULL || s == NULL || !ekf->initialized || !s->valid ||
-      !isfinite(s->x) || !isfinite(s->y) || !isfinite(s->yaw) ||
-      !isfinite(pos_noise_floor) || pos_noise_floor <= 0.0f ||
-      !isfinite(yaw_noise_floor) || yaw_noise_floor <= 0.0f)
+      (!want_position && !want_yaw) ||
+      (want_position &&
+       (!isfinite(s->x) || !isfinite(s->y) ||
+        !isfinite(pos_noise_floor) || pos_noise_floor <= 0.0f ||
+        !isfinite(pos_gate) || pos_gate <= 0.0f)) ||
+      (want_yaw &&
+       (!isfinite(s->yaw) || !isfinite(yaw_noise_floor) ||
+        yaw_noise_floor <= 0.0f || !isfinite(yaw_gate) || yaw_gate <= 0.0f)))
     {
       return -1;
     }
@@ -2964,9 +3064,9 @@ int ekf_core_fuse_extnav(FAR struct ekf_core_s *ekf,
    * the operator configured.
    */
 
-  pos_noise = pos_noise_floor;
+  pos_noise = want_position ? pos_noise_floor : 1.0f;
 
-  for (axis = 0; axis < 2; axis++)
+  for (axis = 0; want_position && axis < 2; axis++)
     {
       if (isfinite(s->pos_sigma[axis]) && s->pos_sigma[axis] > pos_noise)
         {
@@ -2974,8 +3074,9 @@ int ekf_core_fuse_extnav(FAR struct ekf_core_s *ekf,
         }
     }
 
-  yaw_noise = isfinite(s->yaw_sigma) && s->yaw_sigma > yaw_noise_floor ?
-              s->yaw_sigma : yaw_noise_floor;
+  yaw_noise = want_yaw && isfinite(s->yaw_sigma) &&
+              s->yaw_sigma > yaw_noise_floor ?
+              s->yaw_sigma : (want_yaw ? yaw_noise_floor : 1.0f);
 
   /* The source relocalised. That is worth more than twenty gated
    * innovations telling us the same thing more slowly.
@@ -3009,9 +3110,15 @@ int ekf_core_fuse_extnav(FAR struct ekf_core_s *ekf,
      * arrival cannot make itself look like a dropout.
      */
 
-    bool dropped = extnav_dropped_out(ekf);
+    bool dropped = want_position && extnav_dropped_out(ekf);
+    bool need_position_datum = want_position &&
+      (!ekf->extnav_datum_set || dropped || ekf->position_holding);
+    bool need_yaw_datum = want_yaw && !ekf->yaw_absolute;
 
-    ekf->last_extnav_rx_timestamp = ekf->last_timestamp_sample;
+    if (want_position)
+      {
+        ekf->last_extnav_rx_timestamp = ekf->last_timestamp_sample;
+      }
 
     /* A datum is granted when there has never been one, when the source
      * went away and came back - and now also whenever position has been
@@ -3028,30 +3135,38 @@ int ekf_core_fuse_extnav(FAR struct ekf_core_s *ekf,
      * adopted.
      *
      * And without it the filter would lock out. A condemned source has to
-     * agree again to recover, but a held position stops moving while the
-     * vehicle does not - so they could never agree, and the fix would be
-     * refused for ever.
+     * agree again to recover, but a position bounded around an old fix can be
+     * far from a returning source - so the fix could be refused forever.
      */
 
-    if (!ekf->extnav_datum_set || dropped || ekf->position_holding)
+    if (need_position_datum || need_yaw_datum)
       {
-        if (ekf->position_holding)
+        if (need_position_datum && ekf->position_holding)
           {
             ekf->position_snap_count++;
           }
 
-        extnav_set_datum(ekf, s, pos_noise, yaw_noise, want_position,
-                         want_yaw);
-        ekf->extnav_test_ratio = 0.0f;
-        ekf->extnav_fault_since = 0;
-        ekf->extnav_healthy = true;
-        ekf->position_holding = false;
-        ekf->inhibit_mask = 0;
+        extnav_set_datum(ekf, s, pos_noise, yaw_noise,
+                         need_position_datum, need_yaw_datum ||
+                         (need_position_datum && want_yaw));
+
+        if (need_position_datum)
+          {
+            ekf->extnav_test_ratio = 0.0f;
+            ekf->extnav_fault_since = 0;
+            ekf->extnav_healthy = true;
+            ekf->position_holding = false;
+            ekf->inhibit_mask = 0;
+          }
+
         return -2;
       }
   }
 
-  ekf->last_extnav_noise = pos_noise;
+  if (want_position)
+    {
+      ekf->last_extnav_noise = pos_noise;
+    }
 
   /* East and north are gated TOGETHER and fused together, or neither.
    *
@@ -3096,14 +3211,12 @@ int ekf_core_fuse_extnav(FAR struct ekf_core_s *ekf,
       ratio = innovation_sq / (pos_gate * pos_gate * variance_sum);
       extnav_track_ratio(ekf, ratio, ekf->last_timestamp_sample);
 
-      /* Freeze accelerometer bias while the source is arguing with the IMU.
+      /* Assert the accelerometer-bias inhibit while the source is arguing
+       * with the IMU.
        *
-       * A large, persistent position innovation is precisely the error the
-       * filter would otherwise absorb into accel bias, and doing so is a
-       * one-way trip: the bias corrupts the gravity reference, which
-       * corrupts attitude, which corrupts the position it was meant to fix.
-       * Freezing costs nothing when the source is good - the bias is
-       * observable from many other updates.
+       * Horizontal-position fusion already excludes every bias gain row.
+       * This inhibit is a second line of defence and retained as an explicit
+       * diagnostic for persistent source disagreement.
        */
 
       ekf->inhibit_mask = 0;
@@ -3131,6 +3244,7 @@ int ekf_core_fuse_extnav(FAR struct ekf_core_s *ekf,
       if (ratio >= 1.0f || !ekf->extnav_healthy)
         {
           gated++;
+          position_gated = true;
         }
       else
         {
@@ -3150,7 +3264,9 @@ int ekf_core_fuse_extnav(FAR struct ekf_core_s *ekf,
                                              measured[axis] -
                                              ekf->position[axis],
                                              pos_noise * pos_noise, 1.0e6f,
-                                             &ekf->last_extnav_nis[axis]);
+                                             &ekf->last_extnav_nis[axis],
+                                             EKF_GAIN_HORIZONTAL_POSITION,
+                                             NULL);
 
               if (result < 0)
                 {
@@ -3159,6 +3275,8 @@ int ekf_core_fuse_extnav(FAR struct ekf_core_s *ekf,
 
               accepted++;
             }
+
+          position_accepted = true;
         }
     }
 
@@ -3198,18 +3316,30 @@ int ekf_core_fuse_extnav(FAR struct ekf_core_s *ekf,
         }
     }
 
-  if (accepted > 0)
+  /* Position health is updated only by position. A simultaneously accepted
+   * yaw must not clear a horizontal rejection run or keep horizontal aiding
+   * alive after x/y stopped passing the gate.
+   */
+
+  if (position_accepted)
     {
       ekf->extnav_accept_count++;
       ekf->extnav_consecutive_rejects = 0;
       ekf->last_extnav_timestamp = ekf->last_timestamp_sample;
+    }
+  else if (position_gated)
+    {
+      ekf->extnav_reject_count++;
+      ekf->extnav_consecutive_rejects++;
+    }
+
+  if (accepted > 0)
+    {
       return 1;
     }
 
   if (gated > 0)
     {
-      ekf->extnav_reject_count++;
-      ekf->extnav_consecutive_rejects++;
       return 0;
     }
 

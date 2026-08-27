@@ -79,6 +79,7 @@ struct companion_status_s
    * to be corrected, it is the thing drift is measured against.
    */
 
+  bool     pps_absolute_phase;  /* PPS_ABS_PHASE: the pulse marks the second */
   bool     pps_phase_valid;
   int32_t  pps_phase_ref_us;
   int32_t  pps_drift_us;        /* movement away from that phase */

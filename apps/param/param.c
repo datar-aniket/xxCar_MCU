@@ -501,6 +501,31 @@ static const struct param_def_s g_params[] =
    * scheduling latency of a userspace pulse.
    */
 
+  /* Does the PPS edge mark the TRUE UTC second?
+   *
+   * It depends entirely on the companion, and the board cannot tell from
+   * here - both arrangements produce a stable 1 Hz pulse.
+   *
+   *   0  The pulse marks a consistent instant of unknown phase. Timesync
+   *      owns the phase; PPS corrects only drift away from it. Safe with
+   *      any pulse, and never worse than having no PPS.
+   *
+   *   1  The pulse marks the true second, so its phase is authoritative and
+   *      the residual is nulled outright. Correct when the companion's own
+   *      clock is disciplined to this same pulse - then both ends agree on
+   *      where the second is by construction, and it is the serial timesync
+   *      that is the weaker measurement.
+   *
+   * Which to use is decided by reading `companion status`: the reported PPS
+   * phase is the disagreement between timesync and the pulse. If it is small,
+   * the two already agree and this makes no difference. If it is tens of
+   * milliseconds, one of them is wrong - and if the companion's clock is
+   * locked to this pulse, the one that is wrong is timesync.
+   */
+
+  { "PPS_ABS_PHASE", PARAM_TYPE_INT32, I32(0), I32(0), I32(1),
+    "PPS edge marks the true UTC second (1 = trust its phase)" },
+
   { "PPS_MAX_COR_US", PARAM_TYPE_INT32, I32(10000), I32(100), I32(500000),
     "Largest PPS correction believed as a refinement (us)" },
 

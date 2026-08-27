@@ -156,10 +156,10 @@ static void print_status(void)
        */
 
       printf("    health  %s  test_ratio %.2f  faults %" PRIu32
-             "  accel-bias %s (%" PRIu32 ")\n",
+             "  disagreement guard %s (%" PRIu32 ")\n",
              core->extnav_healthy ? "OK" : "UNHEALTHY - NOT FUSED",
              (double)core->extnav_test_ratio, core->extnav_fault_count,
-             core->extnav_bias_inhibited ? "FROZEN" : "learning",
+             core->extnav_bias_inhibited ? "ACTIVE" : "idle",
              core->extnav_inhibit_count);
 
       if (!core->extnav_healthy)
@@ -346,7 +346,7 @@ static void print_status(void)
            obs >= EKF_OBS_VELOCITY ? "attitude + velocity" :
                                      "attitude only",
            obs < EKF_OBS_POSITION ?
-             "   (position is held, not integrated)" : "");
+             "   (position is propagated but not valid)" : "");
   }
 
   /* The horizontal hold. Holding is not a fault in itself - it is the
@@ -365,8 +365,8 @@ static void print_status(void)
 
       if (core->position_holding)
         {
-          printf("             dead reckoning is bounded, not running: the\n"
-                 "             position is where the last fix left it, and\n"
+          printf("             dead reckoning is bounded around the last\n"
+                 "             fix and is not a valid position solution;\n"
                  "             the next valid fix is adopted outright\n");
         }
     }
