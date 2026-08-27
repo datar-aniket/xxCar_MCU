@@ -643,6 +643,8 @@ static int ekf3_daemon(int argc, FAR char *argv[])
   ekf_core_set_position_hold(&status.core, status.position_hold_limit);
   ekf_core_set_bias_limits(&status.core, param_f32("EK3_GBIAS_LIM"),
                            param_f32("EK3_ABIAS_LIM"));
+  ekf_core_set_bias_learning(&status.core, param_i32("EK3_GBIAS_EN") != 0,
+                             param_i32("EK3_ABIAS_EN") != 0);
   status.declination = param_f32("EK3_MAG_DEC") * 0.017453292519943295f;
   status.yaw_noise = param_f32("EK3_YAW_M_NSE");
   status.yaw_gate = param_f32("EK3_YAW_I_GATE");

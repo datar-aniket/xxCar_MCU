@@ -167,6 +167,13 @@ struct ekf_core_s
 
   uint8_t  inhibit_mask;
 
+  /* Persistent inhibit from EK3_ABIAS_EN / EK3_GBIAS_EN. ORed with the
+   * per-update mask above, so a temporary freeze and a permanent one
+   * compose rather than overwrite each other.
+   */
+
+  uint8_t  bias_learn_inhibit;
+
   /* How many gain rows the mask has actually zeroed.
    *
    * Observability, not bookkeeping: without it "the mask was set" and "the
@@ -495,6 +502,13 @@ void ekf_core_set_position_hold(FAR struct ekf_core_s *ekf, float limit_m);
 /* Bias bounds. Each is clamped to the compile-time ceiling; zero or a
  * nonsense value leaves the ceiling in force rather than removing the bound.
  */
+
+/* Stop learning a bias altogether. Disabling FREEZES the state where it
+ * stands rather than zeroing it; `ekf3 reset` clears it.
+ */
+
+void ekf_core_set_bias_learning(FAR struct ekf_core_s *ekf, bool learn_gyro,
+                                bool learn_accel);
 
 void ekf_core_set_bias_limits(FAR struct ekf_core_s *ekf, float gyro_limit,
                               float accel_limit);

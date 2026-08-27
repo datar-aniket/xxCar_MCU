@@ -1640,6 +1640,96 @@ static void test_attitude_still_propagates_when_unaided(void)
   assert(fabsf(euler[2]) > 0.2f);
 }
 
+/* Bias learning can be switched off, and the switch must reach BOTH update
+ * paths.
+ *
+ * The 3D path is the one that matters: low_dynamics_updates observes
+ * accelerometer bias directly through h[axis][12 + axis], so it is the
+ * dominant way the bias is learned. An inhibit covering only the scalar
+ * update - which is what existed - left the main path open, and every
+ * earlier "bias is frozen" claim was true only of the path that mattered
+ * least.
+ */
+
+static void test_bias_learning_can_be_frozen(void)
+{
+  struct ekf_core_s ekf;
+  uint64_t timestamp;
+  struct ekf_imu_sample_s imu;
+  float bias_before[3];
+  unsigned i;
+  int axis;
+
+  /* Learning ON: the gravity update moves accel bias. */
+
+  extnav_align(&ekf, &timestamp);
+  ekf_core_set_bias_learning(&ekf, true, true);
+  memset(ekf.accel_bias, 0, sizeof(ekf.accel_bias));
+
+  for (i = 0; i < 600; i++)
+    {
+      const float accel[3] = {0.3f, 0.0f, TEST_GRAVITY};
+      const float gyro[3] = {0.0f, 0.0f, 0.0f};
+
+      timestamp += TEST_DT_US;
+      make_sample(&imu, timestamp, accel, gyro);
+      ekf_core_process(&ekf, &imu);
+    }
+
+  assert(fabsf(ekf.accel_bias[0]) > 1.0e-4f);
+
+  /* Learning OFF: the same stimulus moves nothing. */
+
+  extnav_align(&ekf, &timestamp);
+  ekf_core_set_bias_learning(&ekf, false, false);
+  memset(ekf.accel_bias, 0, sizeof(ekf.accel_bias));
+  memset(ekf.gyro_bias, 0, sizeof(ekf.gyro_bias));
+  memcpy(bias_before, ekf.accel_bias, sizeof(bias_before));
+
+  for (i = 0; i < 600; i++)
+    {
+      const float accel[3] = {0.3f, 0.0f, TEST_GRAVITY};
+      const float gyro[3] = {0.0f, 0.0f, 0.0f};
+
+      timestamp += TEST_DT_US;
+      make_sample(&imu, timestamp, accel, gyro);
+      ekf_core_process(&ekf, &imu);
+    }
+
+  for (axis = 0; axis < 3; axis++)
+    {
+      assert_near(ekf.accel_bias[axis], bias_before[axis], 1.0e-9f);
+      assert_near(ekf.gyro_bias[axis], 0.0f, 1.0e-9f);
+    }
+
+  assert(ekf.inhibit_applied_count > 0);
+}
+
+/* Freezing HOLDS the value rather than zeroing it - a converged bias is
+ * worth keeping, and clearing one is `ekf3 reset`, an explicit action.
+ */
+
+static void test_freezing_holds_rather_than_zeroes(void)
+{
+  struct ekf_core_s ekf;
+  uint64_t timestamp;
+
+  extnav_align(&ekf, &timestamp);
+  ekf.accel_bias[2] = 0.25f;
+
+  ekf_core_set_bias_learning(&ekf, true, false);
+  assert_near(ekf.accel_bias[2], 0.25f, 1.0e-9f);
+
+  /* And the two switches are independent. */
+
+  assert((ekf.bias_learn_inhibit & EKF_INHIBIT_ACCEL_BIAS) != 0);
+  assert((ekf.bias_learn_inhibit & EKF_INHIBIT_GYRO_BIAS) == 0);
+
+  ekf_core_set_bias_learning(&ekf, false, true);
+  assert((ekf.bias_learn_inhibit & EKF_INHIBIT_ACCEL_BIAS) == 0);
+  assert((ekf.bias_learn_inhibit & EKF_INHIBIT_GYRO_BIAS) != 0);
+}
+
 /* The tiers nest, which is the property the gating relies on: asking
  * "observability >= VELOCITY" has to be true whenever position is available.
  */
@@ -1849,6 +1939,8 @@ int main(void)
   test_position_held_when_unaided();
   test_position_snaps_back_on_recovery();
   test_disagreeing_source_is_followed_not_chased();
+  test_bias_learning_can_be_frozen();
+  test_freezing_holds_rather_than_zeroes();
   test_observability_tiers_nest();
   test_unobservable_states_are_not_integrated();
   test_attitude_still_propagates_when_unaided();

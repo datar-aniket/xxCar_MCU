@@ -552,6 +552,29 @@ static const struct param_def_s g_params[] =
   { "EK3_GBIAS_LIM", PARAM_TYPE_FLOAT, F32(0.1f), F32(0.01f), F32(0.1f),
     "Gyro bias bound (rad/s)" },
 
+  /* Bias learning switches.
+   *
+   * Turning one OFF freezes that bias where it stands - it does not zero it.
+   * A converged value is worth keeping; a bad one is cleared by `ekf3 reset`,
+   * which is an explicit action rather than a side effect of editing a
+   * parameter. So to pin a bias at zero: set the switch off, then reset.
+   *
+   * Both default ON. Freezing accelerometer bias is a reasonable response to
+   * an estimate that will not settle - a saturated bias is worse than none,
+   * because the filter is using it to explain something that is not bias -
+   * but it is a diagnosis aid, not a fix: the underlying cause is usually a
+   * calibration that needs redoing.
+   *
+   * Gyro bias is the one to leave alone. It is genuinely observable from
+   * gravity, it really does drift with temperature, and freezing it costs
+   * heading stability for nothing.
+   */
+
+  { "EK3_ABIAS_EN", PARAM_TYPE_INT32, I32(1), I32(0), I32(1),
+    "Learn accelerometer bias (0 = frozen)" },
+  { "EK3_GBIAS_EN", PARAM_TYPE_INT32, I32(1), I32(0), I32(1),
+    "Learn gyro bias (0 = frozen)" },
+
   { "EK3_EXT_TIMEOUT", PARAM_TYPE_INT32, I32(1000), I32(100), I32(10000),
     "External nav dropout before position is dropped (ms)" },
 

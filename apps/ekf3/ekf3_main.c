@@ -277,6 +277,16 @@ static void print_status(void)
    * be believing.
    */
 
+  if (core->bias_learn_inhibit != 0)
+    {
+      printf("             learning FROZEN:%s%s  (values held, `ekf3 reset`"
+             " clears)\n",
+             (core->bias_learn_inhibit & EKF_INHIBIT_GYRO_BIAS) ?
+               " gyro" : "",
+             (core->bias_learn_inhibit & EKF_INHIBIT_ACCEL_BIAS) ?
+               " accel" : "");
+    }
+
   {
     int axis;
 

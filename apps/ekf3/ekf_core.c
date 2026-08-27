@@ -1085,6 +1085,33 @@ bool ekf_core_position_aided(FAR const struct ekf_core_s *ekf)
            (uint64_t)ekf->extnav_timeout_us;
 }
 
+void ekf_core_set_bias_learning(FAR struct ekf_core_s *ekf, bool learn_gyro,
+                                bool learn_accel)
+{
+  if (ekf == NULL)
+    {
+      return;
+    }
+
+  /* Disabling learning FREEZES the state where it stands; it does not zero
+   * it. A converged bias is worth keeping, and a bad one is cleared by
+   * `ekf3 reset`, which is the explicit action rather than a side effect of
+   * changing a parameter.
+   */
+
+  ekf->bias_learn_inhibit = 0;
+
+  if (!learn_gyro)
+    {
+      ekf->bias_learn_inhibit |= EKF_INHIBIT_GYRO_BIAS;
+    }
+
+  if (!learn_accel)
+    {
+      ekf->bias_learn_inhibit |= EKF_INHIBIT_ACCEL_BIAS;
+    }
+}
+
 void ekf_core_set_bias_limits(FAR struct ekf_core_s *ekf, float gyro_limit,
                               float accel_limit)
 {
@@ -1315,6 +1342,16 @@ static void constrain_biases(FAR struct ekf_core_s *ekf)
  * which avoids two 15x15 workspaces without dropping the stabilizing terms.
  */
 
+/* The inhibit mask actually in force: whatever this update set, plus
+ * whatever the operator has frozen permanently through EK3_ABIAS_EN and
+ * EK3_GBIAS_EN.
+ */
+
+static uint8_t effective_inhibit(FAR const struct ekf_core_s *ekf)
+{
+  return (uint8_t)(ekf->inhibit_mask | ekf->bias_learn_inhibit);
+}
+
 static int measurement_update_3d(
   FAR struct ekf_core_s *ekf,
   FAR const float h[3][EKF_STATE_DIM],
@@ -1450,6 +1487,38 @@ static int measurement_update_3d(
    * the state injection and Joseph covariance update use exactly the same
    * observable subspace.
    */
+
+  /* Freeze the states this update is not allowed to move.
+   *
+   * Zeroing the gain ROW rather than skipping the update keeps the Joseph
+   * covariance update below consistent with the correction actually
+   * applied, and it has to happen HERE - before both - or P would claim an
+   * information gain the state never received.
+   *
+   * This path matters more than it looks: low_dynamics_updates observes
+   * accelerometer bias DIRECTLY, through h[axis][12 + axis], so it is the
+   * dominant way that bias is learned. An inhibit that only covered the
+   * scalar update, as this one did, left the main path wide open.
+   */
+
+  {
+    uint8_t inhibit = effective_inhibit(ekf);
+
+    for (row = 9; row < EKF_STATE_DIM; row++)
+      {
+        if ((inhibit & (1u << (row - 9))) == 0)
+          {
+            continue;
+          }
+
+        for (measurement = 0; measurement < 3; measurement++)
+          {
+            gain[row][measurement] = 0.0f;
+          }
+
+        ekf->inhibit_applied_count++;
+      }
+  }
 
   for (row = 0; row < EKF_STATE_DIM; row++)
     {
@@ -1656,8 +1725,8 @@ static int measurement_update_1d(FAR struct ekf_core_s *ekf,
        * never received.
        */
 
-      if (ekf->inhibit_mask != 0 && row >= 9 &&
-          (ekf->inhibit_mask & (1u << (row - 9))) != 0)
+      if (row >= 9 &&
+          (effective_inhibit(ekf) & (1u << (row - 9))) != 0)
         {
           gain[row] = 0.0f;
           ekf->inhibit_applied_count++;
