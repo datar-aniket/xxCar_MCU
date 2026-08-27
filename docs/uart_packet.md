@@ -351,6 +351,33 @@ these carry raw amps, raw volts and raw counts per second. That is
 deliberate: a guessed gear ratio is worse than an honest raw number, because
 it looks calibrated.
 
+#### Calibrating `VESC_SPEED_K`
+
+`tools/wheel_cal.py <port>` estimates it from a drive: it collects
+`VEHICLE_STATE` frames for 60 s and fits the estimator's forward speed
+against the tachometer rate, through the origin, because zero counts must
+mean zero velocity.
+
+```
+param set VESC_SPEED_K 1.0     # else the result is a correction, not the value
+param save                     # then reboot
+python3 tools/wheel_cal.py /dev/pixhawk_6c --seconds 60
+```
+
+Drive straight, over a range of speeds. Samples are discarded while turning
+(`|yaw rate| > 0.35 rad/s` — a turn scrubs the wheels and a differential
+drives them at rates the body does not travel at), below 0.3 m/s, and any
+time the estimator lacks a horizontal position solution: it cannot be a speed
+reference when it does not know its own speed. The fit is refused outright
+below 200 samples or a 1 m/s speed span, since a dataset taken at one speed
+yields a confident number describing only that speed.
+
+The estimator's velocity is a legitimate reference here only because it is
+not derived from the wheels. The zero-velocity update is deliberately
+K-independent — it asserts zero, never a speed — so the fit is not circular.
+Were wheel speed ever fused as a velocity measurement, this tool would have
+to take its reference from the external fix directly.
+
 `motor_speed_ms` is the time derivative of the tachometer, and it is computed
 **in the VESC daemon, not here.** That placement is the point:
 
