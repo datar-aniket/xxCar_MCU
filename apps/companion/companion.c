@@ -364,6 +364,13 @@ static void comp_route(int id, FAR const struct comp_parser_s *parser,
 
           g_utc_offset_us = end.utc_offset_us;
           g_utc_valid = true;
+
+          /* The offset just moved, so the phase the PPS was measured
+           * against has moved with it. Re-establish on the next edge rather
+           * than reading the change as drift.
+           */
+
+          s->pps_phase_valid = false;
           s->utc_from_rtc = false;
 
           /* Set the wall clock too, so `date`, log filenames and anything
@@ -486,26 +493,58 @@ static void comp_pps_discipline(FAR struct companion_status_s *s)
   s->pps_edge_used = pps.last_edge_us;
   s->pps_residual_us = (int32_t)residual;
 
+  /* THE PULSE MARKS A CONSISTENT INSTANT, NOT NECESSARILY THE UTC SECOND.
+   *
+   * It comes from a hardware timer on the companion, so its RATE is
+   * excellent - microsecond-stable, which is the whole reason to want it.
+   * Its PHASE is another matter: a 1 Hz output starts wherever the timer was
+   * enabled, so unless something steers it to the system clock its edges sit
+   * at a fixed, arbitrary offset from the true second.
+   *
+   * Forcing that offset to zero - which is what this used to do - drags the
+   * board's clock away from UTC by exactly the pulse's phase error and
+   * leaves every timestamp wrong by the same amount. Tens of milliseconds of
+   * constant offset is entirely normal for a free-running PWM, and it made
+   * the link measurably worse than having no PPS at all.
+   *
+   * So the first edge after a sync ESTABLISHES the phase rather than being
+   * corrected to zero. Timesync owns the phase; PPS owns the rate. What is
+   * corrected from then on is the DRIFT away from that established phase,
+   * which is the clock error PPS is actually good at seeing.
+   */
+
+  if (!s->pps_phase_valid)
+    {
+      s->pps_phase_ref_us = (int32_t)residual;
+      s->pps_phase_valid = true;
+      return;
+    }
+
+  residual -= (int64_t)s->pps_phase_ref_us;
+
+  /* The phase reference itself wraps: a drift measured across the second
+   * boundary reads as most of a second rather than a few microseconds.
+   */
+
+  if (residual > 500000ll)
+    {
+      residual -= 1000000ll;
+    }
+  else if (residual < -500000ll)
+    {
+      residual += 1000000ll;
+    }
+
+  s->pps_drift_us = (int32_t)residual;
+
   if (labs((long)residual) > labs((long)s->pps_worst_us))
     {
       s->pps_worst_us = (int32_t)residual;
     }
 
-  /* PPS REFINES an offset; it does not establish one.
-   *
-   * A timesync burst already puts the offset within a few milliseconds, so a
-   * residual far outside that is not this link's clock being imprecise - it
-   * is the pulse arriving somewhere other than the second boundary it claims
-   * to mark. A PPS generated from userspace on a non-realtime host does
-   * exactly that, by however long the scheduler took.
-   *
-   * Applying such a correction would drag the board's clock away from UTC by
-   * the pulse's own latency, and the symptom is a solution time that lags
-   * the host by tens of milliseconds - worse than having no PPS at all,
-   * which is the wrong way for a refinement to fail.
-   *
-   * So it is refused, counted, and the residual is reported. The timesync
-   * offset stands.
+  /* Drift this large is not drift. Something moved the clock, or the pulse
+   * is not the one we established the phase against; either way the
+   * timesync offset is the better answer.
    */
 
   if (labs((long)residual) > (long)s->pps_max_correction_us)
@@ -517,6 +556,7 @@ static void comp_pps_discipline(FAR struct companion_status_s *s)
   g_utc_offset_us -= residual;
   s->pps_corrections++;
 }
+
 
 static void comp_transmit(int fd, int est_sub, int gyro_sub,
                           int accel_sub, int vesc_sub,

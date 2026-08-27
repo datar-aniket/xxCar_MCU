@@ -170,20 +170,34 @@ static void print_status(void)
   printf("  clocks     TIM5 - MONOTONIC %+" PRIi64 " us\n",
          s.clock_skew_us);
 
+  if (s.pps_phase_valid)
+    {
+      printf("  pps        phase %+.1f ms from the UTC second, drift %+"
+             PRIi32 " us\n",
+             (double)s.pps_phase_ref_us / 1000.0, s.pps_drift_us);
+
+      /* A large phase offset is NORMAL for a free-running 1 Hz output and
+       * is not corrected - saying so stops it being read as an error.
+       */
+
+      if (labs((long)s.pps_phase_ref_us) > 1000)
+        {
+          printf("             that offset is the pulse's own phase, not a "
+                 "clock error.\n"
+                 "             Timesync owns the phase; PPS only corrects "
+                 "drift from it.\n");
+        }
+    }
+
   if (s.pps_rejected > 0)
     {
-      printf("  pps        REFUSED %" PRIu32 " correction(s); worst residual"
-             " %+" PRIi32 " us\n"
-             "             the pulse is %+.1f ms from the second it claims "
-             "to mark.\n"
-             "             That is the generating host's latency, not this "
-             "board's clock -\n"
-             "             a userspace PPS cannot be trusted to the "
-             "millisecond. The timesync\n"
-             "             offset is being used instead, which is why "
-             "disabling PPS looks better.\n",
-             s.pps_rejected, s.pps_worst_us,
-             (double)s.pps_worst_us / 1000.0);
+      printf("  pps        REFUSED %" PRIu32 " correction(s); worst drift %+"
+             PRIi32 " us\n"
+             "             drift that large is not drift - something moved "
+             "the clock, or the\n"
+             "             pulse is not the one the phase was established "
+             "against.\n",
+             s.pps_rejected, s.pps_worst_us);
     }
 
   printf("  pps        %s  corrections %" PRIu32 "  last residual %+"

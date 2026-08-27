@@ -73,6 +73,15 @@ struct companion_status_s
   uint32_t pps_corrections;
   uint32_t pps_rejected;        /* residual too large to be a refinement */
   uint32_t pps_max_correction_us;
+
+  /* The pulse's own phase offset from the UTC second, established once per
+   * sync. A free-running 1 Hz PWM has an arbitrary one; it is not an error
+   * to be corrected, it is the thing drift is measured against.
+   */
+
+  bool     pps_phase_valid;
+  int32_t  pps_phase_ref_us;
+  int32_t  pps_drift_us;        /* movement away from that phase */
   int32_t  pps_worst_us;        /* largest residual seen, applied or not */
   int32_t  pps_residual_us;     /* last measured error, + means we ran fast */
   uint64_t pps_edge_used;
