@@ -207,6 +207,40 @@ static void test_yaw_prediction(void)
   assert(ekf.gravity_accept_count == 0);
 }
 
+/* imu_integrator has already rotated every native delta velocity into the
+ * packet-start body frame. The EKF must apply the packet-start attitude once,
+ * not a midpoint attitude that rotates the sculling correction a second time.
+ */
+
+static void test_sculling_delta_uses_packet_start_attitude(void)
+{
+  struct ekf_core_s ekf;
+  struct ekf_imu_sample_s sample;
+  const float zero_gyro[3] = {0.0f, 0.0f, 0.0f};
+  const float rest[3] = {0.0f, 0.0f, TEST_GRAVITY};
+  const float angle = 0.25f;
+  const float rate = 100.0f;
+  uint64_t timestamp = 5000000ull;
+  float expected_x;
+  float expected_y;
+
+  ekf_core_init(&ekf);
+  initialize_tilted(&ekf, &timestamp, 0.0f, 0.0f, zero_gyro);
+
+  timestamp += TEST_DT_US;
+  make_sample(&sample, timestamp, rest, zero_gyro);
+  sample.delta_angle[2] = angle;
+  expected_x = sinf(angle) / rate;
+  expected_y = (1.0f - cosf(angle)) / rate;
+  sample.delta_velocity[0] = expected_x;
+  sample.delta_velocity[1] = expected_y;
+
+  assert(ekf_core_process(&ekf, &sample) == EKF_PROCESS_PREDICTED);
+  assert_near(ekf.velocity[0], expected_x, 2.0e-7f);
+  assert_near(ekf.velocity[1], expected_y, 2.0e-7f);
+  assert_near(ekf.velocity[2], 0.0f, 2.0e-7f);
+}
+
 static void test_low_dynamics_updates(void)
 {
   struct ekf_core_s ekf;
@@ -254,6 +288,41 @@ static void test_low_dynamics_updates(void)
   assert(ekf.low_dynamics);
   assert(ekf.gravity_reject_count == rejected_before + 1);
   assert(ekf.last_gravity_nis > 16.3f);
+}
+
+/* The core injects attitude errors by right-multiplying the quaternion, so
+ * covariance propagation must use -R*skew(f). A sign error here reverses the
+ * attitude/velocity cross-covariance and makes position innovations drive
+ * tilt in the wrong direction.
+ */
+
+static void test_covariance_attitude_velocity_sign(void)
+{
+  struct ekf_core_s ekf;
+  struct ekf_imu_sample_s sample;
+  const float zero_gyro[3] = {0.0f, 0.0f, 0.0f};
+  const float accel[3] = {1.0f, 0.0f, TEST_GRAVITY};
+  uint64_t timestamp = 7000000ull;
+  int index;
+
+  ekf_core_init(&ekf);
+  initialize_tilted(&ekf, &timestamp, 0.0f, 0.0f, zero_gyro);
+
+  for (index = 0; index < EKF_COVARIANCE_INTERVAL; index++)
+    {
+      timestamp += TEST_DT_US;
+      make_sample(&sample, timestamp, accel, zero_gyro);
+
+      /* Keep this a propagation-only check. */
+
+      sample.clipping = 1;
+      assert(ekf_core_process(&ekf, &sample) == EKF_PROCESS_PREDICTED);
+    }
+
+  assert(ekf.covariance[EKF_P_INDEX(3, 1)] > 0.0f); /* vx vs pitch */
+  assert(ekf.covariance[EKF_P_INDEX(4, 0)] < 0.0f); /* vy vs roll */
+  assert(ekf.covariance[EKF_P_INDEX(5, 1)] < 0.0f); /* vz vs pitch */
+  assert_covariance_positive_definite(&ekf);
 }
 
 static void test_gravity_preserves_yaw_gauge(void)
@@ -558,6 +627,175 @@ static void test_extnav_fuses_after_the_datum(void)
   assert_covariance_positive_definite(&ekf);
 }
 
+/* Horizontal position is allowed to correct horizontal velocity and
+ * position only. Deliberately seed cross-covariance to every other state so
+ * this cannot pass merely because the unwanted gains happened to be zero.
+ */
+
+static void test_extnav_position_masks_attitude_and_vertical_gain(void)
+{
+  struct ekf_core_s ekf;
+  struct ekf_core_s before;
+  struct ekf_extnav_sample_s s = extnav_at(0.0f, 0.0f, 0.0f);
+  uint64_t timestamp;
+  int state;
+
+  extnav_align(&ekf, &timestamp);
+  assert(ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f,
+                              true, false) == -2);
+
+  for (state = 0; state < EKF_STATE_DIM; state++)
+    {
+      float cross;
+
+      if (state == 6)
+        {
+          continue;
+        }
+
+      cross = 0.10f * sqrtf(
+        ekf.covariance[EKF_P_INDEX(state, state)] *
+        ekf.covariance[EKF_P_INDEX(6, 6)]);
+      ekf.covariance[EKF_P_INDEX(state, 6)] = cross;
+      ekf.covariance[EKF_P_INDEX(6, state)] = cross;
+    }
+
+  assert_covariance_positive_definite(&ekf);
+  before = ekf;
+  s.x = 0.02f;
+
+  assert(ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f,
+                              true, false) == 1);
+
+  /* The supported derivative state and measured state do move. */
+
+  assert(fabsf(ekf.velocity[0] - before.velocity[0]) > 1.0e-6f);
+  assert(fabsf(ekf.position[0] - before.position[0]) > 1.0e-4f);
+
+  /* No attitude, vertical state, or bias is injected by x/y position. */
+
+  for (state = 0; state < 4; state++)
+    {
+      assert_near(ekf.quaternion[state], before.quaternion[state], 1.0e-9f);
+    }
+
+  assert_near(ekf.velocity[2], before.velocity[2], 1.0e-9f);
+  assert_near(ekf.position[2], before.position[2], 1.0e-9f);
+
+  for (state = 0; state < 3; state++)
+    {
+      assert_near(ekf.gyro_bias[state], before.gyro_bias[state], 1.0e-9f);
+      assert_near(ekf.accel_bias[state], before.accel_bias[state], 1.0e-9f);
+    }
+
+  assert_covariance_positive_definite(&ekf);
+}
+
+/* Validation follows source selection. A position-only fusion must not be
+ * rejected because yaw is unavailable, and yaw-only must not create or keep
+ * a horizontal-position datum alive.
+ */
+
+static void test_extnav_validates_only_requested_observations(void)
+{
+  struct ekf_core_s ekf;
+  struct ekf_extnav_sample_s s;
+  uint64_t timestamp;
+
+  extnav_align(&ekf, &timestamp);
+  s = extnav_at(NAN, NAN, 0.3f);
+  assert(ekf_core_fuse_extnav(&ekf, &s, NAN, NAN, 0.05f, 5.0f,
+                              false, true) == -2);
+  assert(!ekf.extnav_datum_set);
+  assert(ekf.extnav_accept_count == 0);
+
+  extnav_align(&ekf, &timestamp);
+  s = extnav_at(2.0f, -1.0f, NAN);
+  assert(ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, NAN, NAN,
+                              true, false) == -2);
+  assert(ekf.extnav_datum_set);
+  assert(ekf.extnav_accept_count == 1);
+}
+
+/* Accepted yaw and rejected x/y can arrive in the same pose. Yaw must not
+ * clear the horizontal rejection run or refresh the horizontal aiding time.
+ */
+
+static void test_extnav_yaw_cannot_hide_position_rejection(void)
+{
+  struct ekf_core_s ekf;
+  struct ekf_extnav_sample_s s = extnav_at(0.0f, 0.0f, 0.0f);
+  uint64_t timestamp;
+  uint64_t last_position_accept;
+
+  extnav_align(&ekf, &timestamp);
+  assert(ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f,
+                              true, true) == -2);
+  last_position_accept = ekf.last_extnav_timestamp;
+
+  ekf.last_timestamp_sample += 10000ull;
+  s.x = 100.0f;
+
+  /* Overall return is accepted because yaw passed; position bookkeeping
+   * still records its own rejection.
+   */
+
+  assert(ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f,
+                              true, true) == 1);
+  assert(ekf.extnav_consecutive_rejects == 1);
+  assert(ekf.extnav_reject_count == 1);
+  assert(ekf.last_extnav_timestamp == last_position_accept);
+}
+
+/* Regression for the vehicle failure mode: smooth acceleration with a good
+ * horizontal position source must not pull roll/pitch away from gravity.
+ *
+ * Smooth acceleration used to be classified as "low dynamics" because its
+ * IMU variance and one-g norm were small. At the same time, the position
+ * innovation had unrestricted attitude gain with the wrong propagated cross-
+ * covariance sign. Both paths could therefore reinforce an impossible tilt.
+ */
+
+static void test_moving_extnav_does_not_corrupt_tilt(void)
+{
+  struct ekf_core_s ekf;
+  struct ekf_extnav_sample_s pose = extnav_at(0.0f, 0.0f, 0.0f);
+  struct ekf_imu_sample_s imu;
+  const float accel[3] = {2.0f, 0.0f, TEST_GRAVITY};
+  const float gyro[3] = {0.0f, 0.0f, 0.0f};
+  float euler[3];
+  uint64_t timestamp;
+  unsigned i;
+
+  extnav_align(&ekf, &timestamp);
+  ekf_core_set_position_hold(&ekf, 2.0f);
+  assert(ekf_core_fuse_extnav(&ekf, &pose, 0.10f, 5.0f, 0.05f, 5.0f,
+                              true, false) == -2);
+
+  for (i = 1; i <= 1200; i++)
+    {
+      float elapsed = (float)i * TEST_DT;
+
+      timestamp += TEST_DT_US;
+      make_sample(&imu, timestamp, accel, gyro);
+      assert(ekf_core_process(&ekf, &imu) == EKF_PROCESS_PREDICTED);
+
+      if ((i % 4u) == 0u)
+        {
+          pose.x = 0.5f * 2.0f * elapsed * elapsed;
+          assert(ekf_core_fuse_extnav(&ekf, &pose, 0.10f, 5.0f,
+                                      0.05f, 5.0f, true, false) == 1);
+        }
+    }
+
+  ekf_core_euler(&ekf, euler);
+  assert_near(euler[0], 0.0f, 0.02f);
+  assert_near(euler[1], 0.0f, 0.05f);
+  assert(ekf.velocity[0] > 5.0f);
+  assert(!ekf.low_dynamics);
+  assert_covariance_positive_definite(&ekf);
+}
+
 /* The parameter is a FLOOR. A source claiming 1 mm is fused at the
  * configured 0.1 m, not at what it claimed.
  */
@@ -756,19 +994,13 @@ static void test_extnav_persistent_disagreement_withdraws_position(void)
   assert((ekf_core_solution_status(&ekf) & EKF_SOLUTION_ATTITUDE) != 0);
 }
 
-/* Accelerometer bias must be FROZEN while the source is arguing with the
- * IMU. This is the state whose corruption caused the divergence, so the
- * guard is asserted directly rather than inferred from the outcome.
+/* Horizontal position has zero accelerometer-bias gain at all times, not
+ * only after disagreement activates the redundant inhibit guard. Seed a
+ * strong bias/position cross-covariance on every update so an unmasked gain
+ * would be visible immediately.
  */
 
-/* Accelerometer bias must be FROZEN while the source is arguing with the
- * IMU, and this has to be tested in the window where poses are STILL BEING
- * FUSED. Once the source is condemned nothing is fused at all, so the bias
- * would sit still whether the inhibit worked or not - a test that only
- * looked there would pass with the guard removed.
- */
-
-static void test_extnav_disagreement_freezes_accel_bias(void)
+static void test_extnav_disagreement_never_updates_accel_bias(void)
 {
   struct ekf_core_s ekf;
   uint64_t timestamp;
@@ -791,27 +1023,7 @@ static void test_extnav_disagreement_freezes_accel_bias(void)
   ekf.accel_bias[1] = 0.0f;
   ekf.accel_bias[2] = 0.0f;
 
-  /* THE ACTUAL FAILURE: the vehicle moves and the source insists it has
-   * not. A constant offset would not do - the filter simply absorbs that as
-   * a datum shift and the innovation collapses. It is the GROWING
-   * disagreement that has nowhere to go except into accel bias.
-   *
-   * 0.4 m/s of drift keeps individual poses inside the gate, so fusion
-   * continues and the bias would be learned if nothing stopped it.
-   */
-
-  /* Give the bias a path to move through. A position measurement touches
-   * accel bias only via the P[bias][position] cross-covariance that
-   * strapdown propagation builds; this scenario drives fusion directly, so
-   * without seeding it the bias would sit still whether inhibited or not and
-   * the assertion below would prove nothing.
-   */
-
-  for (i = 0; i < 3; i++)
-    {
-      ekf.covariance[EKF_P_INDEX(12 + i, 6)] = 0.05f;
-      ekf.covariance[EKF_P_INDEX(6, 12 + i)] = 0.05f;
-    }
+  memcpy(bias_before, ekf.accel_bias, sizeof(bias_before));
 
   for (i = 0; i < 300; i++)
     {
@@ -819,13 +1031,6 @@ static void test_extnav_disagreement_freezes_accel_bias(void)
 
       ekf.last_timestamp_sample += 10000ull;
       ekf.position[0] += 0.004f;
-
-      /* Re-seeded every iteration, not once. Each Joseph update shrinks the
-       * cross term, so a single seed decays away long before the guard
-       * engages - and then the bias would sit still for want of a path
-       * rather than because anything stopped it, which is a test that passes
-       * with the guard deleted.
-       */
 
       for (axis = 0; axis < 3; axis++)
         {
@@ -836,24 +1041,10 @@ static void test_extnav_disagreement_freezes_accel_bias(void)
       result = ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f,
                                     true, false);
 
-      if (!ekf.extnav_bias_inhibited)
-        {
-          /* Still learning, legitimately. Keep moving the reference: the
-           * claim is only that the bias stops once the guard engages.
-           */
-
-          memcpy(bias_before, ekf.accel_bias, sizeof(bias_before));
-          continue;
-        }
-
-      if (result == 1)
+      if (ekf.extnav_bias_inhibited && result == 1)
         {
           fused_while_inhibited = true;
         }
-
-      /* Inhibited from here on: not one more count of movement, on any
-       * axis, however many poses are still being fused.
-       */
 
       for (axis = 0; axis < 3; axis++)
         {
@@ -866,9 +1057,7 @@ static void test_extnav_disagreement_freezes_accel_bias(void)
   assert(fused_while_inhibited);
   assert(ekf.extnav_inhibit_count > 0);
 
-  /* And the mask reached the update rather than merely being set: this only
-   * moves when a gain row is actually zeroed.
-   */
+  /* The redundant disagreement inhibit also reached accepted updates. */
 
   assert(ekf.inhibit_applied_count > 0);
 }
@@ -1400,9 +1589,9 @@ static void test_position_held_when_unaided(void)
 
 /* Recovery is a SNAP, not a convergence.
  *
- * A held position stops moving while the vehicle does not, so a returning
- * source can never be talked into agreeing with it. Waiting for agreement
- * would lock the filter out for ever; the fix is simply adopted.
+ * A position bounded around an old fix can be far from a returning source.
+ * Waiting for agreement would lock the filter out forever; the fix is simply
+ * adopted.
  */
 
 static void test_position_snaps_back_on_recovery(void)
@@ -1460,10 +1649,10 @@ static void test_position_snaps_back_on_recovery(void)
  * was busy contradicting, and the only way to reconcile the two was
  * accelerometer bias - which corrupted attitude.
  *
- * With position bounded and that bias frozen while unaided, the filter has
- * no competing opinion left to reconcile. On a vehicle whose only absolute
- * reference IS the external fix, following it is right: dead reckoning is
- * the thing that cannot be trusted, not the fix.
+ * With position bounded and horizontal fusion unable to touch bias or tilt,
+ * the filter cannot corrupt attitude to reconcile the two. On a vehicle
+ * whose only absolute reference IS the external fix, following it is right:
+ * dead reckoning is the thing that cannot be trusted, not the fix.
  *
  * So the contract this checks is not "the bad source is rejected" but "the
  * position never runs away, and ends up where the source says".
@@ -1531,17 +1720,16 @@ static void test_disagreeing_source_is_followed_not_chased(void)
   assert(ekf.position_snap_count > 1);
 }
 
-/* The strapdown must not INTEGRATE an unobservable state, which is a
- * stronger claim than bounding it afterwards.
+/* Measurement availability must not change the inertial process model.
  *
- * With no fix, an IMU observes attitude and nothing else. Pushing it on into
- * velocity and position is not a degraded estimate but a fabricated one: the
- * error grows without bound and never returns, and the filter then learns an
- * accelerometer bias to explain the result, corrupting the attitude that WAS
- * observable.
+ * ArduPilot continues propagating velocity and position when aiding is lost;
+ * it changes which innovations may be fused and marks the unaided solution
+ * invalid. Freezing the nominal navigation states while covariance still
+ * propagates F gives the two different dynamics. The optional car hold is a
+ * bound around propagation, not a replacement for it.
  */
 
-static void test_unobservable_states_are_not_integrated(void)
+static void test_unaided_states_still_propagate(void)
 {
   struct ekf_core_s ekf;
   uint64_t timestamp;
@@ -1553,7 +1741,7 @@ static void test_unobservable_states_are_not_integrated(void)
 
   extnav_align(&ekf, &timestamp);
   ekf_core_set_extnav_config(&ekf, 1000000u);
-  ekf_core_set_position_hold(&ekf, 2.0f);
+  ekf_core_set_position_hold(&ekf, 10.0f);
   ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f, true, false);
 
   assert(ekf_core_observability(&ekf) == EKF_OBS_POSITION);
@@ -1573,14 +1761,14 @@ static void test_unobservable_states_are_not_integrated(void)
   memcpy(held_position, ekf.position, sizeof(held_position));
   memcpy(held_velocity, ekf.velocity, sizeof(held_velocity));
 
-  /* Feed a full second of samples with a large, constant lateral specific
-   * force - the accelerometer error a free strapdown would integrate into
-   * metres of position.
+  /* Feed a full second of samples with a large lateral specific force. It is
+   * intentionally outside the low-dynamics gravity gate, leaving this as a
+   * process-model test rather than an attitude pseudo-measurement test.
    */
 
   for (i = 0; i < 400; i++)
     {
-      const float accel[3] = {2.0f, 0.0f, TEST_GRAVITY};
+      const float accel[3] = {6.0f, 0.0f, TEST_GRAVITY};
       const float gyro[3] = {0.0f, 0.0f, 0.0f};
 
       timestamp += TEST_DT_US;
@@ -1588,18 +1776,9 @@ static void test_unobservable_states_are_not_integrated(void)
       ekf_core_process(&ekf, &imu);
     }
 
-  /* Neither is INTEGRATED. Free strapdown would have put velocity at 2 m/s
-   * and position a metre out after this second, and would keep going
-   * quadratically; what remains is a small residue from the gravity update,
-   * which legitimately corrects these states rather than integrating them.
-   *
-   * So the assertion is about ORDER, not equality - two decades of margin on
-   * velocity and three on position against what free integration gives.
-   */
-
-  assert(fabsf(ekf.velocity[0] - held_velocity[0]) < 0.1f);
-  assert(fabsf(ekf.position[0] - held_position[0]) < 0.01f);
-  assert(ekf.propagate_frozen_count > 0);
+  assert(ekf.velocity[0] - held_velocity[0] > 5.0f);
+  assert(ekf.position[0] - held_position[0] > 2.5f);
+  assert(ekf.position[0] - held_position[0] < 10.0f);
 
   /* And the covariance says so, rather than reporting the confidence it had
    * when the fix was lost.
@@ -1730,6 +1909,54 @@ static void test_freezing_holds_rather_than_zeroes(void)
   assert((ekf.bias_learn_inhibit & EKF_INHIBIT_GYRO_BIAS) != 0);
 }
 
+/* A moving vehicle must keep a tilt reference.
+ *
+ * The standstill update does not run while driving, so without this roll and
+ * pitch are pure gyro integration between stops. Half a degree of tilt is
+ * 0.086 m/s^2 the filter reads as real acceleration, which is what ramps
+ * velocity in dead reckoning and makes each position fix land as a large
+ * correction that does nothing about the cause.
+ */
+
+static void test_tilt_reference_while_moving(void)
+{
+  float drift[2];
+  int mode;
+
+  for (mode = 0; mode < 2; mode++)
+    {
+      struct ekf_core_s ekf;
+      struct ekf_imu_sample_s imu;
+      uint64_t timestamp = 1000000ull;
+      const float zero_gyro[3] = {0.0f, 0.0f, 0.0f};
+      unsigned i;
+
+      ekf_core_init(&ekf);
+      initialize_tilted(&ekf, &timestamp, 0.0f, 0.0f, zero_gyro);
+      ekf_core_set_tilt_fusion_moving(&ekf, mode != 0);
+
+      for (i = 0; i < 4000; i++)
+        {
+          const float accel[3] = {0.0f, 0.0f, TEST_GRAVITY};
+          const float gyro[3] = {0.004f, 0.0f, 0.30f};
+
+          timestamp += TEST_DT_US;
+          make_sample(&imu, timestamp, accel, gyro);
+          ekf_core_process(&ekf, &imu);
+        }
+
+      drift[mode] = sqrtf(ekf.velocity[0] * ekf.velocity[0] +
+                          ekf.velocity[1] * ekf.velocity[1]);
+    }
+
+  /* The vehicle is coasting level throughout, so any velocity at all is
+   * error. An order of magnitude is the claim; measured is nearly two.
+   */
+
+  assert(drift[1] < drift[0] * 0.1f);
+  assert(drift[1] < 0.2f);
+}
+
 /* The tiers nest, which is the property the gating relies on: asking
  * "observability >= VELOCITY" has to be true whenever position is available.
  */
@@ -1744,10 +1971,8 @@ static void test_observability_tiers_nest(void)
  *
  * ekf_core_observability returns ATTITUDE or POSITION and nothing between,
  * because no velocity-only source is wired in yet - optical flow and wheel
- * speed both belong there. The velocity gate in strapdown_step is therefore
- * dead code at present, kept so that adding such a source is a single return
- * statement, and it is deliberately NOT covered by a test that would only be
- * testing a constant.
+ * speed both belong there. Adding one requires a validity branch and its own
+ * measurement update; propagation already covers every state.
  */
 
 /* Zero restores free dead reckoning, for anything that is not a car. */
@@ -1765,6 +1990,9 @@ static void test_position_hold_zero_disables(void)
 
   assert_near(ekf.position[0], 500.0f, 1.0e-3f);
   assert(!ekf.position_holding);
+  assert(ekf_core_observability(&ekf) == EKF_OBS_ATTITUDE);
+  assert((ekf_core_solution_status(&ekf) &
+          EKF_SOLUTION_POSITION_HORIZ) == 0);
 }
 
 /* The bias limit is a safety bound, not a tuning value: 2.0 m/s^2 is enough
@@ -1912,7 +2140,9 @@ int main(void)
 {
   test_initialization_and_static_prediction();
   test_yaw_prediction();
+  test_sculling_delta_uses_packet_start_attitude();
   test_low_dynamics_updates();
+  test_covariance_attitude_velocity_sign();
   test_gravity_preserves_yaw_gauge();
   test_fault_resets();
   test_update_1d_matches_3d();
@@ -1920,13 +2150,17 @@ int main(void)
   test_update_1d_reduces_variance();
   test_extnav_first_pose_sets_the_datum();
   test_extnav_fuses_after_the_datum();
+  test_extnav_position_masks_attitude_and_vertical_gain();
+  test_extnav_validates_only_requested_observations();
+  test_extnav_yaw_cannot_hide_position_rejection();
+  test_moving_extnav_does_not_corrupt_tilt();
   test_extnav_noise_floor_wins();
   test_extnav_honours_a_worse_reported_sigma();
   test_extnav_refuses_an_invalid_pose();
   test_extnav_disagreement_never_redatums();
   test_extnav_dropout_does_redatum();
   test_extnav_persistent_disagreement_withdraws_position();
-  test_extnav_disagreement_freezes_accel_bias();
+  test_extnav_disagreement_never_updates_accel_bias();
   test_unhealthy_source_is_not_fused_even_when_plausible();
   test_health_alone_withdraws_position();
   test_inhibit_mask_freezes_the_states_it_names();
@@ -1941,8 +2175,9 @@ int main(void)
   test_disagreeing_source_is_followed_not_chased();
   test_bias_learning_can_be_frozen();
   test_freezing_holds_rather_than_zeroes();
+  test_tilt_reference_while_moving();
   test_observability_tiers_nest();
-  test_unobservable_states_are_not_integrated();
+  test_unaided_states_still_propagate();
   test_attitude_still_propagates_when_unaided();
   test_position_hold_zero_disables();
   test_height_limit_clamps_and_admits_it();

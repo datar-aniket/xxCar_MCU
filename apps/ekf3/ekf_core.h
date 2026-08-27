@@ -165,6 +165,13 @@ struct ekf_core_s
 
   bool     attitude_only;
 
+  /* Fuse gravity as a tilt reference while MOVING, not only at a standstill.
+   * Without it a driving vehicle has no tilt reference at all once position
+   * innovations are barred from correcting attitude.
+   */
+
+  bool     tilt_fusion_moving;
+
   uint8_t  inhibit_mask;
 
   /* Persistent inhibit from EK3_ABIAS_EN / EK3_GBIAS_EN. ORed with the
@@ -483,6 +490,12 @@ int ekf_core_fuse_extnav(FAR struct ekf_core_s *ekf,
  */
 
 void ekf_core_set_attitude_only(FAR struct ekf_core_s *ekf, bool enable);
+
+/* Keep a tilt reference while moving. Standstill updates still take
+ * precedence when they are available, because they observe accel bias too.
+ */
+
+void ekf_core_set_tilt_fusion_moving(FAR struct ekf_core_s *ekf, bool enable);
 
 /* Bound the vertical state to +/- limit_m of the alignment point. Zero
  * disables it, which is the behaviour of every filter that has no idea what

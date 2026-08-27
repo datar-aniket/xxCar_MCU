@@ -639,6 +639,8 @@ static int ekf3_daemon(int argc, FAR char *argv[])
   ekf_core_set_extnav_config(&status.core, status.ext_timeout_ms * 1000u);
   status.height_limit = param_f32("EK3_HGT_LIM");
   ekf_core_set_height_limit(&status.core, status.height_limit);
+  ekf_core_set_tilt_fusion_moving(&status.core,
+                                  param_i32("EK3_TILT_MOVE") != 0);
   status.position_hold_limit = param_f32("EK3_POSHOLD_M");
   ekf_core_set_position_hold(&status.core, status.position_hold_limit);
   ekf_core_set_bias_limits(&status.core, param_f32("EK3_GBIAS_LIM"),

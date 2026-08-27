@@ -2036,6 +2036,14 @@ static bool attitude_only_tilt_update(FAR struct ekf_core_s *ekf)
   return true;
 }
 
+void ekf_core_set_tilt_fusion_moving(FAR struct ekf_core_s *ekf, bool enable)
+{
+  if (ekf != NULL)
+    {
+      ekf->tilt_fusion_moving = enable;
+    }
+}
+
 void ekf_core_set_attitude_only(FAR struct ekf_core_s *ekf, bool enable)
 {
   if (ekf != NULL)
@@ -2265,6 +2273,50 @@ static bool strapdown_step(FAR float quaternion[4], FAR float velocity[3],
          vector_finite(velocity) && vector_finite(position);
 }
 
+/* Choose the tilt reference for this step.
+ *
+ * At a standstill low_dynamics_updates is the better of the two: it observes
+ * accelerometer bias DIRECTLY, which is the one time that bias is cleanly
+ * separable from tilt, and giving that up would cost the filter its only
+ * good look at it.
+ *
+ * While MOVING that update does not run at all - its entry conditions
+ * require the vehicle to be nearly still. Historically nothing replaced it,
+ * so a driving vehicle had no tilt reference whatsoever and roll and pitch
+ * were pure gyro integration between stops. That is survivable while
+ * position aiding can correct tilt through the covariance, and becomes a
+ * real defect once that path is masked: a half-degree of accumulated tilt is
+ * 0.086 m/s^2 of specific force that the filter reads as real acceleration,
+ * which ramps velocity in dead reckoning and makes every position fix arrive
+ * as a large correction that does nothing about the cause.
+ *
+ * So when moving, fall back to the continuous tilt update: gravity fused
+ * every step with its noise scaled by how far the measurement departs from
+ * g, trusted when the vehicle is coasting and faded out under acceleration.
+ * Accelerometer bias stays inhibited there, because that is exactly the
+ * regime where bias and tilt are indistinguishable.
+ */
+
+static bool attitude_updates(FAR struct ekf_core_s *ekf)
+{
+  if (ekf->attitude_only)
+    {
+      return attitude_only_tilt_update(ekf);
+    }
+
+  if (ekf->low_dynamics)
+    {
+      return low_dynamics_updates(ekf);
+    }
+
+  if (ekf->tilt_fusion_moving)
+    {
+      return attitude_only_tilt_update(ekf);
+    }
+
+  return true;
+}
+
 static bool nominal_predict(FAR struct ekf_core_s *ekf,
                             FAR const struct ekf_imu_sample_s *sample)
 {
@@ -2297,8 +2349,7 @@ static bool nominal_predict(FAR struct ekf_core_s *ekf,
        */
 
       if (!covariance_predict(ekf) ||
-          !(ekf->attitude_only ? attitude_only_tilt_update(ekf)
-                               : low_dynamics_updates(ekf)))
+          !attitude_updates(ekf))
         {
           return false;
         }
