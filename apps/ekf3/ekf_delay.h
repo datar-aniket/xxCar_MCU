@@ -38,7 +38,13 @@
 #define EKF_IMU_RING_SIZE        48
 #define EKF_MAG_QUEUE_SIZE        8
 #define EKF_BARO_QUEUE_SIZE       4
-#define EKF_EXTNAV_QUEUE_SIZE     4
+/* 100 ms at a 240 Hz motion-capture rate is 24 poses. 32 leaves room for
+ * arrival jitter and task scheduling. The old four-entry queue represented
+ * only 40 ms at 100 Hz, so EK3_DELAY_MS=100 overwrote every pose before the
+ * delayed horizon could reach it.
+ */
+
+#define EKF_EXTNAV_QUEUE_SIZE    32
 
 struct ekf_baro_sample_s
 {
@@ -101,14 +107,16 @@ bool ekf_delay_push_baro(FAR struct ekf_delay_s *d,
 bool ekf_delay_push_mag(FAR struct ekf_delay_s *d,
                         FAR const struct ekf_mag_sample_s *sample);
 
-/* The absolute time the filter is allowed to advance to: now_us minus the
- * horizon, saturating at zero rather than wrapping. now_us < horizon happens
- * for the first few milliseconds after boot, and an unsigned wrap there would
- * produce a horizon far in the future and drain the ring in one go.
+/* The absolute time the filter is allowed to advance to: the newest IMU sample
+ * time minus the horizon, saturating at zero rather than wrapping.  Using the
+ * sample time (rather than task wake-up time) keeps scheduling latency out of
+ * the fusion timeline.  A sample time below the horizon occurs for the first
+ * few milliseconds after boot; unsigned wrap there would otherwise produce a
+ * horizon far in the future and drain the ring in one go.
  */
 
 uint64_t ekf_delay_horizon_time(FAR const struct ekf_delay_s *d,
-                                uint64_t now_us);
+                                uint64_t newest_imu_time_us);
 
 /* Copy the oldest unconsumed IMU sample into out and mark it consumed, if its
  * timestamp_sample is at or before horizon_time. Returns false when there is

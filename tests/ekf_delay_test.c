@@ -317,6 +317,42 @@ static void test_extnav_respects_the_horizon_and_age(void)
   assert(!ekf_delay_next_extnav(&g_delay, 1000000, 500000, &out));
 }
 
+/* A 100 ms delayed horizon must retain a 100 Hz pose stream until each pose
+ * becomes due. The old four-entry queue overflowed at 40 ms, meaning no pose
+ * could survive long enough to reach this horizon.
+ */
+
+static void test_extnav_100hz_survives_100ms_horizon(void)
+{
+  static const int jitter_us[5] = {-1800, 900, -600, 1700, -200};
+  struct ekf_extnav_sample_s out;
+  struct ekf_extnav_sample_s s;
+  uint64_t now;
+  int pushed = 0;
+  int fused = 0;
+
+  ekf_delay_init(&g_delay, 100);
+
+  for (now = 10000; now <= 500000; now += 10000)
+    {
+      memset(&s, 0, sizeof(s));
+      s.timestamp_sample = now + jitter_us[pushed % 5];
+      s.valid = true;
+      assert(ekf_delay_push_extnav(&g_delay, &s));
+      pushed++;
+
+      while (ekf_delay_next_extnav(&g_delay,
+                                   ekf_delay_horizon_time(&g_delay, now),
+                                   500000, &out))
+        {
+          fused++;
+        }
+    }
+
+  assert(g_delay.extnav_overflow_count == 0);
+  assert(fused >= pushed - 12); /* only the newest horizon window remains */
+}
+
 int main(void)
 {
   test_zero_horizon_is_passthrough();
@@ -330,6 +366,7 @@ int main(void)
   test_mag_queue();
   test_extnav_queue();
   test_extnav_respects_the_horizon_and_age();
+  test_extnav_100hz_survives_100ms_horizon();
   test_null_is_refused();
 
   puts("ekf_delay: horizon, ring ordering and overflow verified - OK");

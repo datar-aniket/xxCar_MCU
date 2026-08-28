@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
 """Bench tool for the companion link.
 
-Sends an EXTERNAL_POSE with hand-entered x, y and yaw, and shows the
-estimator pose coming back as six numbers.
+Sends an EXTERNAL_POSE with hand-entered x, y and yaw, sends DIRECT_CONTROL
+from a pair of sliders, and shows the estimator pose coming back as six
+numbers.
 
 For testing the link and the fusion, not for flying anything: the pose it
 sends is whatever you typed, which is exactly what makes it useful for
 checking gating, the datum reset and the noise floor.
+
+The DIRECT_CONTROL half MOVES THE VEHICLE. It is still the board that decides
+whether to obey - the control router needs the RC source switch in AUTO and
+its own arm sequence completed - but bench-test it with the wheels off the
+ground first.
 
     tools/companion_gui.py
     tools/companion_gui.py --port /dev/ttyUSB0 --baud 921600
@@ -31,7 +37,8 @@ except ImportError:
     raise SystemExit("pyserial missing:  pip install pyserial")
 
 import comp_link
-from comp_link import Link, decode_vehicle_state, encode_external_pose
+from comp_link import (Link, decode_vehicle_state, encode_direct_control,
+                       encode_external_pose)
 from comp_link import (UtcClock, decode_timesync_rep, encode_timesync_end,
                        encode_timesync_req, encode_timesync_start,
                        host_now_us, quaternion_to_euler, solution_names,
@@ -49,7 +56,7 @@ class App(tk.Tk):
         super().__init__()
         self.title("companion link")
         self.configure(bg=BG)
-        self.geometry("760x560")
+        self.geometry("760x820")
 
         self.q = queue.Queue()
         self.link = None
@@ -63,6 +70,12 @@ class App(tk.Tk):
         self.utc = UtcClock()
         self._sync_samples = []
         self._sync_left = 0
+
+        # DIRECT_CONTROL repeats on its own timer rather than riding the
+        # 100 ms receive pump. The board expires a command after
+        # AUTO_CMD_TO_MS, 100 ms by default, so a sender running at exactly
+        # that period spends half its life on the wrong side of the deadline.
+        self._drive_job = None
 
         self._build(port, baud)
         self.after(50, self._drain)
@@ -171,6 +184,88 @@ class App(tk.Tk):
                                      "unsynced - poses arrive-stamped", BAD)
         self.clock_lbl.pack(side="left", padx=10)
 
+        # ---- drive ------------------------------------------------------
+
+        drive = tk.LabelFrame(self, text=" send DIRECT_CONTROL ", bg=PANEL,
+                              fg=MUTED, relief="flat", padx=12, pady=10)
+        drive.pack(fill="x", padx=12, pady=6)
+
+        self.steer_var = tk.DoubleVar(value=0.0)
+        self.throttle_var = tk.DoubleVar(value=0.0)
+        self.throttle_mode = tk.IntVar(value=comp_link.THROTTLE_DUTY)
+
+        self._label(drive, "steering    left +").grid(row=0, column=0,
+                                                      sticky="e", padx=(0, 8))
+        self.steer_scale = tk.Scale(
+            drive, from_=-1.0, to=1.0, resolution=0.01,
+            orient="horizontal", variable=self.steer_var, length=380,
+            bg=PANEL, fg=FG, troughcolor=BG, highlightthickness=0,
+            activebackground=ACCENT)
+        self.steer_scale.grid(row=0, column=1, sticky="w")
+
+        tk.Button(drive, text="centre", command=self._centre_steering,
+                  bg=PANEL, fg=FG, relief="flat",
+                  padx=10).grid(row=0, column=2, padx=8)
+
+        self._label(drive, "throttle").grid(row=1, column=0, sticky="e",
+                                            padx=(0, 8))
+        self.throttle_scale = tk.Scale(
+            drive, from_=-1.0, to=1.0, resolution=0.01,
+            orient="horizontal", variable=self.throttle_var, length=380,
+            bg=PANEL, fg=FG, troughcolor=BG, highlightthickness=0,
+            activebackground=ACCENT)
+        self.throttle_scale.grid(row=1, column=1, sticky="w")
+
+        # Springs back the moment the mouse is let go, like a transmitter
+        # stick. Steering deliberately does NOT: a car holds its lock, and
+        # having to re-aim after every nudge would make the panel useless
+        # for checking a steering trim.
+        self.throttle_scale.bind("<ButtonRelease-1>",
+                                 lambda _e: self.throttle_var.set(0.0))
+
+        modes = tk.Frame(drive, bg=PANEL)
+        modes.grid(row=1, column=2, padx=8)
+
+        for text, value in (("duty", comp_link.THROTTLE_DUTY),
+                            ("amps", comp_link.THROTTLE_CURRENT)):
+            tk.Radiobutton(modes, text=text, value=value,
+                           variable=self.throttle_mode,
+                           command=self._throttle_mode_changed, bg=PANEL,
+                           fg=FG, selectcolor=BG, activebackground=PANEL,
+                           activeforeground=FG).pack(anchor="w")
+
+        self._label(drive,
+                    "VESC_DUTY_MAX and VESC_CUR_MAX still apply on the "
+                    "board, and are lower than the wire range.",
+                    size=8).grid(row=2, column=0, columnspan=3, sticky="w",
+                                 pady=(4, 0))
+
+        drow = tk.Frame(drive, bg=PANEL)
+        drow.grid(row=3, column=0, columnspan=3, sticky="w", pady=(10, 0))
+
+        tk.Button(drow, text="send once", command=self._send_drive,
+                  bg=ACCENT, fg="#08111f", relief="flat",
+                  padx=16).pack(side="left")
+
+        self.drive_stream_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(drow, text="stream 20 Hz",
+                       variable=self.drive_stream_var,
+                       command=self._drive_stream_toggled, bg=PANEL, fg=FG,
+                       selectcolor=BG, activebackground=PANEL,
+                       activeforeground=FG).pack(side="left", padx=10)
+
+        # Wide, red, and it does the stopping itself rather than just going
+        # quiet: silence works - the router neutrals after AUTO_CMD_TO_MS -
+        # but waiting out a timeout is not what anybody reaching for a stop
+        # button has in mind.
+        tk.Button(drow, text="STOP", command=self._stop_drive, bg=BAD,
+                  fg="#1a0508", relief="flat", padx=24,
+                  font=("TkDefaultFont", 10, "bold")).pack(side="left",
+                                                           padx=16)
+
+        self.drive_lbl_tx = self._label(drow, "idle")
+        self.drive_lbl_tx.pack(side="left", padx=6)
+
         # ---- receive ----------------------------------------------------
 
         recv = tk.LabelFrame(self, text=" estimator pose ", bg=PANEL,
@@ -220,6 +315,10 @@ class App(tk.Tk):
 
     def _toggle(self):
         if self.link:
+            # Stop driving BEFORE the port goes away. Leaving the repeat
+            # running would spend every tick failing to send, and the panel
+            # would still be showing the last command it managed.
+            self._stop_drive()
             self.link.close()
             self.link = None
             self.open_btn.configure(text="open")
@@ -327,7 +426,88 @@ class App(tk.Tk):
             x, y, yaw, cov=cov, valid=self.valid_var.get(),
             reset_counter=self.reset_counter, timestamp_us=stamp))
 
+    # ---- drive ----------------------------------------------------------
+
+    def _centre_steering(self):
+        self.steer_var.set(0.0)
+
+    def _throttle_mode_changed(self):
+        """Rescale the slider, and zero it on the way.
+
+        Carrying the number across would reinterpret it: 12 amps becomes a
+        duty of 12, which the board rejects, and a duty of 0.8 becomes 0.8 A,
+        which it accepts and which does nothing. Neither is what the person
+        who clicked the radio button meant.
+        """
+        current = self.throttle_mode.get() == comp_link.THROTTLE_CURRENT
+        limit = (comp_link.DIRECT_CURRENT_MAX if current
+                 else comp_link.DIRECT_DUTY_MAX)
+
+        self.throttle_var.set(0.0)
+        self.throttle_scale.configure(from_=-limit, to=limit,
+                                      resolution=0.5 if current else 0.01)
+
+    def _drive_stream_toggled(self):
+        if self.drive_stream_var.get():
+            self._drive_tick()
+        elif self._drive_job is not None:
+            self.after_cancel(self._drive_job)
+            self._drive_job = None
+
+    def _drive_tick(self):
+        self._send_drive()
+
+        if self.drive_stream_var.get():
+            self._drive_job = self.after(50, self._drive_tick)
+        else:
+            self._drive_job = None
+
+    def _stop_drive(self):
+        """Zero the sliders and say so on the wire, now.
+
+        Going quiet would also stop the vehicle, but only after the board's
+        AUTO_CMD_TO_MS expires. An explicit zero arrives in one frame time.
+        """
+        self.drive_stream_var.set(False)
+        self._drive_stream_toggled()
+        self.throttle_var.set(0.0)
+        self.steer_var.set(0.0)
+
+        if self.link:
+            self._send_drive()
+
+    def _send_drive(self):
+        if not self.link:
+            return
+
+        # The board rejects a command it cannot age, so an unsynced clock
+        # means every frame sent from here is counted and dropped. Say that
+        # instead of letting the panel look like it is driving.
+        if self.clock_offset_us is None:
+            self.drive_lbl_tx.configure(text="sync the clock first", fg=BAD)
+            return
+
+        try:
+            frame = encode_direct_control(
+                steering=self.steer_var.get(),
+                throttle=self.throttle_var.get(),
+                throttle_type=self.throttle_mode.get(),
+                timestamp_us=self.utc.now_us())
+        except ValueError as exc:
+            self.drive_lbl_tx.configure(text=str(exc)[:40], fg=BAD)
+            return
+
+        self.link.send(frame)
+
+        current = self.throttle_mode.get() == comp_link.THROTTLE_CURRENT
+        self.drive_lbl_tx.configure(
+            text=(f"steer {self.steer_var.get():+.2f}   "
+                  f"throttle {self.throttle_var.get():+.2f}"
+                  f"{' A' if current else ''}"),
+            fg=GOOD if self.throttle_var.get() == 0.0 else ACCENT)
+
     # ---- pump -----------------------------------------------------------
+
 
     def _drain(self):
         try:

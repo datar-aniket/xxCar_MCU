@@ -87,7 +87,7 @@ FAR const char *control_router_reason_name(uint8_t reason)
   static FAR const char *const names[ROUTER_REASON_COUNT] =
   {
     "OK", "DISARMED", "RC_LOST", "ARM_CYCLE", "NOT_NEUTRAL",
-    "ARM_HOLD", "SOURCE_HOLD", "AUTO_STALE", "INVALID"
+    "ARM_HOLD", "SOURCE_HOLD", "AUTO_STALE", "AUTO_CYCLE", "INVALID"
   };
 
   return reason < ROUTER_REASON_COUNT ? names[reason] : "UNKNOWN";

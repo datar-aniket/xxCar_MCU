@@ -11,7 +11,8 @@ PRIORITY  = $(CONFIG_XXCAR_EKF3_PRIORITY)
 STACKSIZE = $(CONFIG_XXCAR_EKF3_STACKSIZE)
 MODULE    = $(CONFIG_XXCAR_EKF3)
 
-CSRCS   = ekf3.c ekf_core.c ekf_sources.c ekf_delay.c
+CSRCS   = ekf3.c ekf_core.c ekf_sources.c ekf_delay.c ekf_extnav_time.c \
+          ekf_extnav_frame.c
 MAINSRC = ekf3_main.c
 
 include $(APPDIR)/Application.mk

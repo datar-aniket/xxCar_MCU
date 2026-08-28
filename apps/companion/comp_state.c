@@ -84,7 +84,9 @@ void comp_state_build(FAR const struct comp_state_inputs_s *in,
                       uint64_t timestamp_us,
                       FAR struct comp_vehicle_state_s *out)
 {
+  float corrected_accel[3];
   float speed;
+  int axis;
 
   if (in == NULL || out == NULL)
     {
@@ -154,7 +156,19 @@ void comp_state_build(FAR const struct comp_state_inputs_s *in,
 
   if (in->accel_valid && in->est_valid)
     {
-      comp_state_remove_gravity(in->quaternion, in->accel, out->accel);
+      /* estimator_state.accel_bias uses the same body-frame sign convention
+       * as strapdown propagation: corrected specific force is measured minus
+       * bias. Gravity removal alone leaves that modeled bias in a field named
+       * linear acceleration, producing a non-zero stationary output even
+       * while the EKF itself has correctly learned the residual.
+       */
+
+      for (axis = 0; axis < 3; axis++)
+        {
+          corrected_accel[axis] = in->accel[axis] - in->accel_bias[axis];
+        }
+
+      comp_state_remove_gravity(in->quaternion, corrected_accel, out->accel);
       out->source_valid |= COMP_SRC_ACCEL;
     }
 

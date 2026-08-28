@@ -365,6 +365,35 @@ static void test_build_accel_needs_attitude(void)
   assert(CLOSE(out.accel[2], 0.0f));
 }
 
+/* A field advertised as linear acceleration must not retain a bias the EKF
+ * already estimates. This is separate from stored sensor calibration:
+ * accel_bias is the residual used by strapdown propagation itself.
+ */
+
+static void test_build_accel_removes_ekf_bias(void)
+{
+  struct comp_state_inputs_s in;
+  struct comp_vehicle_state_s out;
+
+  memset(&in, 0, sizeof(in));
+  in.est_valid = true;
+  in.accel_valid = true;
+  in.quaternion[0] = 1.0f;
+  in.accel_bias[0] = 0.03f;
+  in.accel_bias[1] = -0.08f;
+  in.accel_bias[2] = 0.02f;
+  in.accel[0] = in.accel_bias[0];
+  in.accel[1] = in.accel_bias[1];
+  in.accel[2] = COMP_STATE_GRAVITY + in.accel_bias[2];
+
+  comp_state_build(&in, 0, &out);
+
+  assert(CLOSE(out.accel[0], 0.0f));
+  assert(CLOSE(out.accel[1], 0.0f));
+  assert(CLOSE(out.accel[2], 0.0f));
+  assert((out.source_valid & COMP_SRC_ACCEL) != 0);
+}
+
 static void test_build_scalars(void)
 {
   struct comp_state_inputs_s in;
@@ -423,6 +452,7 @@ int main(void)
   test_side_slip_nan_at_rest();
   test_build_reports_missing_sources();
   test_build_accel_needs_attitude();
+  test_build_accel_removes_ekf_bias();
   test_build_scalars();
   test_build_velocity_is_body();
 

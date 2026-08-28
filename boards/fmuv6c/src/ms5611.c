@@ -176,7 +176,13 @@ static int ms5611_configure(FAR struct ms5611_dev_s *dev)
 
 static void ms5611_start(FAR struct ms5611_dev_s *dev, uint8_t which)
 {
-  uint64_t trigger_timestamp = sensor_get_timestamp();
+  /* EKF sample timestamps use the shared TIM5 domain.  The conversion's
+   * centre time must use that same clock; sensor_get_timestamp() is the
+   * tick-quantized NuttX monotonic counter and slowly changes phase against
+   * TIM5 between its 71.6-minute wrap re-anchors.
+   */
+
+  uint64_t trigger_timestamp = fmuv6c_imu_time_now();
 
   ms5611_sendcmd(dev, which == MS5611_PENDING_D2 ?
                       MS5611_CMD_CONV_D2 : MS5611_CMD_CONV_D1);

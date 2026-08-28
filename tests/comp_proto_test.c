@@ -67,7 +67,176 @@ static void test_layout(void)
   assert(comp_payload_len(COMP_MSG_TIMESYNC_REP) == 24);
   assert(sizeof(struct comp_timesync_req_s) == 8);
   assert(sizeof(struct comp_timesync_rep_s) == 24);
+  assert(sizeof(struct comp_direct_control_s) == 24);
+  assert(comp_payload_len(COMP_MSG_DIRECT_CONTROL) == 24);
   assert(comp_payload_len(200) == 0);
+}
+
+static struct comp_direct_control_s sample_command(void)
+{
+  struct comp_direct_control_s c;
+
+  memset(&c, 0, sizeof(c));
+  c.timestamp_us = 1234567890123ull;
+  c.steering = -0.25f;
+  c.throttle = 12.5f;
+  c.throttle_type = COMP_THROTTLE_CURRENT;
+  return c;
+}
+
+static void test_direct_control_round_trip(void)
+{
+  struct comp_direct_control_s in = sample_command();
+  struct comp_direct_control_s out;
+  uint8_t frame[COMP_MAX_PAYLOAD + COMP_FRAME_OVERHEAD];
+  int n = comp_encode(COMP_MSG_DIRECT_CONTROL, &in, sizeof(in),
+                      frame, sizeof(frame));
+
+  assert(n == (int)sizeof(in) + COMP_FRAME_OVERHEAD);
+
+  comp_parser_init(&g_parser);
+  assert(feed(frame, (size_t)n) == COMP_MSG_DIRECT_CONTROL);
+  assert(g_parser.len == sizeof(in));
+
+  memcpy(&out, g_parser.payload, sizeof(out));
+  assert(out.timestamp_us == in.timestamp_us);
+  assert(out.steering == in.steering);
+  assert(out.throttle == in.throttle);
+  assert(out.throttle_type == in.throttle_type);
+}
+
+/* The wire enum must be the topic enum.
+ *
+ * Not a tautology: if somebody renumbers one of these, the value that used to
+ * mean amps starts meaning duty ratio, and 20 amps becomes duty 20 clamped to
+ * full throttle. companion.c static_asserts the same pair against
+ * ACTUATOR_MODE_*, which this cannot see from the host.
+ */
+
+static void test_throttle_modes_are_the_documented_numbers(void)
+{
+  assert(COMP_THROTTLE_DUTY == 0);
+  assert(COMP_THROTTLE_CURRENT == 1);
+}
+
+static void test_direct_control_accepts_the_full_range(void)
+{
+  struct comp_direct_control_s c = sample_command();
+
+  c.throttle_type = COMP_THROTTLE_DUTY;
+  c.throttle = 0.0f;
+  c.steering = 0.0f;
+  assert(comp_direct_control_valid(&c));
+
+  c.throttle = 1.0f;
+  c.steering = 1.0f;
+  assert(comp_direct_control_valid(&c));
+
+  c.throttle = -1.0f;
+  c.steering = -1.0f;
+  assert(comp_direct_control_valid(&c));
+
+  c.throttle_type = COMP_THROTTLE_CURRENT;
+  c.throttle = 50.0f;
+  assert(comp_direct_control_valid(&c));
+
+  c.throttle = -50.0f;
+  assert(comp_direct_control_valid(&c));
+}
+
+/* The limits are per mode, and swapping them is the mistake worth catching:
+ * a duty of 12.5 is nine times full throttle, and a current of 0.9 A is a
+ * command the vehicle would simply ignore.
+ */
+
+static void test_direct_control_limits_are_per_mode(void)
+{
+  struct comp_direct_control_s c = sample_command();
+
+  c.throttle_type = COMP_THROTTLE_DUTY;
+  c.throttle = 1.001f;
+  assert(!comp_direct_control_valid(&c));
+
+  c.throttle = -1.001f;
+  assert(!comp_direct_control_valid(&c));
+
+  /* Legal as amps, and it must not become legal as duty. */
+
+  c.throttle = 12.5f;
+  assert(!comp_direct_control_valid(&c));
+
+  c.throttle_type = COMP_THROTTLE_CURRENT;
+  assert(comp_direct_control_valid(&c));
+
+  c.throttle = 50.001f;
+  assert(!comp_direct_control_valid(&c));
+
+  c.throttle = -50.001f;
+  assert(!comp_direct_control_valid(&c));
+}
+
+/* The throttle value here is deliberately legal in BOTH modes.
+ *
+ * With the sample command's 12.5 the assertion still holds when the mode
+ * check is deleted - 12.5 fails the duty limit an unknown mode falls back to
+ * - so the test would pass while the rule it names had gone.
+ */
+
+static void test_direct_control_rejects_an_unknown_mode(void)
+{
+  struct comp_direct_control_s c = sample_command();
+
+  c.throttle = 0.5f;
+
+  c.throttle_type = COMP_THROTTLE_DUTY;
+  assert(comp_direct_control_valid(&c));
+
+  c.throttle_type = COMP_THROTTLE_CURRENT;
+  assert(comp_direct_control_valid(&c));
+
+  c.throttle_type = 2;
+  assert(!comp_direct_control_valid(&c));
+
+  c.throttle_type = 255;
+  assert(!comp_direct_control_valid(&c));
+}
+
+static void test_direct_control_rejects_steering_out_of_range(void)
+{
+  struct comp_direct_control_s c = sample_command();
+
+  c.steering = 1.001f;
+  assert(!comp_direct_control_valid(&c));
+
+  c.steering = -1.001f;
+  assert(!comp_direct_control_valid(&c));
+}
+
+/* NaN compares false against everything, so the readable form of these range
+ * tests - reject when x < lo || x > hi - lets a NaN through as "not out of
+ * range" and puts it on the wire to the motor.
+ */
+
+static void test_direct_control_rejects_nan_and_infinity(void)
+{
+  struct comp_direct_control_s c = sample_command();
+  const float nan_value = 0.0f / 0.0f;
+  const float inf_value = 1.0f / 0.0f;
+
+  c.throttle = nan_value;
+  assert(!comp_direct_control_valid(&c));
+
+  c.throttle = inf_value;
+  assert(!comp_direct_control_valid(&c));
+
+  c = sample_command();
+  c.steering = nan_value;
+  assert(!comp_direct_control_valid(&c));
+
+  c.steering = -inf_value;
+  assert(!comp_direct_control_valid(&c));
+
+  assert(!comp_direct_control_valid(NULL));
 }
 
 static void test_round_trip(void)
@@ -253,6 +422,13 @@ int main(void)
   test_unknown_id_versus_bad_length();
   test_back_to_back();
   test_timesync_round_trip();
+  test_direct_control_round_trip();
+  test_throttle_modes_are_the_documented_numbers();
+  test_direct_control_accepts_the_full_range();
+  test_direct_control_limits_are_per_mode();
+  test_direct_control_rejects_an_unknown_mode();
+  test_direct_control_rejects_steering_out_of_range();
+  test_direct_control_rejects_nan_and_infinity();
   test_encode_refuses_a_short_buffer();
 
   puts("comp_proto: framing, CRC, resync and length checks verified - OK");

@@ -12,6 +12,7 @@
 
 #include "ekf_core.h"
 #include "ekf_delay.h"
+#include "ekf_extnav_frame.h"
 #include "ekf_sources.h"
 
 /* The ring itself is NOT a member here. It is ~3 kB, this struct is copied
@@ -67,12 +68,32 @@ struct ekf3_status_s
   uint32_t stale_count;
   uint32_t reset_requests;
   uint32_t horizon_ms;        /* EK3_DELAY_MS as read at start */
+
+  /* The estimator's sample-time clock is TIM5.  CLOCK_MONOTONIC is retained
+   * only as a diagnostic reference so hardware can show whether the two
+   * counters actually stay together instead of assuming that they do because
+   * they ultimately share an oscillator.
+   */
+
+  int64_t  clock_skew_start_us; /* TIM5 - CLOCK_MONOTONIC at EKF start */
+  int64_t  clock_skew_us;       /* latest TIM5 - CLOCK_MONOTONIC */
   bool     zupt_enabled;
   float    zupt_threshold_cps;
   float    zupt_noise;
   float    zupt_gate;
+  float    zupt_gravity_limit;
+  float    zupt_variance_limit;
+  uint32_t zupt_dwell_us;
+  float    zupt_gravity_deviation;
+  float    zupt_accel_variance;
+  bool     zupt_imu_stationary;
+  bool     zupt_dwell_complete;
+  uint32_t zupt_motion_block_count;
   bool     zupt_stopped;      /* wheels currently reading stopped */
+  uint64_t zupt_stop_since_us;/* source sample time of stop transition */
   bool     wheel_available;   /* vesc_status is being received */
+  bool     wheel_fresh;       /* newest wheel sample is <= 100 ms old */
+  uint64_t last_wheel_sample_us;
   float    last_wheel_cps;
 
   float    height_limit;      /* EK3_HGT_LIM, m; 0 = unbounded */
@@ -87,12 +108,21 @@ struct ekf3_status_s
   uint32_t extnav_in;         /* external_pose messages queued */
   uint32_t extnav_overflow;
   uint32_t extnav_bad_time;   /* refused on the timestamp check */
+  uint32_t extnav_bad_frame;  /* non-finite pose/extrinsic transform */
   uint32_t extnav_untimed;    /* arrival-stamped: source sent zero */
+  uint32_t extnav_time_clamped; /* small future/late timestamp corrected */
+  uint32_t extnav_age_samples;
+  int64_t  extnav_age_us;       /* receive minus corrected source time */
+  int64_t  extnav_age_min_us;
+  int64_t  extnav_age_max_us;
   bool     extnav_available;  /* external_pose subscribed */
   float    ext_noise;         /* EK3_EXT_M_NSE as read at start */
   float    ext_gate;
   float    ext_yaw_noise;
+  int32_t  ext_delay_us;      /* EK3_EXT_DLY_MS; positive means older */
+  uint32_t ext_jitter_us;     /* EK3_EXT_JIT_MS, one sigma */
   uint32_t ext_timeout_ms;
+  struct ekf_extnav_extrinsics_s ext_extrinsics;
   uint32_t mag_in;            /* vehicle_mag messages queued */
   uint32_t baro_in;           /* vehicle_baro messages queued */
   uint32_t imu_overflow;      /* mirrored from the ring */

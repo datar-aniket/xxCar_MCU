@@ -357,6 +357,15 @@ static void test_companion_parameters(void)
       param_find("EK3_EXT_M_NSE") < 0 ||
       param_find("EK3_EXT_I_GATE") < 0 ||
       param_find("EK3_EXT_YAW_NSE") < 0 ||
+      param_find("EK3_EXT_POS_X") < 0 ||
+      param_find("EK3_EXT_POS_Y") < 0 ||
+      param_find("EK3_EXT_POS_Z") < 0 ||
+      param_find("EK3_EXT_ROLL") < 0 ||
+      param_find("EK3_EXT_PITCH") < 0 ||
+      param_find("EK3_EXT_YAW") < 0 ||
+      param_find("EK3_ZUPT_GDEV") < 0 ||
+      param_find("EK3_ZUPT_AVAR") < 0 ||
+      param_find("EK3_ZUPT_DW_MS") < 0 ||
       param_find("EK3_EXT_TIMEOUT") < 0)
     {
       fail("external navigation schema is incomplete");
@@ -485,6 +494,25 @@ static void test_companion_parameters(void)
       fabsf(value - 0.05f) > 1.0e-6f)
     {
       fail("external yaw noise floor is not 0.05 rad");
+    }
+
+  if (param_get_f32("EK3_EXT_POS_X", &value) < 0 || value != 0.0f ||
+      param_get_f32("EK3_EXT_POS_Y", &value) < 0 || value != 0.0f ||
+      param_get_f32("EK3_EXT_POS_Z", &value) < 0 || value != 0.0f ||
+      param_get_f32("EK3_EXT_ROLL", &value) < 0 || value != 0.0f ||
+      param_get_f32("EK3_EXT_PITCH", &value) < 0 || value != 0.0f ||
+      param_get_f32("EK3_EXT_YAW", &value) < 0 || value != 0.0f)
+    {
+      fail("external navigation extrinsics do not default to identity");
+    }
+
+  if (param_get_f32("EK3_ZUPT_GDEV", &value) < 0 ||
+      fabsf(value - 0.25f) > 1.0e-6f ||
+      param_get_f32("EK3_ZUPT_AVAR", &value) < 0 ||
+      fabsf(value - 0.10f) > 1.0e-6f ||
+      param_get_i32("EK3_ZUPT_DW_MS", &v) < 0 || v != 150)
+    {
+      fail("zero-velocity IMU gates have incorrect defaults");
     }
 
   if (param_get_i32("EK3_EXT_TIMEOUT", &v) < 0 || v != 1000)

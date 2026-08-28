@@ -1,4 +1,4 @@
-# Companion UART link — EXTERNAL_POSE
+# Companion UART link
 
 The framed serial protocol between the flight controller and a companion
 computer, and in particular `EXTERNAL_POSE`, the message a localisation stack
@@ -57,6 +57,7 @@ direction fails to route rather than half-working.
 | 4 | `TIMESYNC_REP` | board → companion | 24 |
 | 5 | `TIMESYNC_START` | companion → board | 8 |
 | 6 | `TIMESYNC_END` | companion → board | 16 |
+| 7 | `DIRECT_CONTROL` | companion → board | 24 |
 | 16 | `VEHICLE_STATE` | board → companion | 96 |
 
 An unknown id is counted and ignored — that is a companion newer than the
@@ -135,13 +136,17 @@ to arrival stamping anyway.
 
 ### Acceptance window
 
-The estimator refuses a pose whose timestamp is more than **500 ms** away
-from its own clock, in either direction, and counts it as `extnav_bad_time`.
+The estimator first applies `EK3_EXT_DLY_MS`, then checks the pose against its
+UART receive time and the oldest state the delayed filter can still correct.
+A physical pose cannot be newer than its receive time, and a pose older than
+the already-processed state can no longer be fused at the right trajectory
+point.
 
-The two directions fail for different reasons. Too old means the correction
-would land on the wrong part of the buffered trajectory. Ahead of the board's
-own clock has no innocent explanation at all — it means the timesync is
-wrong.
+Errors within three `EK3_EXT_JIT_MS` standard deviations are clamped to the
+corresponding boundary and counted by `extnav_time_clamped`. Larger errors are
+refused and counted by `extnav_bad_time`. This absorbs ordinary 1-2 ms clock
+jitter without allowing a broken timesync to move fusion arbitrarily through
+the IMU history.
 
 ### Covariance
 
@@ -178,6 +183,10 @@ filter into trusting it more than the operator allowed:
 | `EK3_EXT_M_NSE` | 0.10 m | x and y |
 | `EK3_EXT_YAW_NSE` | 0.05 rad | yaw |
 | `EK3_EXT_I_GATE` | 5.0 | innovation gate, sigmas |
+| `EK3_EXT_DLY_MS` | 0.0 ms | signed sample-time correction; positive means older |
+| `EK3_EXT_JIT_MS` | 2.0 ms | timestamp uncertainty, one sigma |
+| `EK3_EXT_POS_X/Y/Z` | 0.0 m | marker-centre to IMU/body-origin translation in marker axes |
+| `EK3_EXT_ROLL/PITCH/YAW` | 0.0 deg | IMU/body orientation relative to marker axes |
 | `EK3_EXT_TIMEOUT` | 1000 ms | silence before a dropout, and how long a bad ratio is tolerated before the source is condemned |
 
 ### flags
@@ -325,12 +334,10 @@ zero, which means "travelling straight ahead" — test with `isnan()`.
 
 ### accel
 
-Specific force with gravity removed using the estimator's attitude, so it
-reads **zero at rest** rather than 9.8 m/s² upward.
-
-Only gravity is removed. The accelerometer bias the estimator tracks is
-*not*, so a poorly calibrated accelerometer shows up here as a standing
-offset.
+Calibrated specific force with both the EKF-tracked accelerometer bias and
+attitude-projected gravity removed. It therefore reads **zero-mean at rest**
+rather than retaining either 9.8 m/s² or a residual bias the EKF has already
+learned. Sensor bandwidth still determines its instantaneous noise.
 
 Gravity removal needs an attitude, so if the estimator is not running this
 field stays zero and `COMP_SRC_ACCEL` is clear — rather than reporting the
@@ -551,7 +558,109 @@ state = {
 `tools/comp_link.py` carries this as `decode_vehicle_state()`, and
 `tests/comp_proto_cross_test.py` pins it against the C encoder byte for byte.
 
-## 8. Clock synchronisation
+## 8. DIRECT_CONTROL (id 7, 24 bytes)
+
+An immediate actuator command. This is the higher-priority half of the
+autonomous input; `CONTROL_TRAJ` is the other and is not defined yet.
+
+| Offset | Type | Field | Meaning |
+|---|---|---|---|
+| 0 | `uint64` | `timestamp_us` | UTC microseconds, when the companion sent it |
+| 8 | `float32` | `steering` | −1.0 … +1.0, left positive |
+| 12 | `float32` | `throttle` | duty −1.0 … +1.0, or amps −50.0 … +50.0 |
+| 16 | `uint8` | `throttle_type` | 0 = duty, 1 = current |
+| 17 | `uint8[7]` | `pad` | zero |
+
+```c
+struct comp_direct_control_s
+{
+  uint64_t timestamp_us;
+  float    steering;
+  float    throttle;
+  uint8_t  throttle_type;
+  uint8_t  pad[7];
+};
+```
+
+### throttle_type is the board's enum
+
+`0 = duty, 1 = current` — the same numbering as `ACTUATOR_MODE_*` in
+`uorb_msgs.h`, so the byte reaches the control router unmapped.
+`companion.c` carries a `static_assert` on that agreement. Send these the
+wrong way round and "20 amps" arrives as "duty 20", which clamps to full
+throttle; the numbering is shared precisely so there is no translation step
+to get backwards.
+
+### Range is rejected, not clamped
+
+The limits in the table above are what the **format** can mean. A value
+outside them is dropped and counted in `rx_direct_invalid`, because it says
+the sender is wrong about the units or the mode, and clamping would turn that
+into a command that looks deliberate. `NaN` and infinity are rejected the same
+way.
+
+The vehicle's real ceilings are `VESC_DUTY_MAX` (0.30 by default) and
+`VESC_CUR_MAX` (20 A), applied by the control router afterwards. A legal 50 A
+command on the wire still becomes 20 A at the motor.
+
+### The timestamp is required
+
+Unlike `EXTERNAL_POSE`, a zero timestamp is **not** accepted, and neither is
+any timestamp before the clocks have been related (section 9). A pose with no
+usable stamp costs accuracy; a command with no usable stamp cannot be aged,
+and an actuator command of unknown age is the one thing this link must not act
+on. Both cases are counted in `rx_direct_stale`.
+
+### Two freshness checks, one budget
+
+`AUTO_CMD_TO_MS` is read by both ends of the same journey, and each side
+measures in its own clock:
+
+| Check | Where | Clock | Catches |
+|---|---|---|---|
+| arrival age | `companion.c` | TIM5 | slow link, wrong UTC offset |
+| staleness | `control_router` | `CLOCK_MONOTONIC` | companion stopped sending |
+
+The published `control_cmd.timestamp` is deliberately **zero**, so the router
+stamps it on arrival in its own clock — the same thing `vesc set` does. TIM5
+and `CLOCK_MONOTONIC` are independent counters on this board, so a TIM5 value
+placed in that field would read as permanently fresh or permanently stale
+depending on which way the two had drifted.
+
+Set the budget with `param set AUTO_CMD_TO_MS 100`, `param save`, and reboot.
+
+### Being published is not being obeyed
+
+A command that passes every check above is published to `control_cmd`, and
+the control router acts on it only when the RC source switch selects AUTO and
+its own arm sequence has completed. When commands stop, the router holds
+neutral and reports `AUTO_STALE` — it does **not** hand control back to the
+sticks, because the sticks may not be centred. Taking over is a deliberate
+move of the source switch.
+
+### Sending one
+
+```python
+import time, comp_link
+
+link.send(comp_link.encode_direct_control(
+    steering=-0.25,                      # left positive
+    throttle=0.15,                       # duty ratio
+    throttle_type=comp_link.THROTTLE_DUTY,
+    timestamp_us=int(time.time() * 1e6)))
+```
+
+Repeat faster than `AUTO_CMD_TO_MS`; there is no repeat-last behaviour by
+design.
+
+`companion status` reports the outcome:
+
+```
+  direct     accepted 4213  stale 0  invalid 0
+             last age 3.2 ms of 100 ms budget (AUTO_CMD_TO_MS)
+```
+
+## 9. Clock synchronisation
 
 Timestamps are only meaningful once the clocks are related. Two mechanisms
 work together.
@@ -609,7 +718,7 @@ A timesync burst, or the RTC, must establish the absolute time first —
 
 `pps status` shows lock state, period and edge counts.
 
-## 9. Minimal sender
+## 10. Minimal sender
 
 ```python
 import struct, serial
@@ -638,7 +747,7 @@ port.write(external_pose(1.5, -2.25, 0.5, 1755000000000000, reset_counter=3))
 Check that against the test vector in section 6 before trusting it against
 the board.
 
-## 10. Diagnostics
+## 11. Diagnostics
 
 `companion status` on the NSH console reports, among others:
 

@@ -234,6 +234,173 @@ static void test_auto_and_source_hold(void)
   assert(s.actual_armed);
 }
 
+/* A recovered link does not resume driving on its own.
+ *
+ * Whatever stopped talking may have stopped for a reason, and the first
+ * command to arrive afterwards is the one it was sending when it left. So
+ * auto stays refused - however fresh the commands are - until the source
+ * switch has been moved to RC and back.
+ */
+
+static void test_auto_stays_out_until_the_switch_is_cycled(void)
+{
+  struct router_config_s c = config_default();
+  struct router_state_s s;
+  struct router_input_s in = input_default(9000000);
+  struct router_output_s out;
+
+  router_state_init(&s);
+  arm_manual(&c, &s, &in, &out);
+  in.auto_present = true;
+  in.auto_motor = 0.1f;
+  in.auto_steering = -0.25f;
+  in.auto_mode = ROUTER_MODE_DUTY;
+  in.rc_channel[4] = 2000;             /* auto */
+  in.now_us += 1000;
+  in.auto_timestamp = in.now_us;
+  step(&c, &s, &in, &out);
+  assert(out.reason == ROUTER_REASON_SOURCE_HOLD);
+
+  in.now_us += ROUTER_NEUTRAL_HOLD_US;
+  in.auto_timestamp = in.now_us;
+  step(&c, &s, &in, &out);
+  assert(out.reason == ROUTER_REASON_OK);
+  assert(fabsf(out.motor - 0.1f) < 1e-6f);
+
+  /* The link goes quiet. */
+
+  in.now_us += c.auto_timeout_us + 1u;
+  step(&c, &s, &in, &out);
+  assert(out.reason == ROUTER_REASON_AUTO_STALE);
+  assert(out.motor == 0.0f);
+
+  /* And comes back, with commands as fresh as they ever were. */
+
+  in.now_us += 1000;
+  in.auto_timestamp = in.now_us;
+  step(&c, &s, &in, &out);
+  assert(out.auto_valid);
+  assert(out.reason == ROUTER_REASON_AUTO_CYCLE);
+  assert(out.motor == 0.0f);
+  assert(out.steering == 0.0f);
+
+  /* Still refused however long it keeps arriving. */
+
+  for (int i = 0; i < 50; i++)
+    {
+      in.now_us += 1000;
+      in.auto_timestamp = in.now_us;
+      step(&c, &s, &in, &out);
+      assert(out.reason == ROUTER_REASON_AUTO_CYCLE);
+      assert(out.motor == 0.0f);
+    }
+
+  /* RC, then back to auto. */
+
+  in.rc_channel[4] = 1000;
+  in.now_us += 1000;
+  in.auto_timestamp = in.now_us;
+  step(&c, &s, &in, &out);
+  assert(out.source == ROUTER_SOURCE_RC);
+
+  in.rc_channel[4] = 2000;
+  in.now_us += ROUTER_NEUTRAL_HOLD_US + 1000;
+  in.auto_timestamp = in.now_us;
+  step(&c, &s, &in, &out);
+  assert(out.source == ROUTER_SOURCE_AUTO);
+  assert(out.reason == ROUTER_REASON_SOURCE_HOLD);
+
+  in.now_us += ROUTER_NEUTRAL_HOLD_US;
+  in.auto_timestamp = in.now_us;
+  step(&c, &s, &in, &out);
+  assert(out.reason == ROUTER_REASON_OK);
+  assert(fabsf(out.motor - 0.1f) < 1e-6f);
+}
+
+/* Selecting auto before the companion has ever spoken is not a lockout.
+ *
+ * Nothing was driving, so there is nothing to refuse to resume. Latching
+ * here would mean the switch had to be cycled once at the start of every
+ * session, which teaches an operator that the cycle is a formality.
+ */
+
+static void test_auto_may_wait_for_its_first_command(void)
+{
+  struct router_config_s c = config_default();
+  struct router_state_s s;
+  struct router_input_s in = input_default(10000000);
+  struct router_output_s out;
+  int i;
+
+  router_state_init(&s);
+  arm_manual(&c, &s, &in, &out);
+  in.rc_channel[4] = 2000;             /* auto, with nothing to route */
+  in.now_us += ROUTER_NEUTRAL_HOLD_US + 1000;
+  step(&c, &s, &in, &out);
+  assert(out.reason == ROUTER_REASON_AUTO_STALE);
+
+  for (i = 0; i < 20; i++)
+    {
+      in.now_us += 10000;
+      step(&c, &s, &in, &out);
+      assert(out.reason == ROUTER_REASON_AUTO_STALE);
+    }
+
+  /* The companion starts. It must be obeyed without a switch cycle. */
+
+  in.auto_present = true;
+  in.auto_motor = 0.1f;
+  in.auto_steering = 0.0f;
+  in.auto_mode = ROUTER_MODE_DUTY;
+  in.now_us += 1000;
+  in.auto_timestamp = in.now_us;
+  step(&c, &s, &in, &out);
+  assert(out.reason == ROUTER_REASON_OK);
+  assert(fabsf(out.motor - 0.1f) < 1e-6f);
+}
+
+/* The lockout must not leak into RC. A latched auto source still leaves the
+ * sticks in full control the moment they are selected.
+ */
+
+static void test_auto_lockout_does_not_touch_rc(void)
+{
+  struct router_config_s c = config_default();
+  struct router_state_s s;
+  struct router_input_s in = input_default(11000000);
+  struct router_output_s out;
+
+  router_state_init(&s);
+  arm_manual(&c, &s, &in, &out);
+  in.auto_present = true;
+  in.auto_motor = 0.1f;
+  in.auto_mode = ROUTER_MODE_DUTY;
+  in.rc_channel[4] = 2000;
+  in.now_us += 1000;
+  in.auto_timestamp = in.now_us;
+  step(&c, &s, &in, &out);
+
+  in.now_us += ROUTER_NEUTRAL_HOLD_US;
+  in.auto_timestamp = in.now_us;
+  step(&c, &s, &in, &out);
+  assert(out.reason == ROUTER_REASON_OK);
+
+  in.now_us += c.auto_timeout_us + 1u;
+  step(&c, &s, &in, &out);
+  assert(out.reason == ROUTER_REASON_AUTO_STALE);
+
+  in.rc_channel[4] = 1000;             /* take the sticks */
+  in.rc_channel[2] = 2000;             /* throttle forward */
+  in.now_us += 1000;
+  step(&c, &s, &in, &out);
+  assert(out.source == ROUTER_SOURCE_RC);
+
+  in.now_us += ROUTER_NEUTRAL_HOLD_US;
+  step(&c, &s, &in, &out);
+  assert(out.reason == ROUTER_REASON_OK);
+  assert(out.motor > 0.0f);
+}
+
 static void test_rc_loss_disarms_and_requires_recycle(void)
 {
   struct router_config_s c = config_default();
@@ -305,6 +472,9 @@ int main(void)
   test_mode_toggle_and_hysteresis();
   test_mode_boot_high_does_not_toggle();
   test_auto_and_source_hold();
+  test_auto_stays_out_until_the_switch_is_cycled();
+  test_auto_may_wait_for_its_first_command();
+  test_auto_lockout_does_not_touch_rc();
   test_rc_loss_disarms_and_requires_recycle();
   test_rc_safety_overrides_external_arm();
   test_unused_channel_may_be_absent();

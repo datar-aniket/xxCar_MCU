@@ -115,6 +115,17 @@ _DOMINANCE = 1.3
 # because a badly held position skews a row without shortening it.
 _MAX_GRAM_OFF = 0.25
 
+# The quick sign diagnostic deliberately uses only one end of each axis.  It
+# cannot cancel accelerometer bias like accel_rotation() can, so allow modest
+# calibration error and hand-placement error but reject a pose that is far
+# enough away to make the signed-axis conclusion questionable.
+_SIGN_POSITIONS = {
+    "nose_down": (0, -1),
+    "left_down": (1, -1),
+    "z_down": (2, -1),
+}
+_MAX_SIGN_RESIDUAL_G = 0.35
+
 
 def _check_position(name, reading):
     reading = np.asarray(reading, dtype=float)
@@ -215,6 +226,92 @@ def accel_rotation(positions):
 
     return {"matrix": matrix, "enum": value, "snap_deg": angle,
             "mirrored": False, "residual_g": residual}
+
+
+def accel_sign_rotation(positions):
+    """Solve a signed axis map from three gravity poses.
+
+    The requested poses put vehicle -X, -Y and -Z upward in turn.  A stationary
+    accelerometer measures specific force upward, so the expected readings in
+    the vehicle FLU frame are respectively ``-g X``, ``-g Y`` and ``-g Z``.
+
+    This is intentionally a *diagnostic*, not a calibration.  With only one
+    end of each axis, a constant accelerometer bias cannot be separated from
+    gravity.  In exchange, these three poses are enough to identify every axis
+    permutation and sign, including a reflection such as an all-axis negation
+    that no proper rotation enum can represent.
+    """
+    missing = [name for name in _SIGN_POSITIONS if name not in positions]
+
+    if missing:
+        raise AlignError("missing position(s): " + ", ".join(sorted(missing)))
+
+    checked = {}
+    dominant = {}
+
+    for name in _SIGN_POSITIONS:
+        checked[name], dominant[name] = _check_position(name,
+                                                        positions[name])
+
+    seen = {}
+
+    for name in _SIGN_POSITIONS:
+        sensor_axis = dominant[name]
+
+        if sensor_axis in seen:
+            raise AlignError(
+                f"{name} and {seen[sensor_axis]} resolve to the same sensor "
+                "axis - a pose was repeated or the vehicle was not tipped "
+                "onto three different faces")
+
+        seen[sensor_axis] = name
+
+    # One non-zero per row and column.  For coefficient c, measured sign s,
+    # and wanted sign w, c*s=w, hence c=w*s because both signs are +/-1.
+    matrix = np.zeros((3, 3))
+    mapped = {}
+    residuals = {}
+
+    for name, (vehicle_axis, wanted_sign) in _SIGN_POSITIONS.items():
+        reading = checked[name]
+        sensor_axis = dominant[name]
+        measured_sign = 1 if reading[sensor_axis] >= 0.0 else -1
+        matrix[vehicle_axis, sensor_axis] = wanted_sign * measured_sign
+
+    for name, (vehicle_axis, wanted_sign) in _SIGN_POSITIONS.items():
+        expected = np.zeros(3)
+        expected[vehicle_axis] = wanted_sign * GRAVITY
+        corrected = matrix @ checked[name]
+        mapped[name] = corrected
+        residuals[name] = float(np.linalg.norm(corrected - expected) /
+                                GRAVITY)
+
+    worst_name = max(residuals, key=residuals.get)
+    worst = residuals[worst_name]
+
+    if worst > _MAX_SIGN_RESIDUAL_G:
+        raise AlignError(
+            f"{worst_name}: gravity residual is {worst:.2f} g (limit "
+            f"{_MAX_SIGN_RESIDUAL_G:.2f} g) - hold the vehicle square, or "
+            "calibrate accelerometer bias before using the three-pose check")
+
+    mirrored = is_mirrored(matrix)
+    value = None
+
+    if not mirrored:
+        value, angle = snap(matrix)
+        # A signed permutation is exact, but keep the same result shape as the
+        # full alignment solver and assert that invariant at runtime.
+        if angle > 1e-6:
+            raise AlignError("internal error: signed axis map is not a "
+                             "representable rotation")
+    else:
+        angle = None
+
+    return {"matrix": matrix, "enum": value, "snap_deg": angle,
+            "mirrored": mirrored, "residual_g": worst,
+            "residuals_g": residuals, "mapped": mapped,
+            "dominant": dominant}
 
 
 def _skew(v):

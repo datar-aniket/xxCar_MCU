@@ -35,7 +35,7 @@ static void align_core(void)
 
   ekf_core_init(&g_core);
 
-  for (i = 0; i < 500; i++)
+  for (i = 0; i < 4200; i++)
     {
       memset(&s, 0, sizeof(s));
       t += TEST_DT_US;

@@ -7,6 +7,7 @@
  *
  *   log start       begin a session with whatever the LOG_* params say
  *   log allan [hz]  set up and begin an Allan-variance run
+ *   log ekf [hz]    record raw IMU plus EKF inputs/diagnostics/output
  *   log stop        end it
  *   log status      what it is recording, and how much
  *
@@ -21,6 +22,7 @@
  *   param set LOG_MAG 1
  *   param set LOG_BARO 1
  *   param set LOG_RC 1
+ *   param set LOG_EKF 1    exact EKF deltas, residuals, innovations + state
  *   param set LOG_RATE 0    0 = every sample (native 2 kHz); N = cap to N Hz
  *   param set LOG_ENABLE 1  also start logging at boot
  *   param save
@@ -89,10 +91,12 @@ int main(int argc, FAR char *argv[])
 
   if (argc < 2)
     {
-      printf("Usage: log start | stop | status | allan [hz]\n"
+      printf("Usage: log start | stop | status | allan [hz] | ekf [hz]\n"
              "  start   log whatever LOG_IMU/MAG/BARO/RC and LOG_RATE say\n"
              "  allan   set up and start an Allan-variance run: both IMUs\n"
              "          only, at [hz] (default 200), everything else off\n"
+             "  ekf     log IMU0, mag, baro, external pose and synchronized\n"
+             "          EKF diagnostics at [hz] (default 400)\n"
              "  Files split at 100 MB as log_NNN_PP.ulg.\n");
       return 1;
     }
@@ -144,6 +148,7 @@ int main(int argc, FAR char *argv[])
       param_set_i32("LOG_RC",   0);
       param_set_i32("LOG_FLOW", 0);
       param_set_i32("LOG_DIST", 0);
+      param_set_i32("LOG_EKF",  0);
       param_set_i32("LOG_RATE", (int32_t)hz);
 
       if (hz > 0)
@@ -161,6 +166,63 @@ int main(int argc, FAR char *argv[])
                  "  200 Hz is the better long run: it still reaches the\n"
                  "  bias-instability knee with 10x the SD-stall tolerance.\n");
         }
+
+      ret = logger_start();
+
+      if (ret == -EALREADY)
+        {
+          fprintf(stderr, "log: already running (log status)\n");
+          return 1;
+        }
+
+      if (ret < 0)
+        {
+          fprintf(stderr, "log: start failed: %d\n", ret);
+          return 1;
+        }
+
+      usleep(50000);
+      return log_do_status();
+    }
+
+  if (strcmp(argv[1], "ekf") == 0)
+    {
+      long hz = argc > 2 ? strtol(argv[2], NULL, 10) : 400;
+
+      if (hz < 0 || hz > 2000)
+        {
+          fprintf(stderr, "log: rate must be 0-2000 (0 = native)\n");
+          return 1;
+        }
+
+      /* Capture both ends of the estimator path: raw IMU0 at the sensor
+       * boundary, the exact matched-LPF delta packets consumed by the EKF,
+       * every aiding input, and the horizon/output states. At 400 Hz the raw
+       * 2 kHz stream is decimated while LOG_EKF records bypass the cap, so no
+       * EKF delta packet or fusion event is discarded.
+       */
+
+      param_set_i32("LOG_IMU0", 1);
+      param_set_i32("LOG_IMU1", 0);
+      param_set_i32("LOG_MAG",  1);
+      param_set_i32("LOG_BARO", 1);
+      param_set_i32("LOG_RC",   0);
+      param_set_i32("LOG_FLOW", 0);
+      param_set_i32("LOG_DIST", 0);
+      param_set_i32("LOG_EKF",  1);
+      param_set_i32("LOG_RATE", (int32_t)hz);
+
+      if (hz > 0)
+        {
+          printf("log: EKF diagnostic profile, %ld Hz\n", hz);
+        }
+      else
+        {
+          printf("log: EKF diagnostic profile, native rate\n");
+        }
+      printf("  IMU0 raw + vehicle_imu + estimator_diag + estimator_state\n"
+             "  external_pose + vehicle_accel + transmitted vehicle_state\n"
+             "  magnetometer + barometer\n");
 
       ret = logger_start();
 

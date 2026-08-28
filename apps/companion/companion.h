@@ -37,6 +37,22 @@ struct companion_status_s
 
   uint32_t rx_pose;           /* EXTERNAL_POSE routed and published */
   uint32_t rx_publish_errors;
+
+  /* DIRECT_CONTROL, counted by outcome rather than in one total.
+   *
+   * The three failures mean different things to whoever is holding the
+   * transmitter: stale is the link or the clock, invalid is the companion
+   * sending something the format cannot mean, and a rising accepted count
+   * with a still vehicle is the control router declining to act - the wrong
+   * source switch or an incomplete arm sequence.
+   */
+
+  uint32_t rx_direct;           /* accepted and published to control_cmd */
+  uint32_t rx_direct_stale;     /* no usable UTC, or older than the budget */
+  uint32_t rx_direct_invalid;   /* out of range, bad mode, or not a number */
+  uint64_t last_direct_us;      /* board time of the last accepted command */
+  uint32_t last_direct_age_us;  /* how old that one was on arrival */
+  uint32_t auto_timeout_us;     /* AUTO_CMD_TO_MS, the age budget above */
   uint32_t timesync_replies;
   uint32_t timesync_expected;   /* the burst the companion announced */
   uint32_t timesync_samples;    /* what came back, per the companion */

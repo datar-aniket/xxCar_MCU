@@ -24,8 +24,6 @@
 #define EKF_WINDOW_TOLERANCE_US       200.0f
 #define EKF_BOUNDARY_TOLERANCE_US       200ull
 
-#define EKF_ALIGN_TIME_S            1.0f
-#define EKF_ALIGN_MIN_SAMPLES       300u
 #define EKF_ALIGN_ACCEL_MIN         (0.75f * EKF_GRAVITY)
 #define EKF_ALIGN_ACCEL_MAX         (1.25f * EKF_GRAVITY)
 #define EKF_ALIGN_GYRO_INSTANT_MAX  0.35f
@@ -47,6 +45,16 @@
 #define EKF_DYNAMICS_SPEED_OUT       0.35f
 #define EKF_DYNAMICS_LINEAR_ACCEL_IN 0.60f
 #define EKF_DYNAMICS_LINEAR_ACCEL_OUT 1.20f
+
+/* The wheel-stop gate needs to forget the braking transient quickly. At a
+ * 400 Hz EKF rate a 50 ms EWMA has twenty samples of memory; combined with
+ * the external 150 ms stopped-wheel dwell this gives a conservative stop
+ * decision without carrying 1.5 seconds of braking history into the gate.
+ */
+
+#define EKF_ZUPT_TIME_CONSTANT       0.05f
+#define EKF_ZUPT_GYRO_LIMIT          0.08f
+#define EKF_ZUPT_AIDED_SPEED_LIMIT   0.15f
 
 #define EKF_GRAVITY_MEAS_NOISE      0.35f
 #define EKF_MEASUREMENT_NIS_GATE    16.3f
@@ -257,6 +265,7 @@ static void alignment_clear(FAR struct ekf_core_s *ekf)
   ekf->align_gyro_norm2_sum = 0.0f;
   ekf->align_time_s = 0.0f;
   ekf->align_samples = 0;
+  ekf->gyro_bias_from_uncalibrated = false;
 }
 
 static void dynamics_clear(FAR struct ekf_core_s *ekf)
@@ -269,8 +278,14 @@ static void dynamics_clear(FAR struct ekf_core_s *ekf)
          sizeof(ekf->dynamics_accel_variance));
   memset(ekf->dynamics_gyro_variance, 0,
          sizeof(ekf->dynamics_gyro_variance));
+  memset(ekf->zupt_accel_mean, 0, sizeof(ekf->zupt_accel_mean));
+  memset(ekf->zupt_accel_variance, 0,
+         sizeof(ekf->zupt_accel_variance));
+  memset(ekf->zupt_gyro_mean, 0, sizeof(ekf->zupt_gyro_mean));
   ekf->low_dynamics_dwell_s = 0.0f;
   ekf->dynamics_seeded = false;
+  ekf->zupt_dynamics_seeded = false;
+  ekf->zupt_last_clipped = false;
 
   if (ekf->low_dynamics)
     {
@@ -287,6 +302,7 @@ static void dynamics_update(FAR struct ekf_core_s *ekf,
   float accel_variance = 0.0f;
   float gyro_variance = 0.0f;
   float alpha;
+  float zupt_alpha;
   bool entry_candidate;
   bool remain_candidate;
   bool position_aided;
@@ -300,6 +316,34 @@ static void dynamics_update(FAR struct ekf_core_s *ekf,
                     sample->delta_velocity_dt - ekf->accel_bias[axis];
       gyro[axis] = sample->delta_angle[axis] /
                    sample->delta_angle_dt - ekf->gyro_bias[axis];
+    }
+
+  ekf->zupt_last_clipped = sample->clipping != 0;
+
+  if (!ekf->zupt_dynamics_seeded)
+    {
+      memcpy(ekf->zupt_accel_mean, accel,
+             sizeof(ekf->zupt_accel_mean));
+      memcpy(ekf->zupt_gyro_mean, gyro, sizeof(ekf->zupt_gyro_mean));
+      ekf->zupt_dynamics_seeded = true;
+    }
+  else
+    {
+      zupt_alpha = sample->delta_angle_dt /
+                   (EKF_ZUPT_TIME_CONSTANT + sample->delta_angle_dt);
+
+      for (axis = 0; axis < 3; axis++)
+        {
+          float accel_delta = accel[axis] - ekf->zupt_accel_mean[axis];
+
+          ekf->zupt_accel_mean[axis] += zupt_alpha * accel_delta;
+          ekf->zupt_accel_variance[axis] =
+            (1.0f - zupt_alpha) *
+            (ekf->zupt_accel_variance[axis] +
+             zupt_alpha * accel_delta * accel_delta);
+          ekf->zupt_gyro_mean[axis] +=
+            zupt_alpha * (gyro[axis] - ekf->zupt_gyro_mean[axis]);
+        }
     }
 
   if (!ekf->dynamics_seeded)
@@ -425,6 +469,52 @@ static void dynamics_update(FAR struct ekf_core_s *ekf,
     }
 }
 
+bool ekf_core_zupt_stationary(FAR const struct ekf_core_s *ekf,
+                              float gravity_deviation_limit,
+                              float accel_variance_limit,
+                              FAR float *gravity_deviation,
+                              FAR float *accel_variance)
+{
+  float deviation = INFINITY;
+  float variance = INFINITY;
+  bool limits_valid;
+
+  if (ekf != NULL && ekf->zupt_dynamics_seeded)
+    {
+      deviation = fabsf(vector_norm(ekf->zupt_accel_mean) -
+                         EKF_GRAVITY);
+      variance = ekf->zupt_accel_variance[0] +
+                 ekf->zupt_accel_variance[1] +
+                 ekf->zupt_accel_variance[2];
+    }
+
+  if (gravity_deviation != NULL)
+    {
+      *gravity_deviation = deviation;
+    }
+
+  if (accel_variance != NULL)
+    {
+      *accel_variance = variance;
+    }
+
+  limits_valid = isfinite(gravity_deviation_limit) &&
+                 gravity_deviation_limit >= 0.0f &&
+                 isfinite(accel_variance_limit) &&
+                 accel_variance_limit >= 0.0f;
+
+  return ekf != NULL && limits_valid && ekf->initialized &&
+         ekf->zupt_dynamics_seeded && !ekf->zupt_last_clipped &&
+         isfinite(deviation) && isfinite(variance) &&
+         deviation <= gravity_deviation_limit &&
+         variance <= accel_variance_limit &&
+         vector_norm(ekf->zupt_gyro_mean) <= EKF_ZUPT_GYRO_LIMIT &&
+         (!ekf_core_position_aided(ekf) ||
+          sqrtf(ekf->velocity[0] * ekf->velocity[0] +
+                ekf->velocity[1] * ekf->velocity[1]) <=
+            EKF_ZUPT_AIDED_SPEED_LIMIT);
+}
+
 static void covariance_accumulator_clear(FAR struct ekf_core_s *ekf)
 {
   memset(ekf->covariance_delta_angle, 0,
@@ -529,7 +619,12 @@ static bool sample_valid(FAR const struct ekf_imu_sample_s *sample)
 {
   float window_us;
 
-  if (sample == NULL || sample->instance != 0 || sample->samples == 0 ||
+  /* The core is sensor-instance agnostic. The primary lane normally receives
+   * instance 0 and the secondary attitude monitor receives instance 1; both
+   * carry the same calibrated body-frame delta contract.
+   */
+
+  if (sample == NULL || sample->samples == 0 ||
       sample->timestamp_sample <= sample->timestamp_first ||
       !vector_finite(sample->delta_angle) ||
       !vector_finite(sample->delta_velocity) ||
@@ -2345,14 +2440,50 @@ static bool attitude_updates(FAR struct ekf_core_s *ekf)
 static bool nominal_predict(FAR struct ekf_core_s *ekf,
                             FAR const struct ekf_imu_sample_s *sample)
 {
+  float rotation[3][3];
+  float old_velocity[3];
   float dt = sample->delta_angle_dt;
+  float velocity_dt = sample->delta_velocity_dt;
   int axis;
+
+  /* Capture the acceleration decomposition with the packet-start attitude,
+   * which is the attitude strapdown_step uses for this already
+   * sculling-corrected delta velocity. Computing this later from the updated
+   * quaternion would introduce a half-packet frame error into the diagnostic
+   * and could make the logger accuse propagation of an error it created.
+   */
+
+  quaternion_to_rotation(ekf->quaternion, rotation);
+
+  for (axis = 0; axis < 3; axis++)
+    {
+      ekf->last_specific_force[axis] =
+        sample->delta_velocity[axis] / velocity_dt;
+      ekf->last_corrected_force[axis] =
+        ekf->last_specific_force[axis] - ekf->accel_bias[axis];
+      ekf->last_gravity_body[axis] = rotation[2][axis] * EKF_GRAVITY;
+      ekf->last_residual_accel_body[axis] =
+        ekf->last_corrected_force[axis] - ekf->last_gravity_body[axis];
+      old_velocity[axis] = ekf->velocity[axis];
+    }
 
   if (!strapdown_step(ekf->quaternion, ekf->velocity, ekf->position,
                       ekf->gyro_bias, ekf->accel_bias, sample))
     {
       return false;
     }
+
+  for (axis = 0; axis < 3; axis++)
+    {
+      /* This is the exact velocity increment applied by strapdown, including
+       * the ENU gravity subtraction, expressed as acceleration for plotting.
+       */
+
+      ekf->last_nav_accel[axis] =
+        (ekf->velocity[axis] - old_velocity[axis]) / velocity_dt;
+    }
+
+  ekf->last_predict_timestamp = sample->timestamp_sample;
 
   for (axis = 0; axis < 3; axis++)
     {
@@ -2402,7 +2533,14 @@ int ekf_core_process(FAR struct ekf_core_s *ekf,
 
   ekf->input_count++;
 
-  if (!sample->accel_calibrated || !sample->gyro_calibrated)
+  /* An accelerometer needs its stored offset/scale calibration before it can
+   * define gravity. A gyro does not need a stored offset here: the complete
+   * stationary mean is precisely the bias alignment estimates and subtracts
+   * during propagation. When a stored gyro offset exists, the same estimate
+   * simply becomes the residual bias.
+   */
+
+  if (!sample->accel_calibrated)
     {
       ekf->uncalibrated_count++;
       ekf->rejected_count++;
@@ -2415,6 +2553,11 @@ int ekf_core_process(FAR struct ekf_core_s *ekf,
       restart_alignment(ekf);
       ekf->last_timestamp_sample = sample->timestamp_sample;
       return EKF_PROCESS_REJECTED;
+    }
+
+  if (!sample->gyro_calibrated)
+    {
+      ekf->gyro_bias_from_uncalibrated = true;
     }
 
   if (!ekf->have_source_reset)
@@ -3224,6 +3367,23 @@ int ekf_core_fuse_extnav(FAR struct ekf_core_s *ekf,
   yaw_noise = want_yaw && isfinite(s->yaw_sigma) &&
               s->yaw_sigma > yaw_noise_floor ?
               s->yaw_sigma : (want_yaw ? yaw_noise_floor : 1.0f);
+
+  /* Timestamp uncertainty becomes position uncertainty while moving:
+   * dx = velocity * dt.  Add it as independent variance rather than moving
+   * or smoothing the actual pose.  This is deliberately conservative in the
+   * horizontal plane because the current external-pose observation uses one
+   * common noise value for x and y.
+   */
+
+  if (want_position && isfinite(s->time_sigma) && s->time_sigma > 0.0f)
+    {
+      float speed = sqrtf(ekf->velocity[0] * ekf->velocity[0] +
+                          ekf->velocity[1] * ekf->velocity[1]);
+      float timing_noise = speed * s->time_sigma;
+
+      pos_noise = sqrtf(pos_noise * pos_noise +
+                        timing_noise * timing_noise);
+    }
 
   /* The source relocalised. That is worth more than twenty gated
    * innovations telling us the same thing more slowly.

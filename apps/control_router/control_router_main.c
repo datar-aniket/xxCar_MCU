@@ -58,7 +58,10 @@ static int print_status(void)
   printf("  rc      %s source=%u throttle=%+.3f steering=%+.3f\n",
          s.rc_valid ? "valid" : "INVALID", s.rc_source,
          (double)s.rc_throttle, (double)s.rc_steering);
-  printf("  auto    %s\n", s.auto_valid ? "valid" : "INVALID");
+  printf("  auto    %s%s\n", s.auto_valid ? "valid" : "INVALID",
+         s.reason == ROUTER_REASON_AUTO_CYCLE ?
+           "  - LOCKED OUT until the source switch is cycled to RC and back"
+           : "");
   print_age("rc age", s.rc_age_us);
   print_age("auto age", s.auto_age_us);
   printf("  output  motor=%+.3f steering=%+.3f\n",

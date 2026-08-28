@@ -46,6 +46,7 @@
 #define COMP_MSG_TIMESYNC_REQ    3
 #define COMP_MSG_TIMESYNC_START  5
 #define COMP_MSG_TIMESYNC_END    6
+#define COMP_MSG_DIRECT_CONTROL  7
 
 /* Outbound: board -> companion. */
 
@@ -81,6 +82,54 @@ struct comp_external_pose_s
 };
 
 #define COMP_POSE_FLAG_VALID (1u << 0)
+
+/* Mirrors ACTUATOR_MODE_* in uorb_msgs.h. Duplicated rather than included
+ * because that header needs uORB. companion.c carries a static_assert that
+ * the two agree, so drift is a build failure rather than a silent unit
+ * change - and the unit change this prevents is "20 amps" arriving as
+ * "duty 20", which clamps to full throttle.
+ */
+
+#define COMP_THROTTLE_DUTY     0
+#define COMP_THROTTLE_CURRENT  1
+
+/* Protocol ceilings, not vehicle limits.
+ *
+ * The operator's ceilings are VESC_DUTY_MAX and VESC_CUR_MAX, applied by the
+ * control router afterwards. These bound only what the FORMAT can mean, and a
+ * value outside them is rejected rather than clamped: it says the sender is
+ * wrong about the units or the mode, and clamping would turn that into a
+ * command that looks deliberate.
+ */
+
+#define COMP_DIRECT_STEER_MAX    1.0f
+#define COMP_DIRECT_DUTY_MAX     1.0f
+#define COMP_DIRECT_CURRENT_MAX  50.0f
+
+/* An immediate actuator command from the companion.
+ *
+ * This is the higher-priority half of the autonomous input; CONTROL_TRAJ is
+ * the other and is not defined yet.
+ *
+ * timestamp_us is UTC and is NOT optional here, unlike EXTERNAL_POSE where a
+ * zero means "stamp it on arrival". A pose with no timestamp costs accuracy;
+ * a command with no timestamp cannot have its freshness checked at all, and
+ * an actuator command whose age is unknown is the one thing this link must
+ * not act on.
+ */
+
+struct comp_direct_control_s
+{
+  uint64_t timestamp_us;   /*  0: UTC us, when the companion sent it */
+  float    steering;       /*  8: -1..+1, left positive */
+  float    throttle;       /* 12: duty -1..+1, or amps -50..+50 */
+  uint8_t  throttle_type;  /* 16: COMP_THROTTLE_* */
+  uint8_t  pad[7];         /* 17: a uint64 first member forces 8-byte
+                            *     alignment, so this pads to 24 whatever
+                            *     it says. Declared, so the wire format is
+                            *     what the struct says rather than what the
+                            *     compiler decided. */
+};
 
 /* The vehicle's full state, sent at EXT_TX_RATE.
  *
@@ -121,9 +170,10 @@ struct comp_vehicle_state_s
 
   float    side_slip_rad;     /* 60 */
 
-  /* Specific force with gravity removed using the estimator's attitude, so
-   * this reads zero at rest rather than 9.8 m/s^2 upward. The accelerometer
-   * bias the estimator tracks is NOT removed - only gravity is.
+  /* Linear acceleration: calibrated specific force with the EKF's remaining
+   * accelerometer bias and attitude-projected gravity removed. It therefore
+   * reads zero-mean at rest rather than retaining either 9.8 m/s^2 or the
+   * residual bias the EKF has already learned.
    */
 
   float    accel[3];          /* 64: m/s^2, body FLU */
@@ -283,5 +333,14 @@ int comp_parser_byte(FAR struct comp_parser_s *p, uint8_t b);
 
 int comp_encode(uint8_t id, FAR const void *payload, uint8_t len,
                 FAR uint8_t *out, size_t out_size);
+
+/* Is this command one the actuators may be given?
+ *
+ * Range and mode only - freshness is the caller's job, because it needs a
+ * clock. Kept here, next to the format it validates, so every rule can be
+ * driven on the host rather than found on a bench with the wheels turning.
+ */
+
+bool comp_direct_control_valid(FAR const struct comp_direct_control_s *cmd);
 
 #endif /* __APPS_COMPANION_COMP_PROTO_H */

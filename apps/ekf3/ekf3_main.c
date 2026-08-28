@@ -86,7 +86,7 @@ static void print_status(void)
                               core->first_predict_timestamp);
     }
 
-  progress = core->align_time_s * 100.0f;
+  progress = core->align_time_s * 100.0f / EKF_ALIGN_TIME_S;
   accel_rms = sqrtf(core->dynamics_accel_variance[0] +
                     core->dynamics_accel_variance[1] +
                     core->dynamics_accel_variance[2]);
@@ -110,9 +110,11 @@ static void print_status(void)
          predict_rate, core->covariance_count,
          predict_rate / EKF_COVARIANCE_INTERVAL);
   printf("  alignment %.1f%% samples %" PRIu32
-         " restarts %" PRIu32 "\n",
+         " restarts %" PRIu32 " gyro-bias source %s\n",
          (double)progress, core->align_samples,
-         core->alignment_restart_count);
+         core->alignment_restart_count,
+         core->gyro_bias_from_uncalibrated ?
+           "10s raw mean" : "10s calibrated residual");
   printf("  resets commanded %" PRIu32 "\n",
          core->commanded_reset_count);
   {
@@ -128,9 +130,15 @@ static void print_status(void)
 
   printf("  horizon %" PRIu32 " ms  replay %u samples"
          "  ring overflow imu %" PRIu32 " mag %" PRIu32 " baro %" PRIu32
+         " ext %" PRIu32
          "\n",
          status.horizon_ms, status.output_replay,
-         status.imu_overflow, status.mag_overflow, status.baro_overflow);
+         status.imu_overflow, status.mag_overflow, status.baro_overflow,
+         status.extnav_overflow);
+  printf("  clocks TIM5 - MONOTONIC current %+" PRIi64
+         " us  change since EKF start %+" PRIi64 " us\n",
+         status.clock_skew_us,
+         status.clock_skew_us - status.clock_skew_start_us);
   if (core->extnav_datum_set)
     {
       printf("  extnav datum set  innov %+.3f %+.3f m  NIS %.3f %.3f\n",
@@ -185,6 +193,32 @@ static void print_status(void)
              status.sources.set[status.sources.active_set].position_xy !=
                EKF_SOURCE_EXTERNAL_NAV ?
                "   <- EK3_SRC1_POSXY is not 6" : "");
+    }
+
+  printf("  extnav time delay %+.3f ms  jitter %.3f ms (1-sigma)"
+         "  clamped %" PRIu32 " rejected %" PRIu32 "\n",
+         (double)status.ext_delay_us / 1000.0,
+         (double)status.ext_jitter_us / 1000.0,
+         status.extnav_time_clamped, status.extnav_bad_time);
+
+  printf("  extnav marker->IMU pos %+.3f %+.3f %+.3f m"
+         "  RPY %+.2f %+.2f %+.2f deg  bad frame %" PRIu32 "\n",
+         (double)status.ext_extrinsics.position[0],
+         (double)status.ext_extrinsics.position[1],
+         (double)status.ext_extrinsics.position[2],
+         (double)(status.ext_extrinsics.rotation[0] * rad_to_deg),
+         (double)(status.ext_extrinsics.rotation[1] * rad_to_deg),
+         (double)(status.ext_extrinsics.rotation[2] * rad_to_deg),
+         status.extnav_bad_frame);
+
+  if (status.extnav_age_samples > 0)
+    {
+      printf("    arrival age current %+.3f ms  range %+.3f to %+.3f ms"
+             " (%" PRIu32 " poses)\n",
+             (double)status.extnav_age_us / 1000.0,
+             (double)status.extnav_age_min_us / 1000.0,
+             (double)status.extnav_age_max_us / 1000.0,
+             status.extnav_age_samples);
     }
 
   printf("  aiding in  mag %" PRIu32 " (%s)  baro %" PRIu32 " (%s)\n",
@@ -346,13 +380,28 @@ static void print_status(void)
     {
       printf("  wheels     no vesc_status - zero-velocity aiding inactive\n");
     }
+  else if (!status.wheel_fresh)
+    {
+      printf("  wheels     vesc_status STALE - zero-velocity aiding blocked\n");
+    }
   else
     {
-      printf("  wheels     %.1f counts/s  %s (threshold %.1f)  zupt %"
-             PRIu32 " / %" PRIu32 " rejected\n",
+      printf("  wheels     %.1f counts/s  %s (threshold %.1f)  IMU %s\n",
              (double)status.last_wheel_cps,
              status.zupt_stopped ? "STOPPED" : "moving",
              (double)status.zupt_threshold_cps,
+             status.zupt_imu_stationary ? "stationary" : "MOTION");
+      printf("             |mean accel|-g %.3f / %.3f m/s2"
+             "  accel variance %.4f / %.4f  blocked %" PRIu32 "\n",
+             (double)status.zupt_gravity_deviation,
+             (double)status.zupt_gravity_limit,
+             (double)status.zupt_accel_variance,
+             (double)status.zupt_variance_limit,
+             status.zupt_motion_block_count);
+      printf("             stop dwell %s (%.0f ms configured)\n",
+             status.zupt_dwell_complete ? "READY" : "waiting",
+             (double)status.zupt_dwell_us / 1000.0);
+      printf("             zupt %" PRIu32 " / %" PRIu32 " rejected\n",
              core->zupt_accept_count, core->zupt_reject_count);
     }
 

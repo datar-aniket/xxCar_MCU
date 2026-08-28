@@ -17,7 +17,7 @@
 static void usage(void)
 {
   printf("Usage: imu_delta start|stop|status [instance]\n"
-         "  Calibrated, unfiltered samples to 400 Hz\n"
+         "  Calibrated, matched-filtered samples to 400 Hz\n"
          "  coning/sculling-corrected vehicle_imu packets.\n"
          "\n"
          "  instance 0 = ICM42688, feeds the estimator\n"
@@ -64,17 +64,27 @@ static void print_status(int instance)
       mean_window = (double)status.total_window_us / status.packets;
     }
 
-  printf("imu_delta: %s, IMU0 ICM42688, sensor %s, board %s, "
+  printf("imu_delta: %s, IMU%d %s, sensor %s, board %s, "
          "cal A:%s G:%s\n",
          status.running ? "running" : "stopped",
+         status.instance,
+         status.instance == 0 ? "ICM42688" : "BMI055",
          rotation_name(status.sensor_rotation),
          rotation_name(status.board_rotation),
          status.accel_calibrated ? "on" : "off",
          status.gyro_calibrated ? "on" : "off");
-  printf("  packets %" PRIu32 " rate %.2fHz paired %" PRIu32
-         " sync_drop %" PRIu32 " queue_overrun %" PRIu32 " pub_error %" PRIu32
-         "\n", status.packets, rate, status.paired_samples,
-         status.sync_drops, status.queue_overruns, status.publish_errors);
+  printf("  packets %" PRIu32 " rate %.2fHz recv A:%" PRIu32
+         " G:%" PRIu32 " paired %" PRIu32 "\n",
+         status.packets, rate, status.accel_samples, status.gyro_samples,
+         status.paired_samples);
+  printf("  sync_drop %" PRIu32 " resample_drop %" PRIu32
+         " queue_overrun %" PRIu32 " pub_error %" PRIu32 "\n",
+         status.sync_drops, status.resample_drops,
+         status.queue_overruns, status.publish_errors);
+  printf("  matched LPF %.1fHz delay %" PRIu32 "us resets %" PRIu32
+         " invalid %" PRIu32 "\n",
+         (double)status.lpf_hz, status.lpf_delay_us,
+         status.lpf_resets, status.lpf_invalid);
   printf("  window %.2fus [%" PRIu32 "/%" PRIu32
          "] samples [%u/%u] clipped %" PRIu32 "\n",
          mean_window, status.min_window_us, status.max_window_us,
@@ -99,7 +109,7 @@ int main(int argc, FAR char *argv[])
   int instance = 0;
   bool all = true;
 
-  if (argc != 2)
+  if (argc < 2 || argc > 3)
     {
       usage();
       return EXIT_FAILURE;

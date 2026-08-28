@@ -132,14 +132,14 @@ bool ekf_delay_push_mag(FAR struct ekf_delay_s *d,
 }
 
 uint64_t ekf_delay_horizon_time(FAR const struct ekf_delay_s *d,
-                                uint64_t now_us)
+                                uint64_t newest_imu_time_us)
 {
-  if (d == NULL || now_us <= (uint64_t)d->horizon_us)
+  if (d == NULL || newest_imu_time_us <= (uint64_t)d->horizon_us)
     {
       return 0;
     }
 
-  return now_us - (uint64_t)d->horizon_us;
+  return newest_imu_time_us - (uint64_t)d->horizon_us;
 }
 
 bool ekf_delay_next_imu(FAR struct ekf_delay_s *d, uint64_t horizon_time,

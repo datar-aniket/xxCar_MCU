@@ -25,6 +25,8 @@
 
 #include "imu_delta.h"
 #include "imu_integrator.h"
+#include "imu_lpf.h"
+#include "imu_resampler.h"
 #include "../param/param.h"
 #include "../sensors/rotation.h"
 #include "../uorb_msgs/uorb_msgs.h"
@@ -33,6 +35,8 @@
 #define IMU_DELTA_STACK          4096
 #define IMU_DELTA_DRAIN_MAX      64
 #define IMU_DELTA_QUEUE_SIZE     32
+#define IMU_DELTA_RAW_RATE_HZ    2000.0f
+#define IMU_DELTA_STATUS_US      100000u
 #define ICM_ACCEL_CLIP_M_S2      (0.98f * 16.0f * 9.80665f)
 #define ICM_GYRO_CLIP_RAD_S      (0.98f * 2000.0f * 0.017453292519943295f)
 
@@ -258,6 +262,15 @@ static FAR struct sensor_accel *accel_front(FAR struct accel_queue_s *queue)
   return &queue->sample[queue->head];
 }
 
+static FAR struct sensor_accel *accel_at(FAR struct accel_queue_s *queue,
+                                         uint16_t offset)
+{
+  uint16_t index = (uint16_t)((queue->head + offset) %
+                              IMU_DELTA_QUEUE_SIZE);
+
+  return &queue->sample[index];
+}
+
 static FAR struct sensor_gyro *gyro_front(FAR struct gyro_queue_s *queue)
 {
   return &queue->sample[queue->head];
@@ -353,6 +366,8 @@ static int imu_delta_daemon(int argc, FAR char *argv[])
   struct accel_queue_s accel_queue;
   struct gyro_queue_s gyro_queue;
   struct imu_integrator_s integrator;
+  struct imu_lpf3_s accel_lpf;
+  struct imu_lpf3_s gyro_lpf;
   struct imu_delta_status_s status;
   struct axis_map_s map;
   struct pollfd pollfd[2];
@@ -364,6 +379,13 @@ static int imu_delta_daemon(int argc, FAR char *argv[])
   float unused_gyro_scale[3];
   bool accel_calibrated;
   bool gyro_calibrated;
+  bool lpf_seeded = false;
+  uint64_t lpf_last_timestamp = 0;
+  uint64_t last_status_us = 0;
+  float lpf_hz;
+  char accel_cal_prefix[9];
+  char gyro_cal_prefix[10];
+  char rotation_param[14];
   uint8_t sensor_rot;
   uint8_t board_rot;
   int accel_sub = -1;
@@ -376,37 +398,59 @@ static int imu_delta_daemon(int argc, FAR char *argv[])
   memset(&status, 0, sizeof(status));
   imu_integrator_init(&integrator);
 
-  sensor_rot = (uint8_t)param_i32("SENS_IMU0_ROT");
+  lpf_hz = param_f32("EK3_IMU_LPF");
+
+  if (!imu_lpf3_configure(&accel_lpf, IMU_DELTA_RAW_RATE_HZ, lpf_hz) ||
+      !imu_lpf3_configure(&gyro_lpf, IMU_DELTA_RAW_RATE_HZ, lpf_hz))
+    {
+      syslog(LOG_ERR, "[imu-delta] invalid EK3_IMU_LPF %.1f Hz\n",
+             (double)lpf_hz);
+      goto out;
+    }
+
+  status.lpf_hz = lpf_hz;
+  status.lpf_delay_us = accel_lpf.group_delay_us;
+
+  snprintf(accel_cal_prefix, sizeof(accel_cal_prefix), "CAL_ACC%d",
+           instance);
+  snprintf(gyro_cal_prefix, sizeof(gyro_cal_prefix), "CAL_GYRO%d",
+           instance);
+  snprintf(rotation_param, sizeof(rotation_param), "SENS_IMU%d_ROT",
+           instance);
+
+  sensor_rot = (uint8_t)param_i32(rotation_param);
   board_rot = (uint8_t)param_i32("SENS_BOARD_ROT");
 
   if (!rotation_supported(sensor_rot) || !rotation_supported(board_rot) ||
       !build_axis_map(sensor_rot, board_rot, &map))
     {
-      syslog(LOG_ERR, "[imu-delta] unsupported IMU0/board rotation\n");
+      syslog(LOG_ERR, "[imu-delta] unsupported IMU%d/board rotation\n",
+             instance);
       goto out;
     }
 
-  load_cal("CAL_ACC0", true, accel_offset, accel_scale,
+  load_cal(accel_cal_prefix, true, accel_offset, accel_scale,
            &accel_calibrated);
-  load_cal("CAL_GYRO0", false, gyro_offset, unused_gyro_scale,
+  load_cal(gyro_cal_prefix, false, gyro_offset, unused_gyro_scale,
            &gyro_calibrated);
   status.accel_calibrated = accel_calibrated;
   status.gyro_calibrated = gyro_calibrated;
   status.sensor_rotation = sensor_rot;
   status.board_rotation = board_rot;
+  status.instance = (uint8_t)instance;
 
   accel_meta = orb_get_meta("sensor_accel");
-  /* sensor_gyro and sensor_accel, the RAW driver topics - deliberately not
-   * vehicle_gyro/vehicle_accel.
+  /* sensor_gyro and sensor_accel, the native-rate driver topics - deliberately
+   * not vehicle_gyro/vehicle_accel.  Filtering must happen before the 2 kHz
+   * samples are integrated/downsampled to 400 Hz.  The corrected topics are
+   * filtered independently for control and cannot provide that guarantee.
    *
-   * Those carry SENS_GYR_LPF and SENS_ACC_LPF, which exist for the rate loop
-   * and the companion twist. A low-pass here would add phase lag to the very
-   * signal the attitude solution integrates, and the delayed-fusion horizon
-   * already handles what such a filter would be there to fix. ArduPilot
-   * draws the same line between INS_GYRO_FILTER and the estimator's input.
-   *
-   * Calibration is applied below, by correct_pair(), so this path is raw
-   * CALIBRATED rather than raw uncorrected.
+   * The BMI's asynchronous accel is first interpolated to each gyro sample
+   * time; this linear operation commutes with the affine calibration and body
+   * rotation applied below. Accel and gyro then pass through identical
+   * filters, preserving their relative phase for coning/sculling, and the
+   * low-frequency group delay is removed from the sample timestamp rather
+   * than becoming an unmodelled estimator delay.
    */
 
   gyro_meta = orb_get_meta("sensor_gyro");
@@ -441,8 +485,11 @@ static int imu_delta_daemon(int argc, FAR char *argv[])
   publish_status(instance, &status, &integrator);
 
   syslog(LOG_INFO,
-         "[imu-delta] ICM42688 2 kHz -> 400 Hz, rotation %s, cal A:%s G:%s\n",
-         rotation_name(sensor_rot), accel_calibrated ? "on" : "off",
+         "[imu-delta] 2 kHz -> %.1f Hz matched LPF (%" PRIu32
+         " us delay) -> 400 Hz, IMU%d rotation %s, cal A:%s G:%s\n",
+         (double)lpf_hz, status.lpf_delay_us, instance,
+         rotation_name(sensor_rot),
+         accel_calibrated ? "on" : "off",
          gyro_calibrated ? "on" : "off");
 
   while (!g_should_stop[instance])
@@ -463,6 +510,7 @@ static int imu_delta_daemon(int argc, FAR char *argv[])
                  orb_copy(accel_meta, accel_sub, &sample) == 0)
             {
               accel_push(&accel_queue, &sample, &status.queue_overruns);
+              status.accel_samples++;
             }
         }
 
@@ -475,26 +523,85 @@ static int imu_delta_daemon(int argc, FAR char *argv[])
                  orb_copy(gyro_meta, gyro_sub, &sample) == 0)
             {
               gyro_push(&gyro_queue, &sample, &status.queue_overruns);
+              status.gyro_samples++;
             }
         }
 
-      while (accel_queue.count > 0 && gyro_queue.count > 0)
+      while (accel_queue.count >= (instance == 0 ? 1u : 2u) &&
+             gyro_queue.count > 0)
         {
           FAR struct sensor_accel *accel = accel_front(&accel_queue);
           FAR struct sensor_gyro *gyro = gyro_front(&gyro_queue);
+          struct sensor_accel resampled_accel;
+          bool consume_accel = instance == 0;
+          uint8_t clipping;
 
-          if (accel->timestamp < gyro->timestamp)
+          if (instance == 0 && accel->timestamp < gyro->timestamp)
             {
               accel_pop(&accel_queue);
               status.sync_drops++;
               continue;
             }
 
-          if (gyro->timestamp < accel->timestamp)
+          if (instance == 0 && gyro->timestamp < accel->timestamp)
             {
               gyro_pop(&gyro_queue);
               status.sync_drops++;
               continue;
+            }
+
+          if (instance != 0)
+            {
+              FAR struct sensor_accel *after = accel_at(&accel_queue, 1);
+              float before_value[3] = {accel->x, accel->y, accel->z};
+              float after_value[3] = {after->x, after->y, after->z};
+              float value[3];
+
+              /* The BMI055 accel and gyro are independent dies. Retire old
+               * accel brackets until the gyro timestamp lies between two
+               * samples, then interpolate accel to that exact gyro time.
+               * This gives the existing coning/sculling integrator a common
+               * timebase without discarding one stream to chase equality.
+               */
+
+              if (gyro->timestamp < accel->timestamp)
+                {
+                  gyro_pop(&gyro_queue);
+                  status.resample_drops++;
+                  continue;
+                }
+
+              if (gyro->timestamp > after->timestamp)
+                {
+                  accel_pop(&accel_queue);
+                  continue;
+                }
+
+              if (!imu_resample3(accel->timestamp, before_value,
+                                 after->timestamp, after_value,
+                                 gyro->timestamp, value))
+                {
+                  /* A duplicate, backwards sample, or bracket wider than
+                   * 1 ms is a sensor timing fault, not a line segment.
+                   */
+
+                  gyro_pop(&gyro_queue);
+                  status.resample_drops++;
+                  continue;
+                }
+
+              resampled_accel = *accel;
+              resampled_accel.timestamp = gyro->timestamp;
+              resampled_accel.x = value[0];
+              resampled_accel.y = value[1];
+              resampled_accel.z = value[2];
+              accel = &resampled_accel;
+              clipping = clipping_bits(accel_at(&accel_queue, 0), gyro) |
+                         clipping_bits(after, gyro);
+            }
+          else
+            {
+              clipping = clipping_bits(accel, gyro);
             }
 
           {
@@ -502,7 +609,10 @@ static int imu_delta_daemon(int argc, FAR char *argv[])
             struct vehicle_imu_s message;
             float corrected_accel[3];
             float corrected_gyro[3];
-            uint8_t clipping = clipping_bits(accel, gyro);
+            float unfiltered_accel[3];
+            float unfiltered_gyro[3];
+            uint64_t filter_timestamp;
+            uint64_t sample_timestamp;
             int integrate_result;
 
             status.paired_samples++;
@@ -510,8 +620,55 @@ static int imu_delta_daemon(int argc, FAR char *argv[])
             correct_pair(accel, gyro, accel_offset, accel_scale,
                          gyro_offset, &map, corrected_accel,
                          corrected_gyro);
+
+            memcpy(unfiltered_accel, corrected_accel,
+                   sizeof(unfiltered_accel));
+            memcpy(unfiltered_gyro, corrected_gyro,
+                   sizeof(unfiltered_gyro));
+            filter_timestamp = accel->timestamp;
+
+            /* A gap, duplicate, or backwards timestamp invalidates the IIR
+             * history just as it invalidates the delta integrator history.
+             * Seed to the current value so startup does not manufacture a
+             * gravity transient.
+             */
+
+            if (!lpf_seeded || filter_timestamp <= lpf_last_timestamp ||
+                filter_timestamp - lpf_last_timestamp <
+                  IMU_DELTA_MIN_DT_US ||
+                filter_timestamp - lpf_last_timestamp >
+                  IMU_DELTA_MAX_DT_US)
+              {
+                imu_lpf3_reset(&accel_lpf, corrected_accel);
+                imu_lpf3_reset(&gyro_lpf, corrected_gyro);
+                lpf_seeded = true;
+                status.lpf_resets++;
+              }
+
+            lpf_last_timestamp = filter_timestamp;
+
+            if (!imu_lpf3_apply(&accel_lpf, corrected_accel) ||
+                !imu_lpf3_apply(&gyro_lpf, corrected_gyro))
+              {
+                /* Do not leave a non-finite sample in either filter's state.
+                 * The integrator will account and reject the original bad
+                 * sample, then both filters restart cleanly next time.
+                 */
+
+                status.lpf_invalid++;
+                imu_lpf3_reset(&accel_lpf, unfiltered_accel);
+                imu_lpf3_reset(&gyro_lpf, unfiltered_gyro);
+                memcpy(corrected_accel, unfiltered_accel,
+                       sizeof(corrected_accel));
+                memcpy(corrected_gyro, unfiltered_gyro,
+                       sizeof(corrected_gyro));
+                lpf_seeded = false;
+              }
+
+            sample_timestamp = imu_lpf_compensate_timestamp(
+              filter_timestamp, accel_lpf.group_delay_us);
             integrate_result = imu_integrator_add(
-              &integrator, accel->timestamp, corrected_accel,
+              &integrator, sample_timestamp, corrected_accel,
               corrected_gyro, clipping, &delta);
 
             if (integrate_result > 0)
@@ -547,8 +704,18 @@ static int imu_delta_daemon(int argc, FAR char *argv[])
               }
           }
 
-          accel_pop(&accel_queue);
+          if (consume_accel)
+            {
+              accel_pop(&accel_queue);
+            }
+
           gyro_pop(&gyro_queue);
+        }
+
+      if (now_us() - last_status_us >= IMU_DELTA_STATUS_US)
+        {
+          publish_status(instance, &status, &integrator);
+          last_status_us = now_us();
         }
     }
 

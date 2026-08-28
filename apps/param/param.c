@@ -308,13 +308,10 @@ static const struct param_def_s g_params[] =
    * THE SPLIT IS DELIBERATE, and it is ArduPilot's: the estimator runs on
    * the raw calibrated stream while the rate loop runs on a filtered one.
    *
-   * imu_delta subscribes to sensor_gyro directly and applies its own
-   * calibration, so nothing here reaches the EKF - a filter in the
-   * estimator's path would add phase lag to the very signal the attitude
-   * solution integrates, and the filter's own delayed-fusion horizon already
-   * handles what the filter would be there to fix. The corrected topics feed
-   * control and the companion's VEHICLE_STATE twist, where lag costs less
-   * than noise does.
+   * imu_delta subscribes to sensor_gyro and sensor_accel directly, applies
+   * calibration, then uses the separate matched EK3_IMU_LPF before delta
+   * integration.  Nothing configured here reaches the EKF. The corrected
+   * topics feed control and the companion's VEHICLE_STATE twist.
    *
    * Both default to 100 Hz, chosen for control bandwidth. That is well
    * inside the 2 kHz the filters are designed at, but note the consequence
@@ -333,6 +330,15 @@ static const struct param_def_s g_params[] =
     "Corrected gyro notch centre (Hz, 0=off)" },
   { "SENS_GYR_NF_BW", PARAM_TYPE_FLOAT, F32(20.0f), F32(1.0f), F32(400.0f),
     "Corrected gyro notch bandwidth (Hz)" },
+
+  /* Estimator anti-alias filter.  This is separate from SENS_ACC_LPF and
+   * SENS_GYR_LPF: imu_delta applies one matched cutoff to calibrated accel
+   * and gyro at their native 2 kHz rate before 400 Hz delta integration.
+   * The filter's low-frequency group delay is carried in the sample time.
+   */
+
+  { "EK3_IMU_LPF", PARAM_TYPE_FLOAT, F32(100.0f), F32(0.0f), F32(200.0f),
+    "Matched EKF accel/gyro anti-alias LPF (Hz, 0=off)" },
 
   /* ---- EKF aiding source sets -------------------------------------------
    * Numeric values match ArduPilot EKF3 so configurations remain readable:
@@ -537,6 +543,22 @@ static const struct param_def_s g_params[] =
     "External position innovation gate (sigma)" },
   { "EK3_EXT_YAW_NSE", PARAM_TYPE_FLOAT, F32(0.05f), F32(0.01f), F32(1.5f),
     "External yaw measurement noise floor (rad)" },
+  { "EK3_EXT_DLY_MS", PARAM_TYPE_FLOAT, F32(0.0f), F32(-100.0f), F32(100.0f),
+    "External pose time correction (+ means older, ms)" },
+  { "EK3_EXT_JIT_MS", PARAM_TYPE_FLOAT, F32(2.0f), F32(0.0f), F32(20.0f),
+    "External pose timestamp jitter one-sigma (ms)" },
+  { "EK3_EXT_POS_X", PARAM_TYPE_FLOAT, F32(0.0f), F32(-10.0f), F32(10.0f),
+    "Marker-to-IMU translation X in marker frame (m)" },
+  { "EK3_EXT_POS_Y", PARAM_TYPE_FLOAT, F32(0.0f), F32(-10.0f), F32(10.0f),
+    "Marker-to-IMU translation Y in marker frame (m)" },
+  { "EK3_EXT_POS_Z", PARAM_TYPE_FLOAT, F32(0.0f), F32(-10.0f), F32(10.0f),
+    "Marker-to-IMU translation Z in marker frame (m)" },
+  { "EK3_EXT_ROLL", PARAM_TYPE_FLOAT, F32(0.0f), F32(-180.0f), F32(180.0f),
+    "Marker-to-IMU relative roll (deg)" },
+  { "EK3_EXT_PITCH", PARAM_TYPE_FLOAT, F32(0.0f), F32(-180.0f), F32(180.0f),
+    "Marker-to-IMU relative pitch (deg)" },
+  { "EK3_EXT_YAW", PARAM_TYPE_FLOAT, F32(0.0f), F32(-180.0f), F32(180.0f),
+    "Marker-to-IMU relative yaw (deg)" },
   /* Vertical bound, metres either side of where the filter aligned.
    *
    * A ground vehicle does not leave the ground, and saying so gives
@@ -632,6 +654,12 @@ static const struct param_def_s g_params[] =
     "Zero-velocity measurement noise (m/s)" },
   { "EK3_ZUPT_GATE", PARAM_TYPE_FLOAT, F32(5.0f), F32(1.0f), F32(100.0f),
     "Zero-velocity innovation gate (sigma)" },
+  { "EK3_ZUPT_GDEV", PARAM_TYPE_FLOAT, F32(0.25f), F32(0.01f), F32(2.0f),
+    "Max acceleration mean deviation from gravity (m/s^2)" },
+  { "EK3_ZUPT_AVAR", PARAM_TYPE_FLOAT, F32(0.10f), F32(0.0001f), F32(4.0f),
+    "Max summed acceleration variance for zero velocity" },
+  { "EK3_ZUPT_DW_MS", PARAM_TYPE_INT32, I32(150), I32(0), I32(2000),
+    "Stopped-wheel dwell before zero velocity (ms)" },
 
   { "EK3_TILT_MOVE", PARAM_TYPE_INT32, I32(1), I32(0), I32(1),
     "Fuse gravity as a tilt reference while moving" },
@@ -831,6 +859,8 @@ static const struct param_def_s g_params[] =
     "Log optical flow (MTF-02)" },
   { "LOG_DIST",   PARAM_TYPE_INT32, I32(0), I32(0), I32(1),
     "Log distance sensor" },
+  { "LOG_EKF",    PARAM_TYPE_INT32, I32(0), I32(0), I32(1),
+    "Log EKF inputs, horizon diagnostics and output" },
 
   /* ---- Calibration ------------------------------------------------------
    * Written by the calibration app. Gyro offsets are rad/s, accel offsets

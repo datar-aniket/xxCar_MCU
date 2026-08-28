@@ -41,9 +41,10 @@ int main(void)
   unsigned char frame[COMP_MAX_PAYLOAD + COMP_FRAME_OVERHEAD];
   struct comp_external_pose_s ext;
   struct comp_vehicle_state_s est;
+  struct comp_direct_control_s cmd;
   int n;
 
-  printf("%zu %zu\n", sizeof(ext), sizeof(est));
+  printf("%zu %zu %zu\n", sizeof(ext), sizeof(est), sizeof(cmd));
 
   memset(&ext, 0, sizeof(ext));
   ext.timestamp_us = 1234567890123ull;
@@ -80,6 +81,15 @@ int main(void)
                   sizeof(frame));
   dump(frame, n);
 
+  memset(&cmd, 0, sizeof(cmd));
+  cmd.timestamp_us = 1234567890123ull;
+  cmd.steering = -0.25f;
+  cmd.throttle = 12.5f;
+  cmd.throttle_type = COMP_THROTTLE_CURRENT;
+  n = comp_encode(COMP_MSG_DIRECT_CONTROL, &cmd, sizeof(cmd), frame,
+                  sizeof(frame));
+  dump(frame, n);
+
   return 0;
 }
 """
@@ -98,8 +108,11 @@ def main():
         out = subprocess.run([str(exe)], check=True, capture_output=True,
                              text=True).stdout.split()
 
-    c_ext_size, c_est_size = int(out[0]), int(out[1])
-    c_ext_frame, c_est_frame = bytes.fromhex(out[2]), bytes.fromhex(out[3])
+    c_ext_size, c_est_size, c_cmd_size = (int(out[0]), int(out[1]),
+                                          int(out[2]))
+    c_ext_frame = bytes.fromhex(out[3])
+    c_est_frame = bytes.fromhex(out[4])
+    c_cmd_frame = bytes.fromhex(out[5])
 
     assert c_ext_size == comp_link.EXTERNAL_POSE.size, (
         f"external_pose: C says {c_ext_size}, "
@@ -107,6 +120,9 @@ def main():
     assert c_est_size == comp_link.VEHICLE_STATE.size, (
         f"vehicle_state: C says {c_est_size}, "
         f"Python says {comp_link.VEHICLE_STATE.size}")
+    assert c_cmd_size == comp_link.DIRECT_CONTROL.size, (
+        f"direct_control: C says {c_cmd_size}, "
+        f"Python says {comp_link.DIRECT_CONTROL.size}")
 
     py_ext = comp_link.encode_external_pose(
         -12.5, 3.25, 1.5707963,
@@ -130,6 +146,14 @@ def main():
     assert py_est == c_est_frame, (
         f"VEHICLE_STATE bytes differ\n  C:  {c_est_frame.hex()}\n"
         f"  py: {py_est.hex()}")
+
+    # This one carries an actuator command, so a disagreement about field
+    # order or padding is a disagreement about which number is the throttle.
+    py_cmd = comp_link.encode_direct_control(
+        -0.25, 12.5, comp_link.THROTTLE_CURRENT, 1234567890123)
+    assert py_cmd == c_cmd_frame, (
+        f"DIRECT_CONTROL bytes differ\n  C:  {c_cmd_frame.hex()}\n"
+        f"  py: {py_cmd.hex()}")
 
     # And the Python parser must accept what C produced.
     parser = comp_link.Parser()

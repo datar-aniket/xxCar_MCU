@@ -17,6 +17,14 @@
 #define EKF_STATE_DIM             15
 #define EKF_COVARIANCE_INTERVAL    4
 
+/* Startup is an actual stillness observation, not a short settling delay.
+ * Ten seconds gives the mean gyro enough samples to initialise the residual
+ * bias (or the complete bias when no stored gyro calibration is enabled).
+ */
+
+#define EKF_ALIGN_TIME_S          10.0f
+#define EKF_ALIGN_MIN_SAMPLES     3000u
+
 /* Mirrors the ESTIMATOR_* bits in uorb_msgs.h. */
 
 #define EKF_SOLUTION_ATTITUDE       (1u << 0)
@@ -74,6 +82,7 @@ struct ekf_core_s
   float align_gyro_norm2_sum;
   float align_time_s;
   uint32_t align_samples;
+  bool gyro_bias_from_uncalibrated;
 
   float dynamics_accel_mean[3];
   float dynamics_gyro_mean[3];
@@ -82,6 +91,17 @@ struct ekf_core_s
   float low_dynamics_dwell_s;
   bool dynamics_seeded;
   bool low_dynamics;
+
+  /* A separate short-memory detector for wheel-stop zero velocity.  The
+   * general low-dynamics detector is intentionally slow and must not delay a
+   * ZUPT long enough for braking residuals to integrate into reverse speed.
+   */
+
+  float zupt_accel_mean[3];
+  float zupt_accel_variance[3];
+  float zupt_gyro_mean[3];
+  bool  zupt_dynamics_seeded;
+  bool  zupt_last_clipped;
 
   float covariance_delta_angle[3];
   float covariance_delta_velocity[3];
@@ -178,6 +198,21 @@ struct ekf_core_s
   float    accel_noise;
   float    gyro_bias_rw;
   float    accel_bias_rw;
+
+  /* Last strapdown acceleration audit, captured at the filter horizon.
+   *
+   * These are not another filter or a recomputation in the logger. They are
+   * recorded inside nominal_predict from the same packet-start attitude and
+   * bias values used by strapdown_step, so a ULog can show exactly where a
+   * stationary residual entered the velocity state.
+   */
+
+  float    last_specific_force[3];
+  float    last_corrected_force[3];
+  float    last_gravity_body[3];
+  float    last_residual_accel_body[3];
+  float    last_nav_accel[3];
+  uint64_t last_predict_timestamp;
 
   /* Wheel-speed zero-velocity aiding. The wheels not turning is the only
    * direct velocity measurement a car has that needs no calibration.
@@ -475,6 +510,7 @@ struct ekf_extnav_sample_s
   float    yaw;
   float    pos_sigma[2];    /* x, y */
   float    yaw_sigma;
+  float    time_sigma;      /* sample-time uncertainty, seconds */
   uint8_t  reset_counter;   /* the SOURCE's frame-reset generation */
   bool     valid;
 };
@@ -496,7 +532,8 @@ void ekf_core_set_extnav_config(FAR struct ekf_core_s *ekf,
  * reported, not defaults - the fused noise is the larger of the two. A
  * source claiming millimetre accuracy must not be able to talk the filter
  * into trusting it more than the operator configured. ArduPilot does the
- * same with posErr.
+ * same with posErr. time_sigma adds the equivalent velocity * time error to
+ * horizontal position variance while moving.
  */
 
 int ekf_core_fuse_extnav(FAR struct ekf_core_s *ekf,
@@ -552,6 +589,20 @@ void ekf_core_set_process_noise(FAR struct ekf_core_s *ekf, float gyro,
 
 int ekf_core_fuse_zero_velocity(FAR struct ekf_core_s *ekf, float noise,
                                 float gate);
+
+/* Independent permission for a wheel-derived zero-velocity update.
+ *
+ * Wheel ticks say that the motor/wheel stopped, not that the chassis stopped.
+ * This additionally requires the established low-dynamics state, an
+ * accelerometer mean close to gravity and bounded total acceleration
+ * variance.  The returned diagnostics use m/s^2 and (m/s^2)^2.
+ */
+
+bool ekf_core_zupt_stationary(FAR const struct ekf_core_s *ekf,
+                              float gravity_deviation_limit,
+                              float accel_variance_limit,
+                              FAR float *gravity_deviation,
+                              FAR float *accel_variance);
 
 /* Bound the vertical state to +/- limit_m of the alignment point. Zero
  * disables it, which is the behaviour of every filter that has no idea what
@@ -684,6 +735,7 @@ void ekf_core_output_predict(FAR const struct ekf_core_s *ekf,
                              FAR const struct ekf_imu_sample_s *const *samples,
                              uint16_t count,
                              FAR struct ekf_output_s *out);
+
 int ekf_core_process(FAR struct ekf_core_s *ekf,
                      FAR const struct ekf_imu_sample_s *sample);
 uint8_t ekf_core_solution_status(FAR const struct ekf_core_s *ekf);

@@ -23,8 +23,11 @@
 #include <uORB/uORB.h>
 
 #include "ekf3.h"
+#include "ekf_extnav_frame.h"
+#include "ekf_extnav_time.h"
 #include "../param/param.h"
 #include "../uorb_msgs/uorb_msgs.h"
+#include "../../boards/fmuv6c/src/fmuv6c.h"
 
 #define EKF3_PRIORITY          (SCHED_PRIORITY_DEFAULT + 22)
 #define EKF3_STACK             6144
@@ -39,6 +42,7 @@
 #define EKF3_BARO_MAX_AGE_US  500000ull
 #define EKF3_MAG_MAX_AGE_US   500000ull
 #define EKF3_EXT_MAX_AGE_US   500000ull
+#define EKF3_WHEEL_MAX_AGE_US 100000ull
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static volatile bool g_running;
@@ -67,7 +71,25 @@ static struct ekf_delay_s g_delay;
 static struct ekf_core_s g_mon_primary;
 static struct ekf_core_s g_mon_secondary;
 
-static uint64_t now_us(void)
+/* The EKF clock.
+ *
+ * Every timestamp that participates in propagation or fusion is in the
+ * shared TIM5 domain: IMU DRDY edges, FDCAN receive edges and synchronized
+ * companion measurements.  CLOCK_MONOTONIC has the same boot epoch but is a
+ * different, tick-quantized counter.  Comparing one against the other makes
+ * the fusion horizon move by their relative phase and rate error.
+ */
+
+static uint64_t ekf_now_us(void)
+{
+  return fmuv6c_imu_time_now();
+}
+
+/* Diagnostic/publication clock only.  It must never be compared with a
+ * timestamp_sample or used to decide the fusion horizon.
+ */
+
+static uint64_t monotonic_now_us(void)
 {
   struct timespec timestamp;
 
@@ -144,6 +166,186 @@ static void fill_output(FAR const struct ekf_core_s *core,
   output->instance = 0;
 }
 
+static void publish_diagnostics(
+  int publisher, FAR struct ekf3_status_s *status,
+  FAR const struct ekf_imu_sample_s *sample,
+  FAR const struct ekf_extnav_sample_s *extnav, int process_result,
+  uint32_t extnav_accept_before, uint32_t extnav_reject_before,
+  uint32_t zupt_accept_before, uint32_t zupt_reject_before,
+  uint32_t gravity_accept_before, uint32_t gravity_reject_before)
+{
+  FAR const struct ekf_core_s *core = &status->core;
+  struct estimator_diag_s message;
+  bool predicted = process_result == EKF_PROCESS_PREDICTED &&
+                   core->last_predict_timestamp == sample->timestamp_sample;
+  float norm_sq = 0.0f;
+  int axis;
+
+  if (publisher < 0)
+    {
+      return;
+    }
+
+  memset(&message, 0, sizeof(message));
+
+  /* The first timestamp deliberately uses the TIM5 sample domain rather than
+   * task publication time. LOG_RATE decimates using this field, and the
+   * diagnostic must retain one deterministic record per filter step even if
+   * task scheduling bunches two publications together.
+   */
+
+  message.timestamp = sample->timestamp_sample;
+  message.timestamp_sample = sample->timestamp_sample;
+
+  if (extnav != NULL)
+    {
+      message.extnav_timestamp = extnav->timestamp_sample;
+      message.extnav_measurement[0] = extnav->x;
+      message.extnav_measurement[1] = extnav->y;
+      message.extnav_measurement[2] = extnav->yaw;
+    }
+
+  for (axis = 0; axis < 3; axis++)
+    {
+      if (predicted)
+        {
+          message.specific_force[axis] = core->last_specific_force[axis];
+          message.corrected_force[axis] = core->last_corrected_force[axis];
+          message.gravity_body[axis] = core->last_gravity_body[axis];
+          message.residual_accel_body[axis] =
+            core->last_residual_accel_body[axis];
+          message.nav_accel[axis] = core->last_nav_accel[axis];
+        }
+      else
+        {
+          /* Alignment/rejected packets still remain visible in the ULog.
+           * Only the directly measured and bias-corrected quantities are
+           * meaningful before a strapdown prediction has run.
+           */
+
+          message.specific_force[axis] =
+            sample->delta_velocity[axis] / sample->delta_velocity_dt;
+          message.corrected_force[axis] =
+            message.specific_force[axis] - core->accel_bias[axis];
+        }
+
+      norm_sq += message.corrected_force[axis] *
+                 message.corrected_force[axis];
+    }
+
+  memcpy(message.quaternion, core->quaternion, sizeof(message.quaternion));
+  memcpy(message.velocity, core->velocity, sizeof(message.velocity));
+  memcpy(message.position, core->position, sizeof(message.position));
+  memcpy(message.gyro_bias, core->gyro_bias, sizeof(message.gyro_bias));
+  memcpy(message.accel_bias, core->accel_bias, sizeof(message.accel_bias));
+  memcpy(message.extnav_innov, core->last_extnav_innov,
+         sizeof(message.extnav_innov));
+  memcpy(message.extnav_nis, core->last_extnav_nis,
+         sizeof(message.extnav_nis));
+  memcpy(message.zupt_nis, core->last_zupt_nis,
+         sizeof(message.zupt_nis));
+
+  message.gravity_nis = core->last_gravity_nis;
+  message.accel_norm = sqrtf(norm_sq);
+  message.accel_variance = status->zupt_accel_variance;
+  message.gravity_deviation = status->zupt_gravity_deviation;
+  message.extnav_test_ratio = core->extnav_test_ratio;
+  message.wheel_speed_cps = status->last_wheel_cps;
+  message.extnav_accept_count = core->extnav_accept_count;
+  message.extnav_reject_count = core->extnav_reject_count;
+  message.zupt_accept_count = core->zupt_accept_count;
+  message.zupt_reject_count = core->zupt_reject_count;
+  message.gravity_accept_count = core->gravity_accept_count;
+  message.gravity_reject_count = core->gravity_reject_count;
+  message.reset_counter = core->reset_counter;
+  message.instance = sample->instance;
+
+  if (core->initialized)
+    {
+      message.flags |= EST_DIAG_INITIALIZED;
+    }
+
+  if (predicted)
+    {
+      message.flags |= EST_DIAG_PREDICTED;
+    }
+
+  if (core->low_dynamics)
+    {
+      message.flags |= EST_DIAG_LOW_DYNAMICS;
+    }
+
+  if (status->zupt_stopped)
+    {
+      message.flags |= EST_DIAG_WHEEL_STOPPED;
+    }
+
+  if (status->wheel_fresh)
+    {
+      message.flags |= EST_DIAG_WHEEL_FRESH;
+    }
+
+  if (status->zupt_imu_stationary)
+    {
+      message.flags |= EST_DIAG_ZUPT_IMU_OK;
+    }
+
+  if (core->extnav_healthy)
+    {
+      message.flags |= EST_DIAG_EXTNAV_HEALTHY;
+    }
+
+  if (ekf_core_position_aided(core))
+    {
+      message.flags |= EST_DIAG_POSITION_AIDED;
+    }
+
+  if (core->zupt_accept_count != zupt_accept_before)
+    {
+      message.flags |= EST_DIAG_ZUPT_ACCEPT;
+    }
+
+  if (core->zupt_reject_count != zupt_reject_before)
+    {
+      message.flags |= EST_DIAG_ZUPT_REJECT;
+    }
+
+  if (core->gravity_accept_count != gravity_accept_before)
+    {
+      message.flags |= EST_DIAG_GRAVITY_ACCEPT;
+    }
+
+  if (core->gravity_reject_count != gravity_reject_before)
+    {
+      message.flags |= EST_DIAG_GRAVITY_REJECT;
+    }
+
+  if (core->extnav_accept_count != extnav_accept_before)
+    {
+      message.flags |= EST_DIAG_EXTNAV_ACCEPT;
+    }
+
+  if (core->extnav_reject_count != extnav_reject_before)
+    {
+      message.flags |= EST_DIAG_EXTNAV_REJECT;
+    }
+
+  if (sample->clipping != 0)
+    {
+      message.flags |= EST_DIAG_CLIPPING;
+    }
+
+  if (process_result == EKF_PROCESS_REJECTED)
+    {
+      message.flags |= EST_DIAG_PROCESS_REJECTED;
+    }
+
+  if (estimator_diag_publish(publisher, &message) < 0)
+    {
+      status->publish_errors++;
+    }
+}
+
 /* Take exactly ONE fresh IMU packet into the ring. Returns false when there
  * is nothing left to read.
  *
@@ -164,7 +366,8 @@ static void fill_output(FAR const struct ekf_core_s *core,
  * cannot cost this iteration its publication.
  */
 
-static bool take_imu_sample(int sub, FAR struct ekf3_status_s *status)
+static bool take_imu_sample(int sub, FAR struct ekf3_status_s *status,
+                            FAR uint64_t *newest_sample_time)
 {
   int skipped = 0;
 
@@ -179,7 +382,7 @@ static bool take_imu_sample(int sub, FAR struct ekf3_status_s *status)
           return false;
         }
 
-      now = now_us();
+      now = ekf_now_us();
 
       if (now > message.timestamp_sample &&
           now - message.timestamp_sample > EKF3_MAX_INPUT_AGE_US)
@@ -190,6 +393,11 @@ static bool take_imu_sample(int sub, FAR struct ekf3_status_s *status)
 
       fill_core_sample(&message, &sample);
       ekf_delay_push_imu(&g_delay, &sample);
+
+      if (newest_sample_time != NULL)
+        {
+          *newest_sample_time = sample.timestamp_sample;
+        }
 
       /* The primary monitor sees exactly what the estimator sees, with no
        * aiding and no horizon. Sharing the IMU is the whole point: any
@@ -249,14 +457,36 @@ static void drain_extnav(int sub, FAR struct ekf3_status_s *status)
     {
       struct external_pose_s message;
       struct ekf_extnav_sample_s sample;
+      float marker_position[3];
+      float marker_rpy[3];
+      float body_position[3];
+      float body_rpy[3];
+      float body_covariance[6];
+      uint64_t receive_time;
+      uint64_t corrected_time;
       uint64_t now;
+      int64_t age_us = 0;
+      int time_result;
 
       if (orb_copy(ORB_ID(external_pose), sub, &message) < 0)
         {
           return;
         }
 
-      now = now_us();
+      now = ekf_now_us();
+
+      /* external_pose.timestamp is the TIM5 receive constraint captured at
+       * the final UART byte. Fall back to drain time only for another
+       * publisher that did not provide a usable receive timestamp.
+       */
+
+      receive_time = message.timestamp;
+
+      if (receive_time == 0 || receive_time > now ||
+          now - receive_time > EKF3_EXT_MAX_AGE_US)
+        {
+          receive_time = now;
+        }
 
       /* ZERO means "not timestamped": the source has no shared clock yet and
        * is saying so rather than inventing a time. Stamp it on arrival.
@@ -273,44 +503,105 @@ static void drain_extnav(int sub, FAR struct ekf3_status_s *status)
 
       if (message.timestamp_sample == 0)
         {
-          message.timestamp_sample = now;
+          message.timestamp_sample = receive_time;
           status->extnav_untimed++;
         }
 
-      /* The canary for a timesync that is not working. A clock grossly wrong
-       * would otherwise corrupt position silently, which is the worst
-       * failure available here.
+      /* Match ArduPilot's external-navigation timing protections without
+       * throwing away our stronger UTC/TIM5 synchronisation:
        *
-       * The two bounds do different jobs. The age bound is the queue's -
-       * past it the correction lands on the wrong part of the trajectory. A
-       * timestamp AHEAD of our own clock has no such excuse: it means the
-       * timesync is wrong, full stop.
+       *  - subtract the configured sensor delay;
+       *  - a small future or already-overtaken timestamp is clock jitter and
+       *    is clamped to the physical boundary;
+       *  - a larger error is rejected rather than fused against the wrong
+       *    trajectory point.
        */
 
-      else if (message.timestamp_sample > now + EKF3_EXT_MAX_AGE_US ||
-               (now > message.timestamp_sample &&
-                now - message.timestamp_sample > EKF3_EXT_MAX_AGE_US))
+      time_result = ekf_extnav_time_prepare(message.timestamp_sample,
+                                            receive_time,
+                                            status->core.last_timestamp_sample,
+                                            status->ext_delay_us,
+                                            status->ext_jitter_us,
+                                            &corrected_time, &age_us);
+
+      status->extnav_age_us = age_us;
+
+      if (status->extnav_age_samples == 0)
+        {
+          status->extnav_age_min_us = age_us;
+          status->extnav_age_max_us = age_us;
+        }
+      else
+        {
+          if (age_us < status->extnav_age_min_us)
+            {
+              status->extnav_age_min_us = age_us;
+            }
+
+          if (age_us > status->extnav_age_max_us)
+            {
+              status->extnav_age_max_us = age_us;
+            }
+        }
+
+      status->extnav_age_samples++;
+
+      if (time_result < 0)
         {
           status->extnav_bad_time++;
           continue;
         }
 
+      if (time_result > 0)
+        {
+          status->extnav_time_clamped++;
+        }
+
       memset(&sample, 0, sizeof(sample));
-      sample.timestamp_sample = message.timestamp_sample;
-      sample.x = message.x;
-      sample.y = message.y;
-      sample.yaw = message.yaw;
+      sample.timestamp_sample = corrected_time;
+      marker_position[0] = message.x;
+      marker_position[1] = message.y;
+      marker_position[2] = 0.0f;
+      marker_rpy[0] = 0.0f;
+      marker_rpy[1] = 0.0f;
+      marker_rpy[2] = message.yaw;
+
+      /* The companion reports the mocap marker origin. The EKF propagates
+       * the IMU/body origin. Apply T_map_marker * T_marker_body before the
+       * pose enters the delay queue, so both datum creation and innovations
+       * refer to the same physical point.
+       */
+
+      if (!ekf_extnav_apply_extrinsics(&status->ext_extrinsics,
+                                       marker_position, marker_rpy,
+                                       body_position, body_rpy))
+        {
+          status->extnav_bad_frame++;
+          continue;
+        }
+
+      sample.x = body_position[0];
+      sample.y = body_position[1];
+      sample.yaw = body_rpy[2];
 
       /* cov holds VARIANCES; the sample carries sigmas. Zero means the
        * source supplied no estimate, and the floor applies either way.
        */
 
-      sample.pos_sigma[0] = message.cov[0] > 0.0f ?
-                            sqrtf(message.cov[0]) : 0.0f;
-      sample.pos_sigma[1] = message.cov[3] > 0.0f ?
-                            sqrtf(message.cov[3]) : 0.0f;
-      sample.yaw_sigma = message.cov[5] > 0.0f ?
-                         sqrtf(message.cov[5]) : 0.0f;
+      if (!ekf_extnav_transform_planar_covariance(
+            &status->ext_extrinsics, message.yaw, message.cov,
+            body_covariance))
+        {
+          memset(body_covariance, 0, sizeof(body_covariance));
+        }
+
+      sample.pos_sigma[0] = body_covariance[0] > 0.0f ?
+                            sqrtf(body_covariance[0]) : 0.0f;
+      sample.pos_sigma[1] = body_covariance[3] > 0.0f ?
+                            sqrtf(body_covariance[3]) : 0.0f;
+      sample.yaw_sigma = body_covariance[5] > 0.0f ?
+                         sqrtf(body_covariance[5]) : 0.0f;
+      sample.time_sigma = (float)status->ext_jitter_us * 1.0e-6f;
       sample.reset_counter = message.reset_counter;
       sample.valid = (message.flags & EXTERNAL_POSE_VALID) != 0;
 
@@ -375,7 +666,7 @@ static void drain_monitor_imu(int sub, FAR struct ekf3_status_s *status)
           return;
         }
 
-      now = now_us();
+      now = ekf_now_us();
 
       if (now > message.timestamp_sample &&
           now - message.timestamp_sample > EKF3_MAX_INPUT_AGE_US)
@@ -499,6 +790,7 @@ static void monitor_compare(FAR struct ekf3_status_s *status,
 static void drain_wheel(int sub, FAR struct ekf3_status_s *status)
 {
   struct vesc_status_s wheel;
+  bool stopped;
 
   if (sub < 0 || !status->zupt_enabled)
     {
@@ -510,14 +802,30 @@ static void drain_wheel(int sub, FAR struct ekf3_status_s *status)
       return;
     }
 
+  stopped = fabsf(wheel.speed_cps) <= status->zupt_threshold_cps;
   status->wheel_available = true;
+  status->last_wheel_sample_us = wheel.timestamp_sample;
   status->last_wheel_cps = wheel.speed_cps;
-  status->zupt_stopped =
-    fabsf(wheel.speed_cps) <= status->zupt_threshold_cps;
+
+  if (stopped)
+    {
+      if (!status->zupt_stopped || status->zupt_stop_since_us == 0 ||
+          wheel.timestamp_sample < status->zupt_stop_since_us)
+        {
+          status->zupt_stop_since_us = wheel.timestamp_sample;
+        }
+    }
+  else
+    {
+      status->zupt_stop_since_us = 0;
+      status->zupt_dwell_complete = false;
+    }
+
+  status->zupt_stopped = stopped;
 }
 
 static void publish_output(int publisher, FAR struct ekf3_status_s *status,
-                           uint64_t now)
+                           uint64_t now, uint64_t publication_time)
 {
   FAR const struct ekf_imu_sample_s *replay[EKF_IMU_RING_SIZE];
   struct ekf_output_s output;
@@ -553,7 +861,7 @@ static void publish_output(int publisher, FAR struct ekf3_status_s *status,
       return;
     }
 
-  fill_output(&status->core, &output, now, &message);
+  fill_output(&status->core, &output, publication_time, &message);
 
   if (estimator_state_publish(publisher, &message) < 0)
     {
@@ -582,10 +890,15 @@ static int ekf3_daemon(int argc, FAR char *argv[])
   int mon_sub = -1;
   int wheel_sub = -1;
   int publisher = -1;
+  int diag_publisher = -1;
   int result = EXIT_FAILURE;
 
   memset(&status, 0, sizeof(status));
   ekf_core_init(&status.core);
+
+  status.clock_skew_start_us = (int64_t)ekf_now_us() -
+                               (int64_t)monotonic_now_us();
+  status.clock_skew_us = status.clock_skew_start_us;
 
   status.mon_enabled = param_i32("EKF_MON_EN") != 0;
   status.mon_act = param_i32("EKF_MON_ACT") != 0;
@@ -611,11 +924,13 @@ static int ekf3_daemon(int argc, FAR char *argv[])
 
   subscriber = orb_subscribe(ORB_ID(vehicle_imu));
   publisher = estimator_state_advertise();
+  diag_publisher = estimator_diag_advertise();
 
-  if (subscriber < 0 || publisher < 0)
+  if (subscriber < 0 || publisher < 0 || diag_publisher < 0)
     {
       syslog(LOG_ERR,
-             "[ekf3] vehicle_imu unavailable; start imu_delta first\n");
+             "[ekf3] IMU or estimator publisher unavailable; start "
+             "imu_delta first\n");
       goto out;
     }
 
@@ -636,6 +951,10 @@ static int ekf3_daemon(int argc, FAR char *argv[])
   status.zupt_threshold_cps = param_f32("EK3_ZUPT_CPS");
   status.zupt_noise = param_f32("EK3_ZUPT_NSE");
   status.zupt_gate = param_f32("EK3_ZUPT_GATE");
+  status.zupt_gravity_limit = param_f32("EK3_ZUPT_GDEV");
+  status.zupt_variance_limit = param_f32("EK3_ZUPT_AVAR");
+  status.zupt_dwell_us =
+    (uint32_t)param_i32("EK3_ZUPT_DW_MS") * 1000u;
 
   /* The wheels. Absent if the VESC link is not running, which costs the
    * zero-velocity aid and nothing else.
@@ -682,6 +1001,23 @@ static int ekf3_daemon(int argc, FAR char *argv[])
   status.ext_noise = param_f32("EK3_EXT_M_NSE");
   status.ext_gate = param_f32("EK3_EXT_I_GATE");
   status.ext_yaw_noise = param_f32("EK3_EXT_YAW_NSE");
+  status.ext_extrinsics.position[0] = param_f32("EK3_EXT_POS_X");
+  status.ext_extrinsics.position[1] = param_f32("EK3_EXT_POS_Y");
+  status.ext_extrinsics.position[2] = param_f32("EK3_EXT_POS_Z");
+  status.ext_extrinsics.rotation[0] =
+    param_f32("EK3_EXT_ROLL") * 0.017453292519943295f;
+  status.ext_extrinsics.rotation[1] =
+    param_f32("EK3_EXT_PITCH") * 0.017453292519943295f;
+  status.ext_extrinsics.rotation[2] =
+    param_f32("EK3_EXT_YAW") * 0.017453292519943295f;
+  {
+    float delay_us = param_f32("EK3_EXT_DLY_MS") * 1000.0f;
+    float jitter_us = param_f32("EK3_EXT_JIT_MS") * 1000.0f;
+
+    status.ext_delay_us = (int32_t)(delay_us >= 0.0f ?
+                                    delay_us + 0.5f : delay_us - 0.5f);
+    status.ext_jitter_us = (uint32_t)(jitter_us + 0.5f);
+  }
   status.ext_timeout_ms = (uint32_t)param_i32("EK3_EXT_TIMEOUT");
   ekf_core_set_extnav_config(&status.core, status.ext_timeout_ms * 1000u);
   status.height_limit = param_f32("EK3_HGT_LIM");
@@ -746,6 +1082,8 @@ static int ekf3_daemon(int argc, FAR char *argv[])
     {
       struct ekf_imu_sample_s sample;
       uint64_t now;
+      uint64_t publication_time;
+      uint64_t newest_sample_time;
       uint64_t horizon;
       int ready = poll(fds, nfds, 100);
 
@@ -779,7 +1117,7 @@ static int ekf3_daemon(int argc, FAR char *argv[])
        * time. With nothing new there is nothing to say.
        */
 
-      if (!take_imu_sample(subscriber, &status))
+      if (!take_imu_sample(subscriber, &status, &newest_sample_time))
         {
           status.imu_overflow = g_delay.imu_overflow_count;
           status.mag_overflow = g_delay.mag_overflow_count;
@@ -789,8 +1127,28 @@ static int ekf3_daemon(int argc, FAR char *argv[])
           continue;
         }
 
-      now = now_us();
-      horizon = ekf_delay_horizon_time(&g_delay, now);
+      now = ekf_now_us();
+      publication_time = monotonic_now_us();
+      status.clock_skew_us = (int64_t)now - (int64_t)publication_time;
+
+      /* Read the wheel topic before deciding whether this IMU packet may
+       * receive a zero-velocity update. A remembered zero from a dead VESC
+       * link is not a velocity measurement.
+       */
+
+      drain_wheel(wheel_sub, &status);
+      status.wheel_fresh = status.last_wheel_sample_us != 0 &&
+                           now >= status.last_wheel_sample_us &&
+                           now - status.last_wheel_sample_us <=
+                             EKF3_WHEEL_MAX_AGE_US;
+
+      /* The newest IMU sample, not task wake-up time, is the common time
+       * reference.  This is the time ArduPilot calls imuSampleTime: it makes
+       * the delayed horizon deterministic when the estimator task is
+       * scheduled late and removes wall-clock phase from fusion entirely.
+       */
+
+      horizon = ekf_delay_horizon_time(&g_delay, newest_sample_time);
 
       /* Advance the filter to the horizon. Aiding measurements are fused at
        * the point on the trajectory where they were actually taken, which is
@@ -804,10 +1162,33 @@ static int ekf3_daemon(int argc, FAR char *argv[])
           struct ekf_baro_sample_s baro;
           struct ekf_mag_sample_s mag;
           struct ekf_extnav_sample_s ext;
+          struct ekf_extnav_sample_s extnav_attempted;
+          uint64_t extnav_recall_time;
+          bool have_extnav_attempt = false;
+          uint32_t extnav_accept_before =
+            status.core.extnav_accept_count;
+          uint32_t extnav_reject_before =
+            status.core.extnav_reject_count;
+          uint32_t zupt_accept_before = status.core.zupt_accept_count;
+          uint32_t zupt_reject_before = status.core.zupt_reject_count;
+          uint32_t gravity_accept_before =
+            status.core.gravity_accept_count;
+          uint32_t gravity_reject_before =
+            status.core.gravity_reject_count;
+          int process_result;
 
-          if (ekf_core_process(&status.core, &sample) ==
-              EKF_PROCESS_REJECTED)
+          process_result = ekf_core_process(&status.core, &sample);
+
+          if (process_result == EKF_PROCESS_REJECTED)
             {
+              publish_diagnostics(diag_publisher, &status, &sample,
+                                  NULL, process_result,
+                                  extnav_accept_before,
+                                  extnav_reject_before,
+                                  zupt_accept_before,
+                                  zupt_reject_before,
+                                  gravity_accept_before,
+                                  gravity_reject_before);
               continue;
             }
 
@@ -827,11 +1208,30 @@ static int ekf3_daemon(int argc, FAR char *argv[])
            * next second of accelerometer error.
            */
 
+          status.zupt_imu_stationary =
+            ekf_core_zupt_stationary(&status.core,
+                                     status.zupt_gravity_limit,
+                                     status.zupt_variance_limit,
+                                     &status.zupt_gravity_deviation,
+                                     &status.zupt_accel_variance);
+
+          status.zupt_dwell_complete =
+            status.zupt_stopped && status.zupt_stop_since_us != 0 &&
+            sample.timestamp_sample >= status.zupt_stop_since_us &&
+            sample.timestamp_sample - status.zupt_stop_since_us >=
+              status.zupt_dwell_us;
+
           if (status.zupt_enabled && status.zupt_stopped &&
-              status.wheel_available)
+              status.wheel_fresh && status.zupt_dwell_complete &&
+              status.zupt_imu_stationary)
             {
               ekf_core_fuse_zero_velocity(&status.core, status.zupt_noise,
                                           status.zupt_gate);
+            }
+          else if (status.zupt_enabled && status.zupt_stopped &&
+                   status.wheel_fresh && status.core.initialized)
+            {
+              status.zupt_motion_block_count++;
             }
 
           while (ekf_delay_next_baro(&g_delay, sample.timestamp_sample,
@@ -872,7 +1272,18 @@ static int ekf3_daemon(int argc, FAR char *argv[])
                 }
             }
 
-          while (ekf_delay_next_extnav(&g_delay, sample.timestamp_sample,
+          /* External pose is fused on the nearest IMU state.  The delayed
+           * trajectory is discrete (400 Hz here), so recalling through half
+           * an update interval is equivalent to ArduPilot subtracting half
+           * localFilterTimeStep_ms from each external-nav timestamp.  It
+           * halves the worst quantisation error without altering the source
+           * timestamp itself.
+           */
+
+          extnav_recall_time = sample.timestamp_sample +
+            (uint64_t)(sample.delta_angle_dt * 500000.0f);
+
+          while (ekf_delay_next_extnav(&g_delay, extnav_recall_time,
                                        EKF3_EXT_MAX_AGE_US, &ext))
             {
               bool want_position =
@@ -881,6 +1292,8 @@ static int ekf3_daemon(int argc, FAR char *argv[])
 
               if (want_position || want_yaw)
                 {
+                  extnav_attempted = ext;
+                  have_extnav_attempt = true;
                   ekf_core_fuse_extnav(&status.core, &ext,
                                        status.ext_noise, status.ext_gate,
                                        status.ext_yaw_noise,
@@ -888,6 +1301,16 @@ static int ekf3_daemon(int argc, FAR char *argv[])
                                        want_position, want_yaw);
                 }
             }
+
+          publish_diagnostics(diag_publisher, &status, &sample,
+                              have_extnav_attempt ? &extnav_attempted : NULL,
+                              process_result,
+                              extnav_accept_before,
+                              extnav_reject_before,
+                              zupt_accept_before,
+                              zupt_reject_before,
+                              gravity_accept_before,
+                              gravity_reject_before);
         }
 
       /* Publish once per PACKET, not once per sample the horizon released.
@@ -905,13 +1328,13 @@ static int ekf3_daemon(int argc, FAR char *argv[])
        * iteration.
        */
 
-      drain_wheel(wheel_sub, &status);
       drain_monitor_imu(mon_sub, &status);
-      publish_output(publisher, &status, now);
+      publish_output(publisher, &status, now, publication_time);
 
       status.imu_overflow = g_delay.imu_overflow_count;
       status.mag_overflow = g_delay.mag_overflow_count;
       status.baro_overflow = g_delay.baro_overflow_count;
+      status.extnav_overflow = g_delay.extnav_overflow_count;
       status_publish(&status);
     }
 
@@ -954,6 +1377,11 @@ out:
   if (publisher >= 0)
     {
       close(publisher);
+    }
+
+  if (diag_publisher >= 0)
+    {
+      close(diag_publisher);
     }
 
   g_running = false;

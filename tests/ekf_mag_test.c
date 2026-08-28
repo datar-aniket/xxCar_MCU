@@ -240,7 +240,7 @@ static void align_with_mag(FAR struct ekf_core_s *ekf, float yaw)
   level_field(yaw, field);
   ekf_core_init(ekf);
 
-  for (i = 0; i < 500 && !ekf->initialized; i++)
+  for (i = 0; i < 4200 && !ekf->initialized; i++)
     {
       memset(&s, 0, sizeof(s));
       t += TEST_DT_US;
@@ -289,7 +289,7 @@ static void test_alignment_without_mag_stays_relative(void)
 
   ekf_core_init(&ekf);
 
-  for (i = 0; i < 500 && !ekf.initialized; i++)
+  for (i = 0; i < 4200 && !ekf.initialized; i++)
     {
       memset(&s, 0, sizeof(s));
       t += TEST_DT_US;
@@ -326,7 +326,7 @@ static void test_fusion_refused_without_datum(void)
 
   ekf_core_init(&ekf);
 
-  for (i = 0; i < 500 && !ekf.initialized; i++)
+  for (i = 0; i < 4200 && !ekf.initialized; i++)
     {
       memset(&s, 0, sizeof(s));
       t += TEST_DT_US;

@@ -97,9 +97,11 @@
 
 #define LOG_PART_BYTES  (100u * 1024u * 1024u)
 
-/* Largest record we serialise (rc_in, 56 bytes). */
+/* Largest record we serialise (estimator_diag, 248 bytes including trailing
+ * C padding; 241 meaningful bytes are written).
+ */
 
-#define LOG_RECMAX    64
+#define LOG_RECMAX    256
 #define LOG_DRAIN_MAX 1024
 #define LOG_READ_BATCH 32
 
@@ -143,6 +145,7 @@ struct log_sub_s
   FAR const struct orb_metadata *meta;
   int      fd;
   uint16_t msg_id;
+  uint32_t min_interval_us; /* zero for lossless EKF/event streams */
   uint64_t next_us;   /* next LOG_RATE sample-time boundary */
 };
 
@@ -184,6 +187,48 @@ g_formats[] =
     "uint64_t timestamp;float current_distance;float min_distance;"
     "float max_distance;uint8_t type;uint8_t orientation;uint8_t covariance;"
     "uint8_t signal_quality;" },
+  { "vehicle_imu",
+    "uint64_t timestamp;uint64_t timestamp_sample;"
+    "uint64_t timestamp_first;float[3] delta_angle;"
+    "float[3] delta_velocity;float delta_angle_dt;"
+    "float delta_velocity_dt;uint16_t samples;uint16_t reset_counter;"
+    "uint8_t instance;uint8_t clipping;uint8_t accel_calibrated;"
+    "uint8_t gyro_calibrated;" },
+  { "estimator_state",
+    "uint64_t timestamp;uint64_t timestamp_sample;float[4] quaternion;"
+    "float[3] velocity;float[3] position;float[3] gyro_bias;"
+    "float[3] accel_bias;float[3] angle_variance;"
+    "float[3] velocity_variance;float[3] position_variance;"
+    "uint32_t predict_count;uint32_t covariance_count;"
+    "uint16_t reset_counter;uint8_t solution_status;uint8_t instance;" },
+  { "external_pose",
+    "uint64_t timestamp;uint64_t timestamp_sample;float x;float y;float yaw;"
+    "float[6] cov;uint8_t flags;uint8_t reset_counter;" },
+  { "vehicle_accel",
+    "uint64_t timestamp;uint64_t timestamp_sample;float x;float y;float z;"
+    "uint8_t instance;uint8_t calibrated;" },
+  { "vehicle_state_tx",
+    "uint64_t timestamp;uint64_t timestamp_sample;"
+    "uint64_t accel_timestamp_sample;uint64_t wire_timestamp_us;"
+    "float[3] position;float[4] quaternion;float[3] velocity;"
+    "float[3] angular_velocity;float side_slip_rad;float[3] accel;"
+    "float wheel_torque_nm;float steering_angle;float motor_speed_ms;"
+    "uint8_t solution_status;uint8_t reset_counter;uint8_t source_valid;" },
+  { "estimator_diag",
+    "uint64_t timestamp;uint64_t timestamp_sample;"
+    "uint64_t extnav_timestamp;float[3] specific_force;"
+    "float[3] corrected_force;float[3] gravity_body;"
+    "float[3] residual_accel_body;float[3] nav_accel;"
+    "float[4] quaternion;float[3] velocity;float[3] position;"
+    "float[3] gyro_bias;float[3] accel_bias;float[2] extnav_innov;"
+    "float[2] extnav_nis;float[3] extnav_measurement;float[3] zupt_nis;"
+    "float gravity_nis;float accel_norm;float accel_variance;"
+    "float gravity_deviation;float extnav_test_ratio;"
+    "float wheel_speed_cps;uint32_t extnav_accept_count;"
+    "uint32_t extnav_reject_count;uint32_t zupt_accept_count;"
+    "uint32_t zupt_reject_count;uint32_t gravity_accept_count;"
+    "uint32_t gravity_reject_count;uint16_t reset_counter;uint16_t flags;"
+    "uint8_t instance;" },
 };
 
 #define NFORMATS ((int)(sizeof(g_formats) / sizeof(g_formats[0])))
@@ -211,6 +256,12 @@ static const struct log_topic_s g_topics[] =
   { NULL,            ORB_ID(rc_in),              0, "rc_input",        0, 53, "LOG_RC"   },
   { NULL,            ORB_ID(optical_flow),       0, "optical_flow",    0, 44, "LOG_FLOW" },
   { NULL,            ORB_ID(distance_sensor),    0, "distance_sensor", 0, 24, "LOG_DIST" },
+  { NULL,            ORB_ID(vehicle_imu),        0, "vehicle_imu",     0, 64, "LOG_EKF"  },
+  { NULL,            ORB_ID(estimator_state),    0, "estimator_state", 0, 128,"LOG_EKF"  },
+  { NULL,            ORB_ID(external_pose),      0, "external_pose",   0, 54, "LOG_EKF"  },
+  { NULL,            ORB_ID(vehicle_accel),      0, "vehicle_accel",   0, 30, "LOG_EKF"  },
+  { NULL,            ORB_ID(vehicle_state_tx),   0, "vehicle_state_tx",0, 115,"LOG_EKF"  },
+  { NULL,            ORB_ID(estimator_diag),     0, "estimator_diag",  0, 241,"LOG_EKF"  },
 };
 
 #define NTOPICS ((int)(sizeof(g_topics) / sizeof(g_topics[0])))
@@ -649,6 +700,15 @@ static int log_daemon(int argc, FAR char *argv[])
       subs[nsubs].meta    = meta;
       subs[nsubs].fd      = fd;
       subs[nsubs].msg_id  = (uint16_t)nsubs;
+      /* LOG_RATE is useful for the 2 kHz raw sensors, but decimating an EKF
+       * delta packet or a fusion event makes propagation impossible to replay
+       * and can hide the one innovation that caused a jump. LOG_EKF topics
+       * are therefore always lossless; `log ekf 400` caps only faster raw
+       * streams while retaining every native estimator record.
+       */
+
+      subs[nsubs].min_interval_us =
+        strcmp(t->param, "LOG_EKF") == 0 ? 0 : min_interval;
       subs[nsubs].next_us = 0;
       nsubs++;
     }
@@ -656,7 +716,7 @@ static int log_daemon(int argc, FAR char *argv[])
   if (nsubs == 0)
     {
       syslog(LOG_WARNING,
-             "logger: nothing selected (set LOG_IMU0 / LOG_MAG / ...)\n");
+             "logger: nothing selected (set LOG_IMU0 / LOG_EKF / ...)\n");
       g_running = false;
       return EXIT_FAILURE;
     }
@@ -763,7 +823,7 @@ static int log_daemon(int argc, FAR char *argv[])
                        * time, not loop-wakeup time.
                        */
 
-                      if (min_interval > 0)
+                      if (subs[i].min_interval_us > 0)
                         {
                           uint64_t ts;
 
@@ -774,7 +834,8 @@ static int log_daemon(int argc, FAR char *argv[])
                            * phase error.
                            */
 
-                          if (!log_sample_due(ts, min_interval,
+                          if (!log_sample_due(ts,
+                                              subs[i].min_interval_us,
                                               &subs[i].next_us))
                             {
                               continue;

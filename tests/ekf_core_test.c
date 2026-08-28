@@ -98,7 +98,7 @@ static void initialize_tilted(struct ekf_core_s *ekf, uint64_t *timestamp,
 
   rest_accel(roll, pitch, accel);
 
-  for (count = 0; count < 450 && !ekf->initialized; count++)
+  for (count = 0; count < 4200 && !ekf->initialized; count++)
     {
       *timestamp += TEST_DT_US;
       make_sample(&sample, *timestamp, accel, gyro_bias);
@@ -108,7 +108,154 @@ static void initialize_tilted(struct ekf_core_s *ekf, uint64_t *timestamp,
 
   assert(result == EKF_PROCESS_INITIALIZED);
   assert(ekf->initialized);
-  assert(ekf->align_samples >= 400);
+  assert(ekf->align_time_s >= EKF_ALIGN_TIME_S);
+  assert(ekf->align_samples >= 4000);
+}
+
+static void test_startup_estimates_uncalibrated_gyro_bias(void)
+{
+  struct ekf_core_s ekf;
+  struct ekf_imu_sample_s sample;
+  const float accel[3] = {0.0f, 0.0f, TEST_GRAVITY};
+  const float gyro_bias[3] = {0.024f, -0.015f, 0.009f};
+  uint64_t timestamp = 1000000ull;
+  int count;
+
+  ekf_core_init(&ekf);
+
+  for (count = 0; count < 3999; count++)
+    {
+      timestamp += TEST_DT_US;
+      make_sample(&sample, timestamp, accel, gyro_bias);
+      sample.gyro_calibrated = false;
+      assert(ekf_core_process(&ekf, &sample) == EKF_PROCESS_ALIGNING);
+    }
+
+  assert(!ekf.initialized);
+
+  while (!ekf.initialized && count++ < 4200)
+    {
+      timestamp += TEST_DT_US;
+      make_sample(&sample, timestamp, accel, gyro_bias);
+      sample.gyro_calibrated = false;
+      assert(ekf_core_process(&ekf, &sample) >= EKF_PROCESS_ALIGNING);
+    }
+
+  assert(ekf.initialized);
+  assert(ekf.gyro_bias_from_uncalibrated);
+  assert_near(ekf.gyro_bias[0], gyro_bias[0], 1.0e-5f);
+  assert_near(ekf.gyro_bias[1], gyro_bias[1], 1.0e-5f);
+  assert_near(ekf.gyro_bias[2], gyro_bias[2], 1.0e-5f);
+}
+
+static void test_startup_requires_ten_continuous_stationary_seconds(void)
+{
+  struct ekf_core_s ekf;
+  struct ekf_imu_sample_s sample;
+  const float accel[3] = {0.0f, 0.0f, TEST_GRAVITY};
+  const float zero_gyro[3] = {0.0f, 0.0f, 0.0f};
+  const float moving_gyro[3] = {0.5f, 0.0f, 0.0f};
+  uint64_t timestamp = 1000000ull;
+  int count;
+
+  ekf_core_init(&ekf);
+
+  for (count = 0; count < 2000; count++)
+    {
+      timestamp += TEST_DT_US;
+      make_sample(&sample, timestamp, accel, zero_gyro);
+      assert(ekf_core_process(&ekf, &sample) == EKF_PROCESS_ALIGNING);
+    }
+
+  timestamp += TEST_DT_US;
+  make_sample(&sample, timestamp, accel, moving_gyro);
+  assert(ekf_core_process(&ekf, &sample) == EKF_PROCESS_ALIGNING);
+  assert(ekf.align_samples == 0);
+  assert(ekf.alignment_restart_count == 1);
+
+  initialize_tilted(&ekf, &timestamp, 0.0f, 0.0f, zero_gyro);
+  assert(ekf.initialized);
+}
+
+static void test_zupt_requires_stationary_imu(void)
+{
+  struct ekf_core_s ekf;
+  const float zero_gyro[3] = {0.0f, 0.0f, 0.0f};
+  uint64_t timestamp = 1000000ull;
+  float gravity_deviation;
+  float accel_variance;
+
+  ekf_core_init(&ekf);
+  initialize_tilted(&ekf, &timestamp, 0.0f, 0.0f, zero_gyro);
+
+  assert(ekf_core_zupt_stationary(&ekf, 0.25f, 0.10f,
+                                  &gravity_deviation, &accel_variance));
+  assert(gravity_deviation < 1.0e-4f);
+  assert(accel_variance < 1.0e-4f);
+
+  ekf.zupt_accel_mean[0] = 1.0f;
+  assert(!ekf_core_zupt_stationary(&ekf, 0.02f, 0.10f, NULL, NULL));
+
+  ekf.zupt_accel_mean[0] = 0.0f;
+  ekf.zupt_accel_variance[0] = 0.11f;
+  assert(!ekf_core_zupt_stationary(&ekf, 0.25f, 0.10f, NULL, NULL));
+
+  ekf.zupt_accel_variance[0] = 0.0f;
+  ekf.low_dynamics = false;
+  assert(ekf_core_zupt_stationary(&ekf, 0.25f, 0.10f, NULL, NULL));
+
+  ekf.zupt_gyro_mean[2] = 0.10f;
+  assert(!ekf_core_zupt_stationary(&ekf, 0.25f, 0.10f, NULL, NULL));
+  ekf.zupt_gyro_mean[2] = 0.0f;
+  ekf.zupt_last_clipped = true;
+  assert(!ekf_core_zupt_stationary(&ekf, 0.25f, 0.10f, NULL, NULL));
+}
+
+/* Braking history must leave the wheel-stop detector in hundreds of
+ * milliseconds, not the 1.1-1.5 seconds measured with the general
+ * low-dynamics EWMA and dwell.  The general detector deliberately remains
+ * false here: ZUPT eligibility is independent of it.
+ */
+
+static void test_zupt_short_window_recovers_after_braking(void)
+{
+  struct ekf_core_s ekf;
+  struct ekf_imu_sample_s sample;
+  const float zero_gyro[3] = {0.0f, 0.0f, 0.0f};
+  const float braking[3] = {2.0f, 0.0f, TEST_GRAVITY};
+  const float rest[3] = {0.0f, 0.0f, TEST_GRAVITY};
+  uint64_t timestamp = 1000000ull;
+  unsigned i;
+
+  ekf_core_init(&ekf);
+  initialize_tilted(&ekf, &timestamp, 0.0f, 0.0f, zero_gyro);
+
+  for (i = 0; i < 40; i++)
+    {
+      timestamp += TEST_DT_US;
+      make_sample(&sample, timestamp, braking, zero_gyro);
+      assert(ekf_core_process(&ekf, &sample) >= EKF_PROCESS_PREDICTED);
+    }
+
+  assert(!ekf_core_zupt_stationary(&ekf, 0.25f, 0.10f, NULL, NULL));
+
+  /* Model the general detector having rejected the stop on independent
+   * position/linear-acceleration evidence. Its 0.5 s re-entry dwell must not
+   * become the ZUPT's dwell as well.
+   */
+
+  ekf.low_dynamics = false;
+  ekf.low_dynamics_dwell_s = 0.0f;
+
+  for (i = 0; i < 100; i++)
+    {
+      timestamp += TEST_DT_US;
+      make_sample(&sample, timestamp, rest, zero_gyro);
+      assert(ekf_core_process(&ekf, &sample) >= EKF_PROCESS_PREDICTED);
+    }
+
+  assert(!ekf.low_dynamics);
+  assert(ekf_core_zupt_stationary(&ekf, 0.25f, 0.10f, NULL, NULL));
 }
 
 static void test_initialization_and_static_prediction(void)
@@ -174,6 +321,41 @@ static void test_initialization_and_static_prediction(void)
     }
 
   assert_covariance_positive_definite(&ekf);
+}
+
+static void test_acceleration_audit_matches_strapdown(void)
+{
+  const float zero_gyro[3] = {0.0f, 0.0f, 0.0f};
+  const float measured[3] = {0.13f, -0.16f, TEST_GRAVITY + 0.02f};
+  struct ekf_imu_sample_s sample;
+  struct ekf_core_s ekf;
+  uint64_t timestamp = 1000000ull;
+
+  ekf_core_init(&ekf);
+  initialize_tilted(&ekf, &timestamp, 0.0f, 0.0f, zero_gyro);
+  ekf.accel_bias[0] = 0.10f;
+  ekf.accel_bias[1] = -0.20f;
+  ekf.accel_bias[2] = 0.05f;
+
+  timestamp += TEST_DT_US;
+  make_sample(&sample, timestamp, measured, zero_gyro);
+  assert(ekf_core_process(&ekf, &sample) == EKF_PROCESS_PREDICTED);
+
+  assert(ekf.last_predict_timestamp == timestamp);
+  assert_near(ekf.last_specific_force[0], 0.13f, 1.0e-5f);
+  assert_near(ekf.last_corrected_force[0], 0.03f, 1.0e-5f);
+  assert_near(ekf.last_corrected_force[1], 0.04f, 1.0e-5f);
+  assert_near(ekf.last_corrected_force[2],
+              TEST_GRAVITY - 0.03f, 1.0e-5f);
+  assert_near(ekf.last_gravity_body[0], 0.0f, 1.0e-5f);
+  assert_near(ekf.last_gravity_body[1], 0.0f, 1.0e-5f);
+  assert_near(ekf.last_gravity_body[2], TEST_GRAVITY, 1.0e-5f);
+  assert_near(ekf.last_residual_accel_body[0], 0.03f, 1.0e-5f);
+  assert_near(ekf.last_residual_accel_body[1], 0.04f, 1.0e-5f);
+  assert_near(ekf.last_residual_accel_body[2], -0.03f, 1.0e-5f);
+  assert_near(ekf.last_nav_accel[0], 0.03f, 2.0e-5f);
+  assert_near(ekf.last_nav_accel[1], 0.04f, 2.0e-5f);
+  assert_near(ekf.last_nav_accel[2], -0.03f, 2.0e-5f);
 }
 
 static void test_yaw_prediction(void)
@@ -419,6 +601,20 @@ static void test_fault_resets(void)
   sample.accel_calibrated = false;
   assert(ekf_core_process(&ekf, &sample) == EKF_PROCESS_REJECTED);
   assert(ekf.uncalibrated_count == 1);
+}
+
+static void test_secondary_imu_instance_is_valid(void)
+{
+  struct ekf_core_s ekf;
+  struct ekf_imu_sample_s sample;
+  const float zero_gyro[3] = {0.0f, 0.0f, 0.0f};
+  const float accel[3] = {0.0f, 0.0f, TEST_GRAVITY};
+
+  ekf_core_init(&ekf);
+  make_sample(&sample, 1000000ull, accel, zero_gyro);
+  sample.instance = 1;
+  assert(ekf_core_process(&ekf, &sample) == EKF_PROCESS_ALIGNING);
+  assert(ekf.align_samples == 1);
 }
 
 /* The scalar update must agree exactly with the 3-D update on a measurement
@@ -836,6 +1032,21 @@ static void test_extnav_honours_a_worse_reported_sigma(void)
   assert(ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f,
                               true, false) == 1);
   assert_near(ekf.last_extnav_noise, 2.0f, 1.0e-6f);
+}
+
+static void test_extnav_timestamp_jitter_becomes_motion_noise(void)
+{
+  struct ekf_core_s ekf;
+  uint64_t timestamp;
+  struct ekf_extnav_sample_s s = extnav_at(0.0f, 0.0f, 0.0f);
+
+  extnav_align(&ekf, &timestamp);
+  ekf.velocity[0] = 10.0f;
+  s.time_sigma = 0.002f;
+
+  assert(ekf_core_fuse_extnav(&ekf, &s, 0.01f, 5.0f, 0.05f, 5.0f,
+                              true, false) == -2);
+  assert_near(ekf.last_extnav_noise, hypotf(0.01f, 0.02f), 1.0e-6f);
 }
 
 static void test_extnav_refuses_an_invalid_pose(void)
@@ -2324,13 +2535,19 @@ static void test_extnav_datum_clears_on_restart(void)
 
 int main(void)
 {
+  test_startup_estimates_uncalibrated_gyro_bias();
+  test_startup_requires_ten_continuous_stationary_seconds();
+  test_zupt_requires_stationary_imu();
+  test_zupt_short_window_recovers_after_braking();
   test_initialization_and_static_prediction();
+  test_acceleration_audit_matches_strapdown();
   test_yaw_prediction();
   test_sculling_delta_uses_packet_start_attitude();
   test_low_dynamics_updates();
   test_covariance_attitude_velocity_sign();
   test_gravity_preserves_yaw_gauge();
   test_fault_resets();
+  test_secondary_imu_instance_is_valid();
   test_update_1d_matches_3d();
   test_update_1d_gate_rejects_cleanly();
   test_update_1d_reduces_variance();
@@ -2342,6 +2559,7 @@ int main(void)
   test_moving_extnav_does_not_corrupt_tilt();
   test_extnav_noise_floor_wins();
   test_extnav_honours_a_worse_reported_sigma();
+  test_extnav_timestamp_jitter_becomes_motion_noise();
   test_extnav_refuses_an_invalid_pose();
   test_extnav_disagreement_never_redatums();
   test_extnav_dropout_does_redatum();

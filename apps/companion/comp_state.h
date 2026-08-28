@@ -38,6 +38,7 @@ struct comp_state_inputs_s
   float    position[3];       /* local ENU, m */
   float    quaternion[4];     /* w x y z, body FLU to local ENU */
   float    velocity_enu[3];   /* m/s, ENU */
+  float    accel_bias[3];     /* body m/s^2, EKF calibration residual */
   uint8_t  solution_status;
   uint8_t  reset_counter;
 

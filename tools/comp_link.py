@@ -35,9 +35,22 @@ MSG_TIMESYNC_REQ = 3
 MSG_TIMESYNC_REP = 4
 MSG_TIMESYNC_START = 5
 MSG_TIMESYNC_END = 6
+MSG_DIRECT_CONTROL = 7
 MSG_VEHICLE_STATE = 16
 
 POSE_FLAG_VALID = 1 << 0
+
+# Mirrors ACTUATOR_MODE_* on the board. Getting these the wrong way round
+# sends "20 amps" as "duty 20", which the board clamps to full throttle.
+THROTTLE_DUTY = 0
+THROTTLE_CURRENT = 1
+
+# What the FORMAT can mean, not what the vehicle will do: VESC_DUTY_MAX and
+# VESC_CUR_MAX still apply on the board, and are lower. Anything outside these
+# is rejected there rather than clamped.
+DIRECT_STEER_MAX = 1.0
+DIRECT_DUTY_MAX = 1.0
+DIRECT_CURRENT_MAX = 50.0
 
 # struct comp_external_pose_s - 48 bytes
 EXTERNAL_POSE = struct.Struct("<Q3f6fBB2x")
@@ -60,6 +73,11 @@ SRC_VESC = 1 << 3
 assert EXTERNAL_POSE.size == 48, EXTERNAL_POSE.size
 assert VEHICLE_STATE.size == 96, VEHICLE_STATE.size
 
+# struct comp_direct_control_s - 24 bytes
+DIRECT_CONTROL = struct.Struct("<QffB7x")
+
+assert DIRECT_CONTROL.size == 24, DIRECT_CONTROL.size
+
 # struct comp_timesync_req_s / _rep_s
 TIMESYNC_REQ = struct.Struct("<Q")
 TIMESYNC_REP = struct.Struct("<QQQ")
@@ -78,6 +96,7 @@ PAYLOAD_LEN = {
     MSG_TIMESYNC_REP: TIMESYNC_REP.size,
     MSG_TIMESYNC_START: TIMESYNC_START.size,
     MSG_TIMESYNC_END: TIMESYNC_END.size,
+    MSG_DIRECT_CONTROL: DIRECT_CONTROL.size,
 }
 
 _CRC_TAB = (0x0000, 0x1021, 0x2042, 0x3063, 0x4084, 0x50A5, 0x60C6, 0x70E7,
@@ -121,6 +140,41 @@ def encode_external_pose(x, y, yaw, cov=None, valid=True, reset_counter=0,
                               POSE_FLAG_VALID if valid else 0,
                               int(reset_counter) & 0xFF)
     return encode(MSG_EXTERNAL_POSE, body)
+
+
+
+def encode_direct_control(steering, throttle, throttle_type, timestamp_us):
+    """Frame a DIRECT_CONTROL.
+
+    timestamp_us is UTC microseconds and is NOT optional, unlike the pose
+    message where zero means "stamp it on arrival". The board rejects a
+    command it cannot age: an actuator command whose age is unknown is the one
+    thing this link must not act on. Send `int(time.time() * 1e6)` once the
+    timesync has run.
+
+    Range errors are rejected by the board rather than clamped, so they are
+    raised here too - finding out on the bench that half the commands were
+    silently dropped is worse than a traceback.
+    """
+    if throttle_type not in (THROTTLE_DUTY, THROTTLE_CURRENT):
+        raise ValueError(f"throttle_type {throttle_type} is not 0 or 1")
+
+    limit = (DIRECT_CURRENT_MAX if throttle_type == THROTTLE_CURRENT
+             else DIRECT_DUTY_MAX)
+
+    if not abs(float(throttle)) <= limit:
+        raise ValueError(f"throttle {throttle} outside +/-{limit} for this "
+                         f"mode")
+
+    if not abs(float(steering)) <= DIRECT_STEER_MAX:
+        raise ValueError(f"steering {steering} outside +/-{DIRECT_STEER_MAX}")
+
+    if int(timestamp_us) <= 0:
+        raise ValueError("direct_control needs a real UTC timestamp")
+
+    body = DIRECT_CONTROL.pack(int(timestamp_us), float(steering),
+                               float(throttle), int(throttle_type))
+    return encode(MSG_DIRECT_CONTROL, body)
 
 
 def host_now_us() -> int:

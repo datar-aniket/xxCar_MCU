@@ -66,6 +66,20 @@ Only two of the nine are wired to fusion:
 velocity is unaided: it integrates from accelerometers between position
 updates. Worth knowing before reading a velocity number.
 
+Each available observation also has an explicit Kalman-gain mask:
+
+- external x/y position can correct horizontal position and velocity only;
+  attitude, vertical states and all biases have zero gain;
+- barometer height can correct vertical position, velocity and vertical
+  accelerometer bias only;
+- heading corrects rotation and gyro bias only, projected onto the physical
+  navigation-up axis so roll and pitch do not move;
+- the gravity pseudo-measurement corrects attitude and IMU biases only.
+
+The inertial process model always propagates the complete state. Missing
+observations affect fusion and solution-validity flags, not the propagation
+equations.
+
 ## Source sets
 
 Three complete sets exist; `EK3_SRC_SET` chooses which one is live.
@@ -93,6 +107,7 @@ working barometer.
 
 | Parameter | Default | Range | Meaning |
 |---|---|---|---|
+| `EK3_IMU_LPF` | 100 | 0-200 | Matched accel/gyro 2-pole LPF applied at 2 kHz before 400 Hz delta integration. Zero disables it; sample timestamps compensate its low-frequency delay. |
 | `EK3_DELAY_MS` | 0 | 0-100 | Fusion horizon behind real time, ms. Zero reproduces pre-horizon behaviour exactly. Bounded by the IMU ring. |
 | `EK3_ALT_M_NSE` | 2.0 | 0.1-100 | Barometer height measurement noise, m. |
 | `EK3_ALT_I_GATE` | 5.0 | 1-100 | Barometer innovation gate, sigma. |
@@ -102,7 +117,14 @@ working barometer.
 | `EK3_EXT_M_NSE` | 0.10 | 0.01-10 | External position noise FLOOR, m. |
 | `EK3_EXT_I_GATE` | 5.0 | 1-100 | External position innovation gate, sigma. |
 | `EK3_EXT_YAW_NSE` | 0.05 | 0.01-1.5 | External yaw noise FLOOR, rad. |
+| `EK3_EXT_DLY_MS` | 0.0 | -100-100 | Signed external-pose time correction. Positive means the measurement is older than its supplied timestamp. |
+| `EK3_EXT_JIT_MS` | 2.0 | 0-20 | One-sigma external-pose timestamp uncertainty. Used for boundary clamping and motion-dependent measurement noise. |
+| `EK3_EXT_POS_X/Y/Z` | 0.0 | -10-10 | Translation from the mocap marker centre to the IMU/body origin, expressed in marker axes, m. |
+| `EK3_EXT_ROLL/PITCH/YAW` | 0.0 | -180-180 | IMU/body orientation relative to the mocap marker axes, degrees. |
 | `EK3_EXT_TIMEOUT` | 1000 | 100-10000 | Dropout before horizontal validity is dropped, ms. |
+| `EK3_ZUPT_GDEV` | 0.25 | 0.01-2.0 | Maximum filtered acceleration-magnitude deviation from gravity for wheel-stop zero velocity, m/s2. |
+| `EK3_ZUPT_AVAR` | 0.10 | 0.0001-4.0 | Maximum summed three-axis acceleration variance for wheel-stop zero velocity, (m/s2)^2. |
+| `EK3_ZUPT_DW_MS` | 150 | 0-2000 | Time the timestamped wheel speed must remain below the stop threshold before zero velocity is eligible, ms. |
 | `EXT_TX_RATE` | 50 | 1-400 | Estimator pose transmit rate to the companion, Hz. |
 
 Gates are plain sigma. ArduPilot stores its as integer sigma x 100 for
@@ -126,6 +148,31 @@ is ArduPilot's default and worth keeping: a loose measurement noise makes the
 filter lean on the gyro between updates and limits how hard one disturbed
 reading can pull the heading. It is the first thing to tune once the path is
 proven on hardware.
+
+### Mocap marker to IMU transform
+
+The external packet describes the mocap marker origin, while strapdown
+propagation describes the IMU/body origin. The estimator composes
+`T_map_marker * T_marker_body` before datum creation, delay buffering and
+innovation calculation. Therefore `EK3_EXT_POS_*` is the vector from the
+marker centre to the IMU centre in marker axes; do not enter its negative.
+Yaw uncertainty is also propagated through the horizontal lever arm.
+
+The current companion packet is planar (`x`, `y`, `yaw`). Consequently X/Y
+translation and relative yaw affect the fused planar pose now. Z translation
+and relative roll/pitch are retained in the full 3-D transform, but cannot
+affect the present planar observation until the companion protocol supplies
+marker Z, roll and pitch.
+
+### Wheel-stop zero velocity
+
+Zero motor ticks do not prove zero chassis velocity during locked-wheel
+braking or wheel slip. A zero-velocity update is permitted only after the
+wheel threshold and the independent IMU low-dynamics test all pass. The IMU
+test includes the configured gravity-deviation and acceleration-variance
+limits; with external position active it additionally checks non-gravity
+acceleration and estimated horizontal speed. `ekf3 status` prints both live
+metrics and the number of blocked wheel-stop fusion attempts.
 
 ## Frame conventions
 

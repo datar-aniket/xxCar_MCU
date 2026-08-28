@@ -179,7 +179,12 @@ static void ist8310_process(FAR struct ist8310_dev_s *dev)
   y = (int16_t)((uint16_t)buf[3] << 8 | buf[2]);
   z = (int16_t)((uint16_t)buf[5] << 8 | buf[4]);
 
-  mag.timestamp   = sensor_get_timestamp();
+  /* Keep aiding sample time in the same TIM5 domain as the IMU trajectory
+   * against which the EKF will fuse it.  Publication scheduling remains a
+   * separate concern in the sensors daemon.
+   */
+
+  mag.timestamp   = fmuv6c_imu_time_now();
   mag.x           = (float)x * IST8310_GAUSS_PER_LSB;
   mag.y           = (float)y * IST8310_GAUSS_PER_LSB;
   mag.z           = (float)z * IST8310_GAUSS_PER_LSB;

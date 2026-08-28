@@ -6,6 +6,7 @@
 
 #include <nuttx/config.h>
 
+#include <assert.h>
 #include <errno.h>
 #include <stdlib.h>
 #include <fcntl.h>
@@ -70,6 +71,34 @@ static float g_torque_k = 1.0f;
 static float g_steer_k = 1.0f;
 static float g_speed_k = 1.0f;
 
+/* How old an autonomous command may be by the time it lands here.
+ *
+ * AUTO_CMD_TO_MS, the SAME parameter the control router ages its input
+ * against, deliberately reused rather than given a companion-side twin. The
+ * two measure different halves of one journey - transport latency here,
+ * silence from the companion there - and a second parameter would let an
+ * operator set them apart and believe they had one budget.
+ */
+
+static uint32_t g_auto_timeout_us = 200000u;
+
+/* How far ahead of its arrival a command's timestamp may be before the
+ * offset, rather than the link, is the thing that is wrong. Comfortably
+ * above the residual a completed timesync leaves and far below any budget an
+ * operator can set.
+ */
+
+#define COMP_DIRECT_FUTURE_US  5000
+
+/* The wire enum has to be the topic's enum, or "20 amps" becomes "duty 20"
+ * and clamps to full throttle. comp_proto.h cannot include uorb_msgs.h, so
+ * the agreement is checked here, where both are visible.
+ */
+
+static_assert(COMP_THROTTLE_DUTY == ACTUATOR_MODE_DUTY,
+              "wire duty mode must match ACTUATOR_MODE_DUTY");
+static_assert(COMP_THROTTLE_CURRENT == ACTUATOR_MODE_CURRENT,
+              "wire current mode must match ACTUATOR_MODE_CURRENT");
 
 static int64_t g_utc_offset_us;
 static bool    g_utc_valid;
@@ -285,7 +314,7 @@ static int comp_write_all(int fd, FAR const uint8_t *data, size_t len)
  */
 
 static void comp_route(int id, FAR const struct comp_parser_s *parser,
-                       int fd, uint64_t rx_us, int pose_pub,
+                       int fd, uint64_t rx_us, int pose_pub, int control_pub,
                        FAR struct companion_status_s *s)
 {
   if (id == COMP_MSG_EXTERNAL_POSE)
@@ -296,11 +325,17 @@ static void comp_route(int id, FAR const struct comp_parser_s *parser,
       memcpy(&wire, parser->payload, sizeof(wire));
       memset(&out, 0, sizeof(out));
 
-      out.timestamp = comp_now_us();
+      /* The parser supplied the TIM5 time at which the final frame byte was
+       * received. Preserve that receive constraint just as ArduPilot's UART
+       * timestamp correction does; stamping after routing adds software
+       * scheduling to the measured link age.
+       */
 
-      /* Back to the board's monotonic clock, which is the only timebase the
-       * estimator understands. Zero stays zero - it means "not timestamped"
-       * and the estimator stamps it on arrival.
+      out.timestamp = rx_us;
+
+      /* Convert UTC back to the board's shared TIM5 sample clock, which is
+       * the timebase the estimator trajectory uses. Zero stays zero - it
+       * means "not timestamped" and the estimator stamps it on arrival.
        *
        * Unsynced, a supplied UTC cannot be converted at all, so it is turned
        * into that same zero rather than fused as a number a thousand times
@@ -336,6 +371,88 @@ static void comp_route(int id, FAR const struct comp_parser_s *parser,
 
       s->rx_pose++;
       s->last_rx_us = out.timestamp;
+    }
+
+  else if (id == COMP_MSG_DIRECT_CONTROL)
+    {
+      struct comp_direct_control_s wire;
+      struct control_cmd_s out;
+      uint64_t sample_us;
+      int64_t age_us;
+
+      memcpy(&wire, parser->payload, sizeof(wire));
+
+      /* No usable timestamp, no command.
+       *
+       * EXTERNAL_POSE treats an unconvertible stamp as "stamp it on arrival"
+       * and carries on, because a pose with the wrong age is still mostly
+       * right. A command is not: its whole safety argument is that it
+       * expires, and an age that cannot be computed cannot expire.
+       */
+
+      if (wire.timestamp_us == 0 || !g_utc_valid)
+        {
+          s->rx_direct_stale++;
+          return;
+        }
+
+      sample_us = (uint64_t)((int64_t)wire.timestamp_us - g_utc_offset_us);
+
+      /* rx_us is the TIM5 time the frame completed and sample_us is now in
+       * that same domain, so this subtraction stays inside one clock. The
+       * board-side half of the same 100 ms budget - the companion having
+       * stopped sending altogether - is the control router's job, measured
+       * in ITS clock, which is why the published timestamp below is zero.
+       */
+
+      age_us = (int64_t)rx_us - (int64_t)sample_us;
+
+      /* Ahead of its own arrival is impossible, so any negative age is clock
+       * error rather than a fast link. A few milliseconds of it is the
+       * timesync residual and is tolerated; more than that means the offset
+       * is wrong, and a wrong offset makes every age reading meaningless in
+       * the same direction - which would quietly disable the expiry this
+       * whole path exists for.
+       */
+
+      if (age_us < -(int64_t)COMP_DIRECT_FUTURE_US ||
+          age_us > (int64_t)g_auto_timeout_us)
+        {
+          s->rx_direct_stale++;
+          return;
+        }
+
+      if (!comp_direct_control_valid(&wire))
+        {
+          s->rx_direct_invalid++;
+          return;
+        }
+
+      memset(&out, 0, sizeof(out));
+
+      /* Zero, so the control router stamps it on arrival in its own clock.
+       *
+       * The router ages this against CLOCK_MONOTONIC while everything here
+       * is TIM5. Those are independent counters - see the comment on
+       * comp_now_us() - so a TIM5 value put in this field would read as
+       * either permanently fresh or permanently stale depending on which way
+       * the two had drifted. `vesc set` publishes zero for the same reason.
+       */
+
+      out.timestamp = 0;
+      out.motor = wire.throttle;
+      out.steering = wire.steering;
+      out.mode = wire.throttle_type;
+
+      if (control_cmd_publish(control_pub, &out) < 0)
+        {
+          s->rx_publish_errors++;
+          return;
+        }
+
+      s->rx_direct++;
+      s->last_direct_us = rx_us;
+      s->last_direct_age_us = age_us > 0 ? (uint32_t)age_us : 0u;
     }
 
   else if (id == COMP_MSG_TIMESYNC_START)
@@ -579,7 +696,7 @@ static void comp_pps_discipline(FAR struct companion_status_s *s)
 }
 
 
-static void comp_transmit(int fd, int est_sub, int gyro_sub,
+static void comp_transmit(int fd, int state_pub, int est_sub, int gyro_sub,
                           int accel_sub, int vesc_sub,
                           FAR struct companion_status_s *s)
 {
@@ -589,9 +706,11 @@ static void comp_transmit(int fd, int est_sub, int gyro_sub,
   struct vesc_status_s vesc;
   struct comp_state_inputs_s in;
   struct comp_vehicle_state_s wire;
+  struct vehicle_state_tx_s logged;
   uint8_t frame[COMP_MAX_PAYLOAD + COMP_FRAME_OVERHEAD];
   int64_t now_utc;
   uint64_t stamp;
+  uint64_t accel_sample_time = 0;
   uint32_t gap = 0;
   bool repeat = false;
   bool clamped = false;
@@ -619,6 +738,7 @@ static void comp_transmit(int fd, int est_sub, int gyro_sub,
   memcpy(in.position, est.position, sizeof(in.position));
   memcpy(in.quaternion, est.quaternion, sizeof(in.quaternion));
   memcpy(in.velocity_enu, est.velocity, sizeof(in.velocity_enu));
+  memcpy(in.accel_bias, est.accel_bias, sizeof(in.accel_bias));
   in.solution_status = est.solution_status;
   in.reset_counter = (uint8_t)est.reset_counter;
 
@@ -655,6 +775,7 @@ static void comp_transmit(int fd, int est_sub, int gyro_sub,
       in.accel[0] = accel.x;
       in.accel[1] = accel.y;
       in.accel[2] = accel.z;
+      accel_sample_time = accel.timestamp_sample;
     }
 
   if (vesc_sub >= 0 && orb_copy(ORB_ID(vesc_status), vesc_sub, &vesc) >= 0)
@@ -673,7 +794,7 @@ static void comp_transmit(int fd, int est_sub, int gyro_sub,
     }
 
   /* UTC on the wire once synced. Before that the companion gets the board's
-   * raw monotonic time, which is all there is to give.
+   * raw TIM5 time, which is all there is to give.
    */
 
   stamp = g_utc_valid ?
@@ -682,12 +803,10 @@ static void comp_transmit(int fd, int est_sub, int gyro_sub,
 
   /* A solution cannot be newer than now, so refuse to say that it is.
    *
-   * The reference is fmuv6c_imu_time_now() and NOT comp_now_us(). Both are
-   * the same epoch, but comp_now_us reads CLOCK_MONOTONIC, which without
-   * tickless mode advances in 1 ms steps, while timestamp_sample carries
-   * microseconds from TIM5. Comparing against the coarse clock would clamp
-   * perfectly good stamps for up to a millisecond after every tick and count
-   * a fault that had not happened.
+   * comp_now_us() deliberately reads fmuv6c_imu_time_now().  Using the
+   * tick-quantized CLOCK_MONOTONIC reference here would clamp perfectly good
+   * sample stamps for up to a millisecond after every system tick and count a
+   * fault that had not happened.
    */
 
   now_utc = (int64_t)comp_now_us() + (g_utc_valid ? g_utc_offset_us : 0);
@@ -722,6 +841,33 @@ static void comp_transmit(int fd, int est_sub, int gyro_sub,
       pthread_mutex_unlock(&g_lock);
       return;
     }
+
+  /* Mirror what was actually delivered, not merely what we intended to
+   * deliver.  The first timestamp remains in board monotonic time for ULog
+   * joins; every field after it is copied from the successful wire payload.
+   * vehicle_accel is logged separately so the gravity-removal input and this
+   * output can be compared sample for sample.
+   */
+
+  memset(&logged, 0, sizeof(logged));
+  logged.timestamp = comp_now_us();
+  logged.timestamp_sample = est.timestamp_sample;
+  logged.accel_timestamp_sample = accel_sample_time;
+  logged.wire_timestamp_us = wire.timestamp_us;
+  memcpy(logged.position, wire.position, sizeof(logged.position));
+  memcpy(logged.quaternion, wire.quaternion, sizeof(logged.quaternion));
+  memcpy(logged.velocity, wire.velocity, sizeof(logged.velocity));
+  memcpy(logged.angular_velocity, wire.angular_velocity,
+         sizeof(logged.angular_velocity));
+  logged.side_slip_rad = wire.side_slip_rad;
+  memcpy(logged.accel, wire.accel, sizeof(logged.accel));
+  logged.wheel_torque_nm = wire.wheel_torque_nm;
+  logged.steering_angle = wire.steering_angle;
+  logged.motor_speed_ms = wire.motor_speed_ms;
+  logged.solution_status = wire.solution_status;
+  logged.reset_counter = wire.reset_counter;
+  logged.source_valid = wire.source_valid;
+  vehicle_state_tx_publish(state_pub, &logged);
 
   pthread_mutex_lock(&g_lock);
   s->est_seen++;
@@ -764,6 +910,7 @@ static void comp_transmit(int fd, int est_sub, int gyro_sub,
 struct comp_tx_args_s
 {
   int fd;
+  int state_pub;
   int est_sub;
   int gyro_sub;
   int accel_sub;
@@ -798,7 +945,8 @@ static FAR void *comp_tx_thread(FAR void *arg)
 
       if (a->est_sub >= 0)
         {
-          comp_transmit(a->fd, a->est_sub, a->gyro_sub, a->accel_sub,
+          comp_transmit(a->fd, a->state_pub, a->est_sub, a->gyro_sub,
+                        a->accel_sub,
                         a->vesc_sub, a->status);
         }
 
@@ -828,7 +976,7 @@ static FAR void *comp_tx_thread(FAR void *arg)
 #define COMP_TX_STACK 3072
 
 static bool comp_service(int fd, FAR struct pollfd *pfd,
-                         int pose_pub,
+                         int pose_pub, int control_pub,
                          FAR struct companion_status_s *status)
 {
   while (!g_should_stop)
@@ -871,7 +1019,7 @@ static bool comp_service(int fd, FAR struct pollfd *pfd,
                        */
 
                       comp_route(id, &status->parser, fd, comp_now_us(),
-                                 pose_pub, status);
+                                 pose_pub, control_pub, status);
                     }
                 }
             }
@@ -907,6 +1055,8 @@ static int companion_daemon(int argc, FAR char *argv[])
   bool keep_going;
   int fd = -1;
   int pose_pub = -1;
+  int control_pub = -1;
+  int state_pub = -1;
   int est_sub = -1;
   int gyro_sub = -1;
   int accel_sub = -1;
@@ -939,6 +1089,8 @@ static int companion_daemon(int argc, FAR char *argv[])
   g_speed_k = param_f32("VESC_SPEED_K");
   status.pps_max_correction_us = (uint32_t)param_i32("PPS_MAX_COR_US");
   status.pps_absolute_phase = param_i32("PPS_ABS_PHASE") != 0;
+  g_auto_timeout_us = (uint32_t)param_i32("AUTO_CMD_TO_MS") * 1000u;
+  status.auto_timeout_us = g_auto_timeout_us;
 
   /* The tick is the downlink's clock from here on. Failing to start it is
    * fatal to this daemon rather than a quiet fall back to some other
@@ -957,6 +1109,30 @@ static int companion_daemon(int argc, FAR char *argv[])
   if (pose_pub < 0)
     {
       syslog(LOG_ERR, "[companion] cannot advertise external_pose (%d)\n",
+             errno);
+      goto out;
+    }
+
+  /* The autonomous command input. Advertised unconditionally: the control
+   * router only acts on it when the RC source switch selects AUTO and its own
+   * arm sequence has completed, so having the topic available is not the same
+   * as handing the vehicle over.
+   */
+
+  control_pub = control_cmd_advertise();
+
+  if (control_pub < 0)
+    {
+      syslog(LOG_ERR, "[companion] cannot advertise control_cmd (%d)\n",
+             errno);
+      goto out;
+    }
+
+  state_pub = vehicle_state_tx_advertise();
+
+  if (state_pub < 0)
+    {
+      syslog(LOG_ERR, "[companion] cannot advertise vehicle_state_tx (%d)\n",
              errno);
       goto out;
     }
@@ -1068,6 +1244,7 @@ static int companion_daemon(int argc, FAR char *argv[])
       g_tx_stop = false;
       g_tx_last_sample = 0;
       tx_args.fd = fd;
+      tx_args.state_pub = state_pub;
       tx_args.est_sub = est_sub;
       tx_args.gyro_sub = gyro_sub;
       tx_args.accel_sub = accel_sub;
@@ -1101,7 +1278,8 @@ static int companion_daemon(int argc, FAR char *argv[])
                  "only\n", errno);
         }
 
-      keep_going = comp_service(fd, &pfd, pose_pub, &status);
+      keep_going = comp_service(fd, &pfd, pose_pub, control_pub,
+                                &status);
 
       if (tx_running)
         {
@@ -1174,6 +1352,16 @@ out:
   if (pose_pub >= 0)
     {
       orb_unadvertise(pose_pub);
+    }
+
+  if (control_pub >= 0)
+    {
+      orb_unadvertise(control_pub);
+    }
+
+  if (state_pub >= 0)
+    {
+      orb_unadvertise(state_pub);
     }
 
   if (fd >= 0)

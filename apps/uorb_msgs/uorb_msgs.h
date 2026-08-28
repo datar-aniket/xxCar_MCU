@@ -14,6 +14,7 @@
  *   vehicle_gyro     corrected, body-frame gyroscope
  *   vehicle_imu      unfiltered coning/sculling-corrected IMU deltas
  *   estimator_state  current-time EKF nominal state and validity
+ *   estimator_diag   filter-horizon acceleration/fusion audit stream
  *
  * The publisher is whatever driver has the data (apps/mavlink for now); the
  * subscriber is the navigation/fusion code. Neither should have to link the
@@ -207,6 +208,41 @@ struct external_pose_s
 
 #define EXTERNAL_POSE_VALID (1u << 0)
 
+/* Exact VEHICLE_STATE downlink values, mirrored at the point where the
+ * companion has successfully written the frame.  `timestamp` is kept in the
+ * board's monotonic domain so a ULog can join it to the sensor and estimator
+ * topics; `wire_timestamp_us` is the UTC (or unsynchronised board) timestamp
+ * that was actually placed on the serial link.
+ *
+ * The remaining fields deliberately follow comp_vehicle_state_s byte for
+ * byte after that wire timestamp.  Keeping this as a uORB type avoids making
+ * the logger depend on the companion protocol while still recording the
+ * message the remote computer actually received.
+ */
+
+struct vehicle_state_tx_s
+{
+  uint64_t timestamp;             /*   0: board time after successful write */
+  uint64_t timestamp_sample;      /*   8: estimator output sample time */
+  uint64_t accel_timestamp_sample;/*  16: gravity-removal input sample time */
+  uint64_t wire_timestamp_us;     /*  24: exact timestamp field on the wire */
+  float    position[3];           /*  32: local ENU, m */
+  float    quaternion[4];         /*  44: body FLU to local ENU */
+  float    velocity[3];           /*  60: body FLU, m/s */
+  float    angular_velocity[3];   /*  72: body FLU, rad/s */
+  float    side_slip_rad;         /*  84: left-positive, NaN below threshold */
+  float    accel[3];              /*  88: body FLU, gravity removed, m/s^2 */
+  float    wheel_torque_nm;       /* 100 */
+  float    steering_angle;        /* 104 */
+  float    motor_speed_ms;        /* 108 */
+  uint8_t  solution_status;       /* 112 */
+  uint8_t  reset_counter;         /* 113 */
+  uint8_t  source_valid;          /* 114: COMP_SRC_* bit layout */
+  uint8_t  pad[5];                /* 115 */
+};
+
+#define VEHICLE_STATE_TX_QUEUE_SIZE 64u
+
 /* VESC telemetry, in RAW units.
  *
  * No steering angle: converting adc_volts to an angle is a calibration with
@@ -304,9 +340,10 @@ struct control_cmd_s
 };
 
 /* Calibrated body-frame increments for strapdown propagation. Unlike the
- * corrected controller topics above, this path bypasses every configurable
- * software LPF/notch. The hardware anti-alias filters remain part of the
- * physical measurement chain.
+ * corrected controller topics above, this path bypasses SENS_ACC_LPF,
+ * SENS_GYR_LPF and the controller notch.  imu_delta applies the matched
+ * EK3_IMU_LPF before integration; hardware anti-alias filters remain part of
+ * the physical measurement chain.
  */
 
 struct vehicle_imu_s
@@ -327,10 +364,11 @@ struct vehicle_imu_s
 };
 
 /* IMU increments are not snapshots: overwriting one loses motion forever.
- * Eight entries cover about 20 ms at 400 Hz while the estimator is scheduled.
+ * 128 entries cover about 320 ms at 400 Hz, enough for both the estimator and
+ * diagnostic logger to ride through a normal SD-card wear-levelling stall.
  */
 
-#define VEHICLE_IMU_QUEUE_SIZE 8u
+#define VEHICLE_IMU_QUEUE_SIZE 128u
 
 /* Current-time estimator output. The first EKF stage publishes attitude at
  * IMU packet rate while deliberately leaving velocity and position invalid
@@ -390,6 +428,76 @@ struct estimator_state_s
   uint8_t  instance;              /* 127: EKF lane, currently zero */
 };
 
+/* Filter-horizon diagnostics for post-processing estimator behaviour.
+ *
+ * Unlike estimator_state (which is replayed to current time for consumers),
+ * this message describes the exact delayed state and IMU packet at which
+ * measurement fusion occurred. timestamp_sample is therefore the join key
+ * with vehicle_imu and external_pose. The acceleration decomposition is
+ * captured inside nominal_predict, using the same packet-start attitude and
+ * biases as strapdown propagation.
+ */
+
+#define EST_DIAG_INITIALIZED       (1u << 0)
+#define EST_DIAG_PREDICTED         (1u << 1)
+#define EST_DIAG_LOW_DYNAMICS      (1u << 2)
+#define EST_DIAG_WHEEL_STOPPED     (1u << 3)
+#define EST_DIAG_WHEEL_FRESH       (1u << 4)
+#define EST_DIAG_ZUPT_IMU_OK       (1u << 5)
+#define EST_DIAG_EXTNAV_HEALTHY    (1u << 6)
+#define EST_DIAG_POSITION_AIDED    (1u << 7)
+#define EST_DIAG_ZUPT_ACCEPT       (1u << 8)
+#define EST_DIAG_ZUPT_REJECT       (1u << 9)
+#define EST_DIAG_GRAVITY_ACCEPT    (1u << 10)
+#define EST_DIAG_GRAVITY_REJECT    (1u << 11)
+#define EST_DIAG_EXTNAV_ACCEPT     (1u << 12)
+#define EST_DIAG_EXTNAV_REJECT     (1u << 13)
+#define EST_DIAG_CLIPPING          (1u << 14)
+#define EST_DIAG_PROCESS_REJECTED  (1u << 15)
+
+struct estimator_diag_s
+{
+  uint64_t timestamp;                  /*   0: horizon sample time, us */
+  uint64_t timestamp_sample;           /*   8: same join key, explicit */
+  uint64_t extnav_timestamp;           /*  16: transformed pose used, or 0 */
+  float    specific_force[3];          /*  24: delta_velocity / dt, body */
+  float    corrected_force[3];         /*  36: after EKF accel bias */
+  float    gravity_body[3];            /*  48: expected stationary force */
+  float    residual_accel_body[3];     /*  60: corrected - gravity */
+  float    nav_accel[3];               /*  72: exact propagated dv/dt, ENU */
+  float    quaternion[4];              /*  84: delayed EKF state */
+  float    velocity[3];                /* 100: delayed ENU state */
+  float    position[3];                /* 112: delayed ENU state */
+  float    gyro_bias[3];               /* 124: body rad/s */
+  float    accel_bias[3];              /* 136: body m/s^2 */
+  float    extnav_innov[2];            /* 148: x/y position innovations */
+  float    extnav_nis[2];              /* 156: x/y normalized innov sq */
+  float    extnav_measurement[3];      /* 164: transformed x/y/yaw */
+  float    zupt_nis[3];                /* 176: ENU velocity NIS */
+  float    gravity_nis;                /* 188: gravity update joint NIS */
+  float    accel_norm;                 /* 192: corrected force norm */
+  float    accel_variance;             /* 196: sum body-axis variances */
+  float    gravity_deviation;          /* 200: abs(filtered norm - g) */
+  float    extnav_test_ratio;          /* 204: low-passed joint ratio */
+  float    wheel_speed_cps;            /* 208: last tachometer speed */
+  uint32_t extnav_accept_count;        /* 212: cumulative */
+  uint32_t extnav_reject_count;        /* 216: cumulative */
+  uint32_t zupt_accept_count;          /* 220: cumulative */
+  uint32_t zupt_reject_count;          /* 224: cumulative */
+  uint32_t gravity_accept_count;       /* 228: cumulative */
+  uint32_t gravity_reject_count;       /* 232: cumulative */
+  uint16_t reset_counter;              /* 236: estimator generation */
+  uint16_t flags;                      /* 238: EST_DIAG_* */
+  uint8_t  instance;                   /* 240: EKF lane, currently zero */
+  uint8_t  pad[7];                     /* 241: trailing only */
+};
+
+/* About 320 ms at 400 Hz: enough to ride through the SD-card stalls the
+ * logger's own 64 KiB write buffer is designed to absorb.
+ */
+
+#define ESTIMATOR_DIAG_QUEUE_SIZE 128u
+
 /****************************************************************************
  * Public Data
  ****************************************************************************/
@@ -401,11 +509,13 @@ ORB_DECLARE(vehicle_gyro);
 ORB_DECLARE(vehicle_mag);
 ORB_DECLARE(vehicle_baro);
 ORB_DECLARE(external_pose);
+ORB_DECLARE(vehicle_state_tx);
 ORB_DECLARE(vesc_status);
 ORB_DECLARE(actuator_command);
 ORB_DECLARE(control_cmd);
 ORB_DECLARE(vehicle_imu);
 ORB_DECLARE(estimator_state);
+ORB_DECLARE(estimator_diag);
 
 /****************************************************************************
  * Public Function Prototypes
@@ -432,6 +542,10 @@ int vehicle_baro_publish(int fd, FAR const struct vehicle_baro_s *msg);
 int external_pose_advertise(void);
 int external_pose_publish(int fd, FAR const struct external_pose_s *msg);
 
+int vehicle_state_tx_advertise(void);
+int vehicle_state_tx_publish(int fd,
+                             FAR const struct vehicle_state_tx_s *msg);
+
 int vesc_status_advertise(void);
 int vesc_status_publish(int fd, FAR const struct vesc_status_s *msg);
 
@@ -447,5 +561,8 @@ int vehicle_imu_publish(int fd, FAR const struct vehicle_imu_s *msg);
 
 int estimator_state_advertise(void);
 int estimator_state_publish(int fd, FAR const struct estimator_state_s *msg);
+
+int estimator_diag_advertise(void);
+int estimator_diag_publish(int fd, FAR const struct estimator_diag_s *msg);
 
 #endif /* __APPS_UORB_MSGS_UORB_MSGS_H */

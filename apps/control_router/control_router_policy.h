@@ -32,6 +32,7 @@ enum router_reason_e
   ROUTER_REASON_ARM_HOLD,
   ROUTER_REASON_SOURCE_HOLD,
   ROUTER_REASON_AUTO_STALE,
+  ROUTER_REASON_AUTO_CYCLE,
   ROUTER_REASON_INVALID,
   ROUTER_REASON_COUNT
 };
@@ -82,6 +83,20 @@ struct router_input_s
 struct router_state_s
 {
   bool source_auto;
+
+  /* Auto is latched out after it goes stale, and only a move to RC and back
+   * clears it. Recovering a link must not put a vehicle back in motion on
+   * its own: whatever stopped talking may have stopped for a reason, and the
+   * command that arrives first is the one it was sending when it left.
+   *
+   * auto_ever_valid is what keeps the latch from firing before the
+   * companion has ever spoken. Selecting AUTO and waiting for the first
+   * command is normal; there is nothing to resume, so there is nothing to
+   * lock out.
+   */
+
+  bool auto_latched;
+  bool auto_ever_valid;
   bool mode_current;
   bool mode_switch_high;
   bool source_initialized;

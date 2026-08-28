@@ -144,6 +144,40 @@ static void print_status(void)
         }
     }
 
+  /* The autonomous command input.
+   *
+   * Shown whenever anything has arrived, and silent otherwise, so a vehicle
+   * driven only from the transmitter does not carry a line of zeroes. The
+   * age of the last accepted command against the budget is the number that
+   * says whether the link is fast enough, and it is measured entirely in the
+   * board's TIM5 clock at both ends.
+   */
+
+  if (s.rx_direct > 0 || s.rx_direct_stale > 0 || s.rx_direct_invalid > 0)
+    {
+      printf("  direct     accepted %" PRIu32 "  stale %" PRIu32
+             "  invalid %" PRIu32 "\n",
+             s.rx_direct, s.rx_direct_stale, s.rx_direct_invalid);
+
+      if (s.rx_direct > 0)
+        {
+          printf("             last age %.1f ms of %.0f ms budget "
+                 "(AUTO_CMD_TO_MS)\n",
+                 (double)s.last_direct_age_us / 1000.0,
+                 (double)s.auto_timeout_us / 1000.0);
+        }
+
+      /* Accepted here means published, not obeyed. The control router still
+       * requires the AUTO source switch and its own arm sequence, and says
+       * so itself in `control_router status`.
+       */
+
+      if (s.rx_direct_stale > 0 && !s.timesync_synced && !s.utc_from_rtc)
+        {
+          printf("             (no UTC reference yet - run the timesync)\n");
+        }
+    }
+
   printf("  estimator  states %" PRIu32 "  nothing-new %" PRIu32 "%s\n",
          s.est_seen, s.tx_no_state,
          s.est_seen == 0 ? "   <- ekf3 is not publishing" : "");

@@ -66,9 +66,50 @@ uint8_t comp_payload_len(uint8_t id)
       case COMP_MSG_TIMESYNC_END:
         return (uint8_t)sizeof(struct comp_timesync_end_s);
 
+      case COMP_MSG_DIRECT_CONTROL:
+        return (uint8_t)sizeof(struct comp_direct_control_s);
+
       default:
         return 0;
     }
+}
+
+/* Every test is written as !(x >= lo && x <= hi) rather than the readable
+ * inversion, because NaN compares false against everything: the readable
+ * form lets a NaN through as "not out of range" and puts it straight on the
+ * wire to the motor.
+ */
+
+bool comp_direct_control_valid(FAR const struct comp_direct_control_s *cmd)
+{
+  float limit;
+
+  if (cmd == NULL)
+    {
+      return false;
+    }
+
+  if (cmd->throttle_type != COMP_THROTTLE_DUTY &&
+      cmd->throttle_type != COMP_THROTTLE_CURRENT)
+    {
+      return false;
+    }
+
+  limit = cmd->throttle_type == COMP_THROTTLE_CURRENT ?
+          COMP_DIRECT_CURRENT_MAX : COMP_DIRECT_DUTY_MAX;
+
+  if (!(cmd->throttle >= -limit && cmd->throttle <= limit))
+    {
+      return false;
+    }
+
+  if (!(cmd->steering >= -COMP_DIRECT_STEER_MAX &&
+        cmd->steering <= COMP_DIRECT_STEER_MAX))
+    {
+      return false;
+    }
+
+  return true;
 }
 
 void comp_parser_init(FAR struct comp_parser_s *p)

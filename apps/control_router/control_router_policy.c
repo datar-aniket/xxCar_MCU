@@ -166,6 +166,7 @@ void router_policy_step(const struct router_config_s *config,
   bool source_changed = false;
   bool mode_changed = false;
   bool arm_initialized = false;
+  bool auto_usable = false;
   bool old_source;
   float selected_motor = 0.0f;
   float selected_steering = 0.0f;
@@ -253,6 +254,36 @@ void router_policy_step(const struct router_config_s *config,
   source_changed = state->source_initialized &&
                    old_source != state->source_auto;
 
+  /* Leaving AUTO clears the lockout, which is what makes re-selecting it the
+   * deliberate act that arms autonomy again - the same shape as the arm
+   * switch having to be seen low before it counts as high.
+   */
+
+  if (source_changed && !state->source_auto)
+    {
+      state->auto_latched = false;
+      state->auto_ever_valid = false;
+    }
+
+  if (state->source_auto)
+    {
+      if (output->auto_valid)
+        {
+          state->auto_ever_valid = true;
+        }
+      else if (state->auto_ever_valid)
+        {
+          /* It was driving and now it is not. Refuse everything that arrives
+           * from here on, including a perfectly fresh command a moment
+           * later, until somebody selects RC and comes back.
+           */
+
+          state->auto_latched = true;
+        }
+    }
+
+  auto_usable = output->auto_valid && !state->auto_latched;
+
   switch_update(input->rc_channel[config->map_arm - 1],
                 config->switch_low, config->switch_high,
                 &state->arm_high, &arm_initialized);
@@ -270,13 +301,13 @@ void router_policy_step(const struct router_config_s *config,
   output->rc_steering = axis_map(
     input->rc_channel[config->map_steering - 1], &config->steering);
   output->source = state->source_auto ? ROUTER_SOURCE_AUTO : ROUTER_SOURCE_RC;
-  selected_mode = state->source_auto && output->auto_valid ? input->auto_mode :
+  selected_mode = state->source_auto && auto_usable ? input->auto_mode :
                   state->mode_current ? ROUTER_MODE_CURRENT : ROUTER_MODE_DUTY;
   output->mode = selected_mode;
 
   if (state->source_auto)
     {
-      selected_valid = output->auto_valid;
+      selected_valid = auto_usable;
       selected_motor = clampf(input->auto_motor,
                               selected_mode == ROUTER_MODE_CURRENT ?
                                 -config->current_max : -config->duty_max,
@@ -332,8 +363,28 @@ void router_policy_step(const struct router_config_s *config,
 
   if (!selected_valid)
     {
-      output->reason = state->source_auto ? ROUTER_REASON_AUTO_STALE
-                                          : ROUTER_REASON_INVALID;
+      /* Named by what the operator can see, not by internal state.
+       *
+       * STALE means the commands stopped - that is the whole story, and the
+       * latch being set underneath it is not yet worth reporting. CYCLE
+       * means they are arriving again and are being refused, which is the
+       * case that otherwise leaves somebody watching a healthy link and
+       * waiting for a vehicle that is never going to move.
+       *
+       * Reporting CYCLE from the moment it latches would also swallow the
+       * stale transition the daemon counts.
+       */
+
+      if (!state->source_auto)
+        {
+          output->reason = ROUTER_REASON_INVALID;
+        }
+      else
+        {
+          output->reason = output->auto_valid ? ROUTER_REASON_AUTO_CYCLE :
+                           ROUTER_REASON_AUTO_STALE;
+        }
+
       return;
     }
 
