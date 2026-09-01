@@ -130,6 +130,14 @@ static void print_status(void)
                  (double)s.timesync_trip_us / 1000.0,
                  s.timesync_samples,
                  s.wall_clock_set ? "  wall clock set" : "");
+          printf("             corrected UTC = a*TIM5+b: a-1 %+.3f ppm "
+                 "(base %+.3f), phase error %+.3f ms\n",
+                 (double)s.utc_rate_ppb / 1000.0,
+                 (double)s.utc_base_rate_ppb / 1000.0,
+                 (double)s.timesync_phase_error_us / 1000.0);
+          printf("             updates %" PRIu32 "  rate/step resets %"
+                 PRIu32 "  CLOCK_REALTIME is not used for conversion\n",
+                 s.timesync_updates, s.timesync_rate_rejected);
         }
 
       /* A UTC stamp that arrived before a sync could not be converted to the
@@ -178,6 +186,22 @@ static void print_status(void)
         }
     }
 
+  if (s.rx_trajectory > 0 || s.rx_trajectory_stale > 0 ||
+      s.rx_trajectory_invalid > 0)
+    {
+      printf("  trajectory accepted %" PRIu32 "  stale %" PRIu32
+             "  invalid %" PRIu32 "\n",
+             s.rx_trajectory, s.rx_trajectory_stale,
+             s.rx_trajectory_invalid);
+
+      if (s.rx_trajectory > 0)
+        {
+          printf("             last horizon %u  dt %.4f s\n",
+                 s.last_trajectory_horizon,
+                 (double)s.last_trajectory_dt);
+        }
+    }
+
   printf("  estimator  states %" PRIu32 "  nothing-new %" PRIu32 "%s\n",
          s.est_seen, s.tx_no_state,
          s.est_seen == 0 ? "   <- ekf3 is not publishing" : "");
@@ -196,9 +220,8 @@ static void print_status(void)
   printf("  downlink   repeats %" PRIu32 "  sample gap %" PRIu32 "-%" PRIu32
          " us\n", s.tx_repeat, s.tx_gap_min_us, s.tx_gap_max_us);
 
-  /* TIM5 against CLOCK_MONOTONIC. Every UTC conversion on this link uses
-   * the first; this says how far the second has drifted from it, which is
-   * the quantity that used to leak into the emitted timestamps.
+  /* TIM5 against CLOCK_MONOTONIC. Corrected UTC is based only on the affine
+   * TIM5 model; this remains a diagnostic and never enters that conversion.
    */
 
   printf("  clocks     TIM5 - MONOTONIC %+" PRIi64 " us\n",
@@ -257,9 +280,9 @@ static void print_status(void)
              "already known\n");
     }
 
-  /* A solution cannot be newer than now. If this is climbing, the UTC offset
-   * is running ahead of the companion's clock and the PPS residual above is
-   * the measurement of by how much.
+  /* A solution cannot be newer than now. If this is climbing, the affine UTC
+   * model is running ahead of the companion's clock and the PPS residual
+   * above is the measurement of by how much.
    */
 
   if (s.tx_future_clamped > 0)

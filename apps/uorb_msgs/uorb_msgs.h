@@ -15,6 +15,7 @@
  *   vehicle_imu      unfiltered coning/sculling-corrected IMU deltas
  *   estimator_state  current-time EKF nominal state and validity
  *   estimator_diag   filter-horizon acceleration/fusion audit stream
+ *   control_trajectory  finite-horizon companion plan (non-actuating)
  *
  * The publisher is whatever driver has the data (apps/mavlink for now); the
  * subscriber is the navigation/fusion code. Neither should have to link the
@@ -235,10 +236,11 @@ struct vehicle_state_tx_s
   float    wheel_torque_nm;       /* 100 */
   float    steering_angle;        /* 104 */
   float    motor_speed_ms;        /* 108 */
-  uint8_t  solution_status;       /* 112 */
-  uint8_t  reset_counter;         /* 113 */
-  uint8_t  source_valid;          /* 114: COMP_SRC_* bit layout */
-  uint8_t  pad[5];                /* 115 */
+  uint32_t rc_status;             /* 112: exact packed wire value */
+  uint8_t  solution_status;       /* 116 */
+  uint8_t  reset_counter;         /* 117 */
+  uint8_t  source_valid;          /* 118: COMP_SRC_* bit layout */
+  uint8_t  pad;                   /* 119 */
 };
 
 #define VEHICLE_STATE_TX_QUEUE_SIZE 64u
@@ -337,6 +339,27 @@ struct control_cmd_s
   float    steering;              /* 12: normalised -1..+1, left positive */
   uint8_t  mode;                  /* 16: ACTUATOR_MODE_* */
   uint8_t  pad[7];                /* 17 */
+};
+
+/* A finite-horizon plan from the companion. It is kept separate from
+ * control_cmd: receiving a plan does not actuate the first element. A future
+ * trajectory follower consumes this topic and publishes the immediate
+ * control_cmd selected for the current time.
+ */
+
+#define CONTROL_TRAJECTORY_MAX_HORIZON 14u
+
+struct control_trajectory_s
+{
+  uint64_t timestamp;             /*  0: TIM5 receive time */
+  uint64_t timestamp_sample;      /*  8: sender current_time, in TIM5 */
+  uint64_t solution_time;         /* 16: source-pose time, in TIM5 */
+  float    dt;                    /* 24: seconds between trajectory points */
+  float    poses[CONTROL_TRAJECTORY_MAX_HORIZON][2];
+  float    controls[CONTROL_TRAJECTORY_MAX_HORIZON][2];
+  uint8_t  horizon;
+  uint8_t  control_method;        /* ACTUATOR_MODE_DUTY or _CURRENT */
+  uint8_t  pad[2];
 };
 
 /* Calibrated body-frame increments for strapdown propagation. Unlike the
@@ -513,6 +536,7 @@ ORB_DECLARE(vehicle_state_tx);
 ORB_DECLARE(vesc_status);
 ORB_DECLARE(actuator_command);
 ORB_DECLARE(control_cmd);
+ORB_DECLARE(control_trajectory);
 ORB_DECLARE(vehicle_imu);
 ORB_DECLARE(estimator_state);
 ORB_DECLARE(estimator_diag);
@@ -555,6 +579,10 @@ int actuator_command_publish(int fd,
 
 int control_cmd_advertise(void);
 int control_cmd_publish(int fd, FAR const struct control_cmd_s *msg);
+
+int control_trajectory_advertise(void);
+int control_trajectory_publish(int fd,
+                               FAR const struct control_trajectory_s *msg);
 
 int vehicle_imu_advertise(int instance);
 int vehicle_imu_publish(int fd, FAR const struct vehicle_imu_s *msg);

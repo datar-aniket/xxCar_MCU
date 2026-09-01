@@ -42,6 +42,11 @@ int main(void)
   struct comp_external_pose_s ext;
   struct comp_vehicle_state_s est;
   struct comp_direct_control_s cmd;
+  unsigned char traj[COMP_MAX_PAYLOAD];
+  uint64_t traj_timestamp = 1234567890123ull;
+  uint64_t solution_timestamp = 1234567880000ull;
+  float traj_values[8] = {1.0f, 2.0f, 1.5f, 2.5f,
+                          -0.25f, 0.2f, 0.5f, -0.1f};
   int n;
 
   printf("%zu %zu %zu\n", sizeof(ext), sizeof(est), sizeof(cmd));
@@ -77,6 +82,8 @@ int main(void)
   est.solution_status = 0x4f;
   est.reset_counter = 3;
   est.source_valid = 0x0f;
+  est.rc_status = 1520u | (1480u << COMP_RC_THROTTLE_SHIFT) |
+                  COMP_RC_ARMED | COMP_RC_AUTO | COMP_RC_TRIGGER_HIGH;
   n = comp_encode(COMP_MSG_VEHICLE_STATE, &est, sizeof(est), frame,
                   sizeof(frame));
   dump(frame, n);
@@ -87,6 +94,19 @@ int main(void)
   cmd.throttle = 12.5f;
   cmd.throttle_type = COMP_THROTTLE_CURRENT;
   n = comp_encode(COMP_MSG_DIRECT_CONTROL, &cmd, sizeof(cmd), frame,
+                  sizeof(frame));
+  dump(frame, n);
+
+  memset(traj, 0, sizeof(traj));
+  memcpy(traj + COMP_TRAJ_TIMESTAMP_OFS, &traj_timestamp, 8);
+  memcpy(traj + COMP_TRAJ_SOLUTION_OFS, &solution_timestamp, 8);
+  traj[COMP_TRAJ_HORIZON_OFS] = 2;
+  traj[COMP_TRAJ_DT_OFS] = 0x66;
+  traj[COMP_TRAJ_DT_OFS + 1] = 0x2a;
+  traj[COMP_TRAJ_METHOD_OFS] = COMP_THROTTLE_DUTY;
+  memcpy(traj + COMP_TRAJ_DATA_OFS, traj_values, sizeof(traj_values));
+  n = comp_encode(COMP_MSG_CONTROL_TRAJ, traj,
+                  comp_control_trajectory_payload_size(2), frame,
                   sizeof(frame));
   dump(frame, n);
 
@@ -113,6 +133,7 @@ def main():
     c_ext_frame = bytes.fromhex(out[3])
     c_est_frame = bytes.fromhex(out[4])
     c_cmd_frame = bytes.fromhex(out[5])
+    c_traj_frame = bytes.fromhex(out[6])
 
     assert c_ext_size == comp_link.EXTERNAL_POSE.size, (
         f"external_pose: C says {c_ext_size}, "
@@ -142,7 +163,10 @@ def main():
             0.0,
             0.5, -1.5, 0.25,
             2.75, -0.35, 4.5,
-            0x4f, 3, 0x0f))
+            0x4f, 3, 0x0f,
+            1520 | (1480 << comp_link.RC_THROTTLE_SHIFT) |
+            comp_link.RC_ARMED | comp_link.RC_AUTO |
+            comp_link.RC_TRIGGER_HIGH))
     assert py_est == c_est_frame, (
         f"VEHICLE_STATE bytes differ\n  C:  {c_est_frame.hex()}\n"
         f"  py: {py_est.hex()}")
@@ -154,6 +178,20 @@ def main():
     assert py_cmd == c_cmd_frame, (
         f"DIRECT_CONTROL bytes differ\n  C:  {c_cmd_frame.hex()}\n"
         f"  py: {py_cmd.hex()}")
+
+    py_traj = comp_link.encode_control_trajectory(
+        1234567890123, 1234567880000, 0.05,
+        [(1.0, 2.0), (1.5, 2.5)],
+        [(-0.25, 0.2), (0.5, -0.1)],
+        comp_link.THROTTLE_DUTY)
+    assert py_traj == c_traj_frame, (
+        f"CONTROL_TRAJ bytes differ\n  C:  {c_traj_frame.hex()}\n"
+        f"  py: {py_traj.hex()}")
+    decoded_traj = comp_link.decode_control_trajectory(
+        py_traj[3:-2])
+    assert decoded_traj["horizon"] == 2
+    assert abs(decoded_traj["dt"] - 0.05) < 0.0001
+    assert decoded_traj["poses"][1] == (1.5, 2.5)
 
     # And the Python parser must accept what C produced.
     parser = comp_link.Parser()
@@ -175,6 +213,12 @@ def main():
     assert abs(pose["steering_angle"] + 0.35) < 1e-6
     assert abs(pose["motor_speed_ms"] - 4.5) < 1e-6
     assert pose["source_valid"] == 0x0f
+    assert pose["rc_steering_pwm"] == 1520
+    assert pose["rc_throttle_pwm"] == 1480
+    assert pose["armed"]
+    assert pose["control_source"] == "AUTO"
+    assert pose["trigger_high"]
+    assert pose["control_method"] == comp_link.THROTTLE_DUTY
 
     # A 90-degree yaw quaternion must read back as 90 degrees, which pins the
     # Euler convention against the firmware's own ekf_core_euler().

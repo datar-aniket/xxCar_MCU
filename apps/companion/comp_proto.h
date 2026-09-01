@@ -30,19 +30,18 @@
 #endif
 
 #define COMP_SYNC              0xfe
-/* Sized for the largest message, VEHICLE_STATE at 96 bytes, with room to
- * grow. The `len` field is a uint8 so 255 is the format's ceiling; this
- * buffer is what costs RAM, and it sits inside comp_parser_s which is copied
- * under a mutex by companion_status().
+/* Sized for CONTROL_TRAJ at its 14-step maximum. The `len` field is a uint8,
+ * but 244 is the largest defined payload; this buffer sits inside
+ * comp_parser_s, which is copied under a mutex by companion_status().
  */
 
-#define COMP_MAX_PAYLOAD       128
+#define COMP_MAX_PAYLOAD       244
 #define COMP_FRAME_OVERHEAD    5      /* sync + id + len + crc16 */
 
 /* Inbound: companion -> board. */
 
 #define COMP_MSG_EXTERNAL_POSE   1
-#define COMP_MSG_CONTROL_TRAJ    2    /* reserved, not yet defined */
+#define COMP_MSG_CONTROL_TRAJ    2
 #define COMP_MSG_TIMESYNC_REQ    3
 #define COMP_MSG_TIMESYNC_START  5
 #define COMP_MSG_TIMESYNC_END    6
@@ -106,10 +105,41 @@ struct comp_external_pose_s
 #define COMP_DIRECT_DUTY_MAX     1.0f
 #define COMP_DIRECT_CURRENT_MAX  50.0f
 
+/* CONTROL_TRAJ has a variable payload. Its 20-byte header is followed by
+ * `horizon` pose pairs and then `horizon` control pairs. Each pair is two
+ * float32 values, so 14 steps exactly fit the protocol's 244-byte ceiling.
+ */
+
+#define COMP_TRAJ_HEADER_SIZE     20u
+#define COMP_TRAJ_STEP_SIZE       16u
+#define COMP_TRAJ_MAX_HORIZON     14u
+
+#define COMP_TRAJ_TIMESTAMP_OFS    0u
+#define COMP_TRAJ_SOLUTION_OFS     8u
+#define COMP_TRAJ_HORIZON_OFS     16u
+#define COMP_TRAJ_DT_OFS          17u
+#define COMP_TRAJ_METHOD_OFS      19u
+#define COMP_TRAJ_DATA_OFS        20u
+
+/* Decoded representation. The arrays contain only the first `horizon`
+ * entries. controls[][0] is steering and controls[][1] is duty/current.
+ */
+
+struct comp_control_trajectory_s
+{
+  uint64_t timestamp_us;
+  uint64_t solution_time_us;
+  float    dt;
+  float    poses[COMP_TRAJ_MAX_HORIZON][2];
+  float    controls[COMP_TRAJ_MAX_HORIZON][2];
+  uint8_t  horizon;
+  uint8_t  control_method;
+};
+
 /* An immediate actuator command from the companion.
  *
- * This is the higher-priority half of the autonomous input; CONTROL_TRAJ is
- * the other and is not defined yet.
+ * This is the immediate, actuating half of the autonomous input.
+ * CONTROL_TRAJ publishes a plan and does not itself actuate anything.
  *
  * timestamp_us is UTC and is NOT optional here, unlike EXTERNAL_POSE where a
  * zero means "stamp it on arrival". A pose with no timestamp costs accuracy;
@@ -185,12 +215,23 @@ struct comp_vehicle_state_s
   uint8_t  solution_status;   /* 88: ESTIMATOR_* validity bits */
   uint8_t  reset_counter;     /* 89: estimator reset generation */
   uint8_t  source_valid;      /* 90: COMP_SRC_* - which inputs were fresh */
-  uint8_t  pad[5];            /* 91: a uint64 first member forces 8-byte
-                               *     alignment, so 91 pads to 96 whatever
-                               *     this says. Declared, so the wire format
-                               *     is what the struct says rather than what
-                               *     the compiler decided. */
+  uint8_t  pad;               /* 91: align the packed status */
+  uint32_t rc_status;         /* 92: raw PWM and control state, bits below */
 };
+
+/* rc_status: the two raw PWM values consume 12 bits each; four booleans use
+ * the high byte. A zero PWM means unavailable, and COMP_SRC_RC then stays
+ * clear. CH6 is the physical trigger level; CURRENT is the router's latched
+ * control mode, so releasing a momentary CH6 does not lose the selected mode.
+ */
+
+#define COMP_RC_PWM_MASK          0x0fffu
+#define COMP_RC_STEER_SHIFT       0u
+#define COMP_RC_THROTTLE_SHIFT   12u
+#define COMP_RC_ARMED            (1u << 24)
+#define COMP_RC_AUTO             (1u << 25)
+#define COMP_RC_TRIGGER_HIGH     (1u << 26)
+#define COMP_RC_CURRENT          (1u << 27)
 
 /* Which inputs were actually fresh when this was assembled.
  *
@@ -203,6 +244,7 @@ struct comp_vehicle_state_s
 #define COMP_SRC_GYRO        (1u << 1)
 #define COMP_SRC_ACCEL       (1u << 2)
 #define COMP_SRC_VESC        (1u << 3)
+#define COMP_SRC_RC          (1u << 4)
 
 /* Clock synchronisation, request and reply.
  *
@@ -240,9 +282,11 @@ struct comp_timesync_start_s
 
 struct comp_timesync_end_s
 {
-  /* Add to the board's MONOTONIC microseconds to get UTC microseconds since
-   * the epoch. The companion computes it because only it sees all four
-   * timestamps of an exchange.
+  /* Observed UTC minus board TIM5, in microseconds, at this sync. The
+   * companion computes it because only it sees all four timestamps of an
+   * exchange. The first observation establishes UTC; later observations
+   * estimate the affine UTC/TIM5 rate and remove phase error by slewing, not
+   * by replacing this offset and stepping time.
    *
    * The board does not adopt UTC as its own timebase, and must not. Every
    * internal timestamp - IMU samples, the delay ring, the fusion horizon,
@@ -255,7 +299,7 @@ struct comp_timesync_end_s
    * way in, and never seen by the estimator.
    */
 
-  int64_t  utc_offset_us;   /*  0: board monotonic + this = UTC */
+  int64_t  utc_offset_us;   /*  0: observed UTC - board TIM5 */
   uint32_t trip_us;         /*  8: the round trip it was measured at */
   uint32_t samples;         /* 12: exchanges that came back */
 };
@@ -305,7 +349,9 @@ struct comp_parser_s
 uint16_t comp_crc16(FAR const uint8_t *d, size_t n);
 uint16_t comp_crc16_update(uint16_t crc, FAR const uint8_t *d, size_t n);
 
-/* Expected payload length for a known id, or 0 when the id is unknown.
+/* Expected FIXED payload length for a known id. Zero means either unknown or
+ * variable-length CONTROL_TRAJ; the parser distinguishes that id and checks
+ * its length against the embedded horizon.
  *
  * Knowing the length is what separates "a companion newer than this
  * firmware", which is fine and ignorable, from "the two ends disagree about
@@ -313,6 +359,10 @@ uint16_t comp_crc16_update(uint16_t crc, FAR const uint8_t *d, size_t n);
  */
 
 uint8_t comp_payload_len(uint8_t id);
+
+size_t comp_control_trajectory_payload_size(uint8_t horizon);
+bool comp_control_trajectory_decode(FAR const uint8_t *payload, size_t len,
+                                    FAR struct comp_control_trajectory_s *out);
 
 void comp_parser_init(FAR struct comp_parser_s *p);
 

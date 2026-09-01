@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <poll.h>
 #include <pthread.h>
 #include <sched.h>
@@ -26,8 +27,11 @@
 #include <uORB/uORB.h>
 
 #include "companion.h"
+#include "comp_clock.h"
 #include "comp_state.h"
+#include "../control_router/control_router.h"
 #include "../param/param.h"
+#include "../rc_in/rc_in.h"
 #include "../serial/serial.h"
 #include "../uorb_msgs/uorb_msgs.h"
 #include "../../boards/fmuv6c/src/fmuv6c.h"
@@ -41,11 +45,9 @@ static volatile bool g_running;
 static volatile bool g_should_stop;
 static struct companion_status_s g_status;
 
-/* Board monotonic + this = UTC.
- *
- * g_utc_valid is a separate flag rather than testing the offset against
- * zero: an offset that genuinely IS zero is possible, and would then read as
- * "no reference" for ever.
+/* Corrected UTC is an affine view of TIM5, not CLOCK_REALTIME and not one
+ * mutable offset. The first timesync establishes absolute phase; later
+ * observations discipline rate and slew residual phase without a jump.
  */
 
 /* The downlink runs on its own thread so the TIM6 tick reaches the wire
@@ -70,6 +72,9 @@ static uint64_t g_tx_last_sample;
 static float g_torque_k = 1.0f;
 static float g_steer_k = 1.0f;
 static float g_speed_k = 1.0f;
+static uint8_t g_rc_steering_index;
+static uint8_t g_rc_throttle_index;
+static uint16_t g_rc_switch_high;
 
 /* How old an autonomous command may be by the time it lands here.
  *
@@ -99,9 +104,41 @@ static_assert(COMP_THROTTLE_DUTY == ACTUATOR_MODE_DUTY,
               "wire duty mode must match ACTUATOR_MODE_DUTY");
 static_assert(COMP_THROTTLE_CURRENT == ACTUATOR_MODE_CURRENT,
               "wire current mode must match ACTUATOR_MODE_CURRENT");
+static_assert(COMP_TRAJ_MAX_HORIZON == CONTROL_TRAJECTORY_MAX_HORIZON,
+              "wire and uORB trajectory horizons must match");
 
-static int64_t g_utc_offset_us;
-static bool    g_utc_valid;
+static pthread_mutex_t g_clock_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct comp_clock_s g_clock;
+
+static bool comp_utc_valid(void)
+{
+  bool valid;
+
+  pthread_mutex_lock(&g_clock_lock);
+  valid = g_clock.valid;
+  pthread_mutex_unlock(&g_clock_lock);
+  return valid;
+}
+
+static bool comp_mono_to_utc(uint64_t mono_us, FAR uint64_t *utc_us)
+{
+  bool valid;
+
+  pthread_mutex_lock(&g_clock_lock);
+  valid = comp_clock_to_utc(&g_clock, mono_us, utc_us);
+  pthread_mutex_unlock(&g_clock_lock);
+  return valid;
+}
+
+static bool comp_utc_to_mono(uint64_t utc_us, FAR uint64_t *mono_us)
+{
+  bool valid;
+
+  pthread_mutex_lock(&g_clock_lock);
+  valid = comp_clock_from_utc(&g_clock, utc_us, mono_us);
+  pthread_mutex_unlock(&g_clock_lock);
+  return valid;
+}
 
 /* Anything before this cannot be a real UTC time on this vehicle, so it is a
  * clock that was never set rather than one that is merely wrong. NuttX reads
@@ -116,7 +153,7 @@ static bool    g_utc_valid;
  * fmuv6c_imu_time_now(), not clock_gettime(CLOCK_MONOTONIC), and the
  * distinction is not cosmetic.
  *
- * Every timestamp the UTC offset is applied to already lives in this
+ * Every timestamp the affine UTC model converts already lives in this
  * domain: the IMU sample times that reach estimator_state come from
  * fmuv6c_imu_time_now() in icm42688.c, and so does the PPS edge. The offset
  * was being MEASURED against CLOCK_MONOTONIC - by the RTC seed and by the
@@ -131,8 +168,9 @@ static bool    g_utc_valid;
  * time that leads or lags the host by tens of milliseconds - and it moves,
  * because the divergence grows.
  *
- * One clock, used for every conversion, is the only version of this that
- * cannot drift against itself.
+ * One clock, used for every conversion and disciplined by the periodic UTC
+ * observations, is the only version of this that cannot drift against
+ * itself.
  */
 
 static uint64_t comp_now_us(void)
@@ -180,11 +218,20 @@ static void comp_seed_utc_from_rtc(FAR struct companion_status_s *s)
       return;
     }
 
-  g_utc_offset_us = ((int64_t)rt.tv_sec * 1000000ll +
-                     (int64_t)rt.tv_nsec / 1000ll) -
-                    (int64_t)comp_now_us();
-  g_utc_valid = true;
-  s->utc_from_rtc = true;
+  {
+    uint64_t mono_us = comp_now_us();
+    int64_t utc_us = (int64_t)rt.tv_sec * 1000000ll +
+                     (int64_t)rt.tv_nsec / 1000ll;
+
+    pthread_mutex_lock(&g_clock_lock);
+    s->utc_from_rtc = comp_clock_seed(&g_clock, mono_us, utc_us);
+    pthread_mutex_unlock(&g_clock_lock);
+  }
+
+  if (!s->utc_from_rtc)
+    {
+      return;
+    }
 
   syslog(LOG_INFO, "[companion] UTC from the RTC; sync to recover the "
                    "sub-second phase\n");
@@ -315,6 +362,7 @@ static int comp_write_all(int fd, FAR const uint8_t *data, size_t len)
 
 static void comp_route(int id, FAR const struct comp_parser_s *parser,
                        int fd, uint64_t rx_us, int pose_pub, int control_pub,
+                       int trajectory_pub,
                        FAR struct companion_status_s *s)
 {
   if (id == COMP_MSG_EXTERNAL_POSE)
@@ -342,7 +390,8 @@ static void comp_route(int id, FAR const struct comp_parser_s *parser,
        * larger than anything the horizon expects.
        */
 
-      if (wire.timestamp_us == 0 || !g_utc_valid)
+      if (wire.timestamp_us == 0 ||
+          !comp_utc_to_mono(wire.timestamp_us, &out.timestamp_sample))
         {
           out.timestamp_sample = 0;
 
@@ -350,11 +399,6 @@ static void comp_route(int id, FAR const struct comp_parser_s *parser,
             {
               s->rx_unsynced_stamp++;
             }
-        }
-      else
-        {
-          out.timestamp_sample =
-            (uint64_t)((int64_t)wire.timestamp_us - g_utc_offset_us);
         }
       out.x = wire.x;
       out.y = wire.y;
@@ -371,6 +415,61 @@ static void comp_route(int id, FAR const struct comp_parser_s *parser,
 
       s->rx_pose++;
       s->last_rx_us = out.timestamp;
+    }
+
+  else if (id == COMP_MSG_CONTROL_TRAJ)
+    {
+      struct comp_control_trajectory_s wire;
+      struct control_trajectory_s out;
+      uint64_t current_us;
+      uint64_t solution_us;
+      int64_t age_us;
+
+      if (!comp_control_trajectory_decode(parser->payload, parser->len,
+                                          &wire))
+        {
+          s->rx_trajectory_invalid++;
+          return;
+        }
+
+      if (!comp_utc_to_mono(wire.timestamp_us, &current_us) ||
+          !comp_utc_to_mono(wire.solution_time_us, &solution_us))
+        {
+          s->rx_trajectory_stale++;
+          return;
+        }
+
+      age_us = (int64_t)rx_us - (int64_t)current_us;
+
+      if (age_us < -(int64_t)COMP_DIRECT_FUTURE_US ||
+          age_us > (int64_t)g_auto_timeout_us ||
+          (solution_us > current_us &&
+           solution_us - current_us > COMP_DIRECT_FUTURE_US))
+        {
+          s->rx_trajectory_stale++;
+          return;
+        }
+
+      memset(&out, 0, sizeof(out));
+      out.timestamp = rx_us;
+      out.timestamp_sample = current_us;
+      out.solution_time = solution_us;
+      out.dt = wire.dt;
+      out.horizon = wire.horizon;
+      out.control_method = wire.control_method;
+      memcpy(out.poses, wire.poses, sizeof(out.poses));
+      memcpy(out.controls, wire.controls, sizeof(out.controls));
+
+      if (control_trajectory_publish(trajectory_pub, &out) < 0)
+        {
+          s->rx_publish_errors++;
+          return;
+        }
+
+      s->rx_trajectory++;
+      s->last_trajectory_horizon = out.horizon;
+      s->last_trajectory_dt = out.dt;
+      s->last_rx_us = rx_us;
     }
 
   else if (id == COMP_MSG_DIRECT_CONTROL)
@@ -390,13 +489,12 @@ static void comp_route(int id, FAR const struct comp_parser_s *parser,
        * expires, and an age that cannot be computed cannot expire.
        */
 
-      if (wire.timestamp_us == 0 || !g_utc_valid)
+      if (wire.timestamp_us == 0 ||
+          !comp_utc_to_mono(wire.timestamp_us, &sample_us))
         {
           s->rx_direct_stale++;
           return;
         }
-
-      sample_us = (uint64_t)((int64_t)wire.timestamp_us - g_utc_offset_us);
 
       /* rx_us is the TIM5 time the frame completed and sample_us is now in
        * that same domain, so this subtraction stays inside one clock. The
@@ -467,41 +565,62 @@ static void comp_route(int id, FAR const struct comp_parser_s *parser,
   else if (id == COMP_MSG_TIMESYNC_END)
     {
       struct comp_timesync_end_s end;
+      int sync_result = COMP_CLOCK_SYNC_REJECTED;
 
       memcpy(&end, parser->payload, sizeof(end));
       s->timesync_offset_us = end.utc_offset_us;
       s->timesync_trip_us = end.trip_us;
       s->timesync_samples = end.samples;
-      s->timesync_synced = end.samples > 0;
+
+      if (end.samples > 0)
+        {
+          pthread_mutex_lock(&g_clock_lock);
+          sync_result = comp_clock_observe_sync(&g_clock, rx_us,
+                                                end.utc_offset_us);
+
+          s->utc_rate_ppb = g_clock.rate_ppb;
+          s->utc_base_rate_ppb = g_clock.base_rate_ppb;
+          s->timesync_phase_error_us = g_clock.last_phase_error_us;
+          s->timesync_updates = g_clock.sync_updates;
+          s->timesync_rate_rejected = g_clock.rejected_observations;
+
+          pthread_mutex_unlock(&g_clock_lock);
+        }
+
+      s->timesync_synced = sync_result > 0;
 
       if (s->timesync_synced)
         {
-          struct timespec utc;
-          int64_t now_utc = (int64_t)comp_now_us() + end.utc_offset_us;
+          uint64_t now_utc;
 
-          g_utc_offset_us = end.utc_offset_us;
-          g_utc_valid = true;
+          s->utc_from_rtc = false;
 
-          /* The offset just moved, so the phase the PPS was measured
-           * against has moved with it. Re-establish on the next edge rather
-           * than reading the change as drift.
+          /* The first authoritative sync establishes absolute UTC and may
+           * replace the RTC's second-resolution seed. Later syncs change
+           * only the affine rate and are exactly continuous at rx_us.
+           * Re-establish the PPS phase after either kind of update so its
+           * next edge is compared with the new discipline, not the old one.
            */
 
           s->pps_phase_valid = false;
-          s->utc_from_rtc = false;
 
-          /* Set the wall clock too, so `date`, log filenames and anything
-           * else reading CLOCK_REALTIME agree with the companion. This is
-           * the only clock that is SET; the monotonic one everything else
-           * is timed against is left exactly where it was.
+          /* Set CLOCK_REALTIME once. It and the hardware RTC are then free
+           * running and are never used for wire timestamp conversion. The
+           * affine TIM5 clock above is the UTC authority after this point.
            */
 
-          utc.tv_sec = (time_t)(now_utc / 1000000);
-          utc.tv_nsec = (long)((now_utc % 1000000) * 1000);
-
-          if (clock_settime(CLOCK_REALTIME, &utc) == 0)
+          if (sync_result == COMP_CLOCK_SYNC_FIRST &&
+              comp_mono_to_utc(rx_us, &now_utc))
             {
-              s->wall_clock_set = true;
+              struct timespec utc;
+
+              utc.tv_sec = (time_t)(now_utc / 1000000ull);
+              utc.tv_nsec = (long)((now_utc % 1000000ull) * 1000ull);
+
+              if (clock_settime(CLOCK_REALTIME, &utc) == 0)
+                {
+                  s->wall_clock_set = true;
+                }
             }
         }
     }
@@ -539,12 +658,10 @@ static void comp_route(int id, FAR const struct comp_parser_s *parser,
         }
     }
 
-  /* COMP_MSG_CONTROL_TRAJ is reserved. The parser has already counted it as
-   * unknown; there is nothing to do here until it is defined.
-   */
 }
 
-/* Steer the UTC offset so the companion's PPS edge lands on a whole second.
+/* Steer the affine UTC rate so the companion's PPS edge keeps its established
+ * phase (or lands on a whole second when PPS_ABS_PHASE is selected).
  *
  * The pulse is generated BY the companion, so its rising edge is that
  * machine's own second boundary. Whatever (edge + offset) is short of, or
@@ -572,7 +689,7 @@ static void comp_pps_discipline(FAR struct companion_status_s *s)
    * nothing here to correct.
    */
 
-  if (!g_utc_valid || !pps.running ||
+  if (!comp_utc_valid() || !pps.running ||
       pps.state != FMUV6C_PPS_LOCKED || pps.last_edge_us == 0)
     {
       return;
@@ -590,7 +707,17 @@ static void comp_pps_discipline(FAR struct companion_status_s *s)
       return;                     /* stale, or the clock moved under us */
     }
 
-  utc_at_edge = (int64_t)pps.last_edge_us + g_utc_offset_us;
+  {
+    uint64_t converted;
+
+    if (!comp_mono_to_utc(pps.last_edge_us, &converted) ||
+        converted > INT64_MAX)
+      {
+        return;
+      }
+
+    utc_at_edge = (int64_t)converted;
+  }
   residual = utc_at_edge % 1000000ll;
 
   if (residual < 0)
@@ -691,19 +818,35 @@ static void comp_pps_discipline(FAR struct companion_status_s *s)
       return;
     }
 
-  g_utc_offset_us -= residual;
-  s->pps_corrections++;
+  /* Remove the phase error by changing the affine rate over the following
+   * second. Re-anchoring preserves the UTC value at `now`, so PPS can never
+   * step an outgoing timestamp or move an incoming sample discontinuously
+   * across the EKF history.
+   */
+
+  pthread_mutex_lock(&g_clock_lock);
+
+  if (comp_clock_adjust_phase(&g_clock, now, -residual, 1000000ull))
+    {
+      s->utc_rate_ppb = g_clock.rate_ppb;
+      s->utc_base_rate_ppb = g_clock.base_rate_ppb;
+      s->pps_corrections++;
+    }
+
+  pthread_mutex_unlock(&g_clock_lock);
 }
 
 
 static void comp_transmit(int fd, int state_pub, int est_sub, int gyro_sub,
-                          int accel_sub, int vesc_sub,
+                          int accel_sub, int vesc_sub, int rc_sub,
                           FAR struct companion_status_s *s)
 {
   struct estimator_state_s est;
   struct vehicle_gyro_s gyro;
   struct vehicle_accel_s accel;
   struct vesc_status_s vesc;
+  struct rc_in_s rc;
+  struct control_router_status_s router;
   struct comp_state_inputs_s in;
   struct comp_vehicle_state_s wire;
   struct vehicle_state_tx_s logged;
@@ -720,6 +863,11 @@ static void comp_transmit(int fd, int state_pub, int est_sub, int gyro_sub,
   in.torque_k = g_torque_k;
   in.steer_k = g_steer_k;
   in.speed_k = g_speed_k;
+  memset(&router, 0, sizeof(router));
+  control_router_status(&router);
+  in.control_armed = router.armed;
+  in.control_auto = router.source == ROUTER_SOURCE_AUTO;
+  in.control_current = router.mode == ROUTER_MODE_CURRENT;
 
   if (orb_copy(ORB_ID(estimator_state), est_sub, &est) < 0)
     {
@@ -793,13 +941,25 @@ static void comp_transmit(int fd, int state_pub, int est_sub, int gyro_sub,
       in.motor_counts_per_s = vesc.speed_cps;
     }
 
+  if (rc_sub >= 0 && router.rc_valid &&
+      orb_copy(ORB_ID(rc_in), rc_sub, &rc) >= 0 &&
+      g_rc_steering_index < rc.count && g_rc_throttle_index < rc.count &&
+      rc.count > 5u && rc.ok != 0 && rc.failsafe == 0)
+    {
+      in.rc_valid = true;
+      in.rc_steering_pwm = rc.channel[g_rc_steering_index];
+      in.rc_throttle_pwm = rc.channel[g_rc_throttle_index];
+      in.trigger_high = rc.channel[5] >= g_rc_switch_high;
+    }
+
   /* UTC on the wire once synced. Before that the companion gets the board's
    * raw TIM5 time, which is all there is to give.
    */
 
-  stamp = g_utc_valid ?
-          (uint64_t)((int64_t)est.timestamp_sample + g_utc_offset_us) :
-          est.timestamp_sample;
+  if (!comp_mono_to_utc(est.timestamp_sample, &stamp))
+    {
+      stamp = est.timestamp_sample;
+    }
 
   /* A solution cannot be newer than now, so refuse to say that it is.
    *
@@ -809,7 +969,13 @@ static void comp_transmit(int fd, int state_pub, int est_sub, int gyro_sub,
    * fault that had not happened.
    */
 
-  now_utc = (int64_t)comp_now_us() + (g_utc_valid ? g_utc_offset_us : 0);
+  {
+    uint64_t converted;
+    uint64_t now_mono = comp_now_us();
+
+    now_utc = comp_mono_to_utc(now_mono, &converted) ?
+              (int64_t)converted : (int64_t)now_mono;
+  }
 
   if ((int64_t)stamp > now_utc)
     {
@@ -867,6 +1033,7 @@ static void comp_transmit(int fd, int state_pub, int est_sub, int gyro_sub,
   logged.solution_status = wire.solution_status;
   logged.reset_counter = wire.reset_counter;
   logged.source_valid = wire.source_valid;
+  logged.rc_status = wire.rc_status;
   vehicle_state_tx_publish(state_pub, &logged);
 
   pthread_mutex_lock(&g_lock);
@@ -915,6 +1082,7 @@ struct comp_tx_args_s
   int gyro_sub;
   int accel_sub;
   int vesc_sub;
+  int rc_sub;
   FAR struct companion_status_s *status;
 };
 
@@ -947,7 +1115,7 @@ static FAR void *comp_tx_thread(FAR void *arg)
         {
           comp_transmit(a->fd, a->state_pub, a->est_sub, a->gyro_sub,
                         a->accel_sub,
-                        a->vesc_sub, a->status);
+                        a->vesc_sub, a->rc_sub, a->status);
         }
 
       fmuv6c_txtick_status(&tick);
@@ -977,6 +1145,7 @@ static FAR void *comp_tx_thread(FAR void *arg)
 
 static bool comp_service(int fd, FAR struct pollfd *pfd,
                          int pose_pub, int control_pub,
+                         int trajectory_pub,
                          FAR struct companion_status_s *status)
 {
   while (!g_should_stop)
@@ -1019,7 +1188,8 @@ static bool comp_service(int fd, FAR struct pollfd *pfd,
                        */
 
                       comp_route(id, &status->parser, fd, comp_now_us(),
-                                 pose_pub, control_pub, status);
+                                 pose_pub, control_pub, trajectory_pub,
+                                 status);
                     }
                 }
             }
@@ -1056,15 +1226,20 @@ static int companion_daemon(int argc, FAR char *argv[])
   int fd = -1;
   int pose_pub = -1;
   int control_pub = -1;
+  int trajectory_pub = -1;
   int state_pub = -1;
   int est_sub = -1;
   int gyro_sub = -1;
   int accel_sub = -1;
   int vesc_sub = -1;
+  int rc_sub = -1;
   int result = EXIT_FAILURE;
 
   memset(&status, 0, sizeof(status));
   comp_parser_init(&status.parser);
+  pthread_mutex_lock(&g_clock_lock);
+  comp_clock_init(&g_clock);
+  pthread_mutex_unlock(&g_clock_lock);
   comp_seed_utc_from_rtc(&status);
 
   if (comp_find_port(&port) < 0)
@@ -1087,6 +1262,18 @@ static int companion_daemon(int argc, FAR char *argv[])
   g_torque_k = param_f32("VESC_TORQUE_K");
   g_steer_k = param_f32("VESC_STEER_K");
   g_speed_k = param_f32("VESC_SPEED_K");
+  {
+    int32_t steering_map = param_i32("RC_MAP_STEERING");
+    int32_t throttle_map = param_i32("RC_MAP_THROTTLE");
+
+    g_rc_steering_index = steering_map >= 1 &&
+                          steering_map <= RC_IN_MAX_CHANNELS ?
+                          (uint8_t)(steering_map - 1) : UINT8_MAX;
+    g_rc_throttle_index = throttle_map >= 1 &&
+                          throttle_map <= RC_IN_MAX_CHANNELS ?
+                          (uint8_t)(throttle_map - 1) : UINT8_MAX;
+    g_rc_switch_high = (uint16_t)param_i32("RC_SW_HIGH");
+  }
   status.pps_max_correction_us = (uint32_t)param_i32("PPS_MAX_COR_US");
   status.pps_absolute_phase = param_i32("PPS_ABS_PHASE") != 0;
   g_auto_timeout_us = (uint32_t)param_i32("AUTO_CMD_TO_MS") * 1000u;
@@ -1128,6 +1315,16 @@ static int companion_daemon(int argc, FAR char *argv[])
       goto out;
     }
 
+  trajectory_pub = control_trajectory_advertise();
+
+  if (trajectory_pub < 0)
+    {
+      syslog(LOG_ERR,
+             "[companion] cannot advertise control_trajectory (%d)\n",
+             errno);
+      goto out;
+    }
+
   state_pub = vehicle_state_tx_advertise();
 
   if (state_pub < 0)
@@ -1152,6 +1349,7 @@ static int companion_daemon(int argc, FAR char *argv[])
   gyro_sub = orb_subscribe(ORB_ID(vehicle_gyro));
   accel_sub = orb_subscribe(ORB_ID(vehicle_accel));
   vesc_sub = orb_subscribe(ORB_ID(vesc_status));
+  rc_sub = orb_subscribe(ORB_ID(rc_in));
 
   g_running = true;
   status.running = true;
@@ -1249,6 +1447,7 @@ static int companion_daemon(int argc, FAR char *argv[])
       tx_args.gyro_sub = gyro_sub;
       tx_args.accel_sub = accel_sub;
       tx_args.vesc_sub = vesc_sub;
+      tx_args.rc_sub = rc_sub;
       tx_args.status = &status;
       /* An EXPLICIT stack, not the default.
        *
@@ -1279,6 +1478,7 @@ static int companion_daemon(int argc, FAR char *argv[])
         }
 
       keep_going = comp_service(fd, &pfd, pose_pub, control_pub,
+                                trajectory_pub,
                                 &status);
 
       if (tx_running)
@@ -1349,6 +1549,11 @@ out:
       orb_unsubscribe(vesc_sub);
     }
 
+  if (rc_sub >= 0)
+    {
+      orb_unsubscribe(rc_sub);
+    }
+
   if (pose_pub >= 0)
     {
       orb_unadvertise(pose_pub);
@@ -1357,6 +1562,11 @@ out:
   if (control_pub >= 0)
     {
       orb_unadvertise(control_pub);
+    }
+
+  if (trajectory_pub >= 0)
+    {
+      orb_unadvertise(trajectory_pub);
     }
 
   if (state_pub >= 0)

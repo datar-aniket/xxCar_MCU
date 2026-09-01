@@ -53,12 +53,22 @@ struct companion_status_s
   uint64_t last_direct_us;      /* board time of the last accepted command */
   uint32_t last_direct_age_us;  /* how old that one was on arrival */
   uint32_t auto_timeout_us;     /* AUTO_CMD_TO_MS, the age budget above */
+  uint32_t rx_trajectory;       /* accepted and published plans */
+  uint32_t rx_trajectory_stale; /* unusable UTC or expired current_time */
+  uint32_t rx_trajectory_invalid; /* malformed fields/ranges */
+  uint8_t  last_trajectory_horizon;
+  float    last_trajectory_dt;
   uint32_t timesync_replies;
   uint32_t timesync_expected;   /* the burst the companion announced */
   uint32_t timesync_samples;    /* what came back, per the companion */
   int64_t  timesync_offset_us;  /* what the companion settled on */
   uint32_t timesync_trip_us;
   bool     timesync_synced;
+  int64_t  utc_rate_ppb;        /* applied a-1 in UTCc=a*TIM5+b */
+  int64_t  utc_base_rate_ppb;   /* regression rate before phase slew */
+  int64_t  timesync_phase_error_us; /* observation - continuous UTCc */
+  uint32_t timesync_updates;
+  uint32_t timesync_rate_rejected; /* implausible clock steps/rates */
   bool     utc_from_rtc;        /* offset came from the RTC, not a sync */
   bool     wall_clock_set;      /* CLOCK_REALTIME set from companion UTC */
   uint32_t rx_unsynced_stamp;   /* UTC arrived before a sync could use it */

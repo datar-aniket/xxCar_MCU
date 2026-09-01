@@ -213,7 +213,8 @@ g_formats[] =
     "float[3] position;float[4] quaternion;float[3] velocity;"
     "float[3] angular_velocity;float side_slip_rad;float[3] accel;"
     "float wheel_torque_nm;float steering_angle;float motor_speed_ms;"
-    "uint8_t solution_status;uint8_t reset_counter;uint8_t source_valid;" },
+    "uint32_t rc_status;uint8_t solution_status;uint8_t reset_counter;"
+    "uint8_t source_valid;" },
   { "estimator_diag",
     "uint64_t timestamp;uint64_t timestamp_sample;"
     "uint64_t extnav_timestamp;float[3] specific_force;"
@@ -260,7 +261,7 @@ static const struct log_topic_s g_topics[] =
   { NULL,            ORB_ID(estimator_state),    0, "estimator_state", 0, 128,"LOG_EKF"  },
   { NULL,            ORB_ID(external_pose),      0, "external_pose",   0, 54, "LOG_EKF"  },
   { NULL,            ORB_ID(vehicle_accel),      0, "vehicle_accel",   0, 30, "LOG_EKF"  },
-  { NULL,            ORB_ID(vehicle_state_tx),   0, "vehicle_state_tx",0, 115,"LOG_EKF"  },
+  { NULL,            ORB_ID(vehicle_state_tx),   0, "vehicle_state_tx",0, 119,"LOG_EKF"  },
   { NULL,            ORB_ID(estimator_diag),     0, "estimator_diag",  0, 241,"LOG_EKF"  },
 };
 

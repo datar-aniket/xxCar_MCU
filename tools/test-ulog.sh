@@ -40,6 +40,7 @@ assert by['estimator_diag'].data['extnav_timestamp'][0] == 850
 assert abs(by['vehicle_accel'].data['y'][0] - 0.08) < 1e-4
 assert by['vehicle_state_tx'].data['accel_timestamp_sample'][0] == 990
 assert abs(by['vehicle_state_tx'].data['accel[1]'][0] - 0.08) < 1e-4
-assert by['vehicle_state_tx'].data['source_valid'][0] == 0x0f
+assert by['vehicle_state_tx'].data['source_valid'][0] == 0x1f
+assert by['vehicle_state_tx'].data['rc_status'][0] == 0x075c85f0
 print("ULog: 12 topics decoded, values verified - OK")
 PY

@@ -53,6 +53,14 @@ struct comp_state_inputs_s
   float    adc_volts;
   float    motor_counts_per_s;
 
+  bool     rc_valid;
+  uint16_t rc_steering_pwm;
+  uint16_t rc_throttle_pwm;
+  bool     control_armed;
+  bool     control_auto;
+  bool     trigger_high;
+  bool     control_current;
+
   float    torque_k;
   float    steer_k;
   float    speed_k;

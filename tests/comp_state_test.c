@@ -416,6 +416,38 @@ static void test_build_scalars(void)
   assert((out.source_valid & COMP_SRC_VESC) != 0);
 }
 
+static void test_build_packs_rc_and_control_status(void)
+{
+  struct comp_state_inputs_s in;
+  struct comp_vehicle_state_s out;
+
+  memset(&in, 0, sizeof(in));
+  in.rc_valid = true;
+  in.rc_steering_pwm = 1520;
+  in.rc_throttle_pwm = 1480;
+  in.control_armed = true;
+  in.control_auto = true;
+  in.trigger_high = true;
+  in.control_current = true;
+
+  comp_state_build(&in, 0, &out);
+
+  assert((out.source_valid & COMP_SRC_RC) != 0);
+  assert(((out.rc_status >> COMP_RC_STEER_SHIFT) & COMP_RC_PWM_MASK) ==
+         1520);
+  assert(((out.rc_status >> COMP_RC_THROTTLE_SHIFT) & COMP_RC_PWM_MASK) ==
+         1480);
+  assert((out.rc_status & COMP_RC_ARMED) != 0);
+  assert((out.rc_status & COMP_RC_AUTO) != 0);
+  assert((out.rc_status & COMP_RC_TRIGGER_HIGH) != 0);
+  assert((out.rc_status & COMP_RC_CURRENT) != 0);
+
+  memset(&in, 0, sizeof(in));
+  comp_state_build(&in, 0, &out);
+  assert(out.rc_status == 0);
+  assert((out.source_valid & COMP_SRC_RC) == 0);
+}
+
 /* The velocity in the packet must be BODY frame. Pointing north at 2 m/s
  * due north is 2 m/s forward, not 2 m/s on the y axis.
  */
@@ -454,6 +486,7 @@ int main(void)
   test_build_accel_needs_attitude();
   test_build_accel_removes_ekf_bias();
   test_build_scalars();
+  test_build_packs_rc_and_control_status();
   test_build_velocity_is_body();
 
   printf("comp_state: frames, gravity removal and tachometer rate - OK\n");

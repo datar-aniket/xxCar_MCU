@@ -26,11 +26,11 @@ import time
 import serial
 
 SYNC = 0xFE
-MAX_PAYLOAD = 128
+MAX_PAYLOAD = 244
 FRAME_OVERHEAD = 5
 
 MSG_EXTERNAL_POSE = 1
-MSG_CONTROL_TRAJ = 2       # reserved
+MSG_CONTROL_TRAJ = 2
 MSG_TIMESYNC_REQ = 3
 MSG_TIMESYNC_REP = 4
 MSG_TIMESYNC_START = 5
@@ -52,6 +52,9 @@ DIRECT_STEER_MAX = 1.0
 DIRECT_DUTY_MAX = 1.0
 DIRECT_CURRENT_MAX = 50.0
 
+TRAJECTORY_MAX_HORIZON = 14
+CONTROL_TRAJECTORY_HEADER = struct.Struct("<QQBeB")
+
 # struct comp_external_pose_s - 48 bytes
 EXTERNAL_POSE = struct.Struct("<Q3f6fBB2x")
 
@@ -61,7 +64,15 @@ EXTERNAL_POSE = struct.Struct("<Q3f6fBB2x")
 # world frame, twist in the body frame.
 #   position, quaternion  local ENU
 #   velocity, angular_velocity, accel   body FLU
-VEHICLE_STATE = struct.Struct("<Q3f4f3f3ff3ffffBBB5x")
+VEHICLE_STATE = struct.Struct("<Q3f4f3f3ff3ffffBBBxI")
+
+RC_PWM_MASK = 0x0FFF
+RC_STEER_SHIFT = 0
+RC_THROTTLE_SHIFT = 12
+RC_ARMED = 1 << 24
+RC_AUTO = 1 << 25
+RC_TRIGGER_HIGH = 1 << 26
+RC_CURRENT = 1 << 27
 
 # Which inputs were fresh when the packet was assembled. Without these a
 # stopped VESC and a stationary vehicle both report zero torque.
@@ -69,6 +80,7 @@ SRC_ESTIMATOR = 1 << 0
 SRC_GYRO = 1 << 1
 SRC_ACCEL = 1 << 2
 SRC_VESC = 1 << 3
+SRC_RC = 1 << 4
 
 assert EXTERNAL_POSE.size == 48, EXTERNAL_POSE.size
 assert VEHICLE_STATE.size == 96, VEHICLE_STATE.size
@@ -98,6 +110,12 @@ PAYLOAD_LEN = {
     MSG_TIMESYNC_END: TIMESYNC_END.size,
     MSG_DIRECT_CONTROL: DIRECT_CONTROL.size,
 }
+
+
+def trajectory_payload_size(horizon: int) -> int:
+    if not 1 <= int(horizon) <= TRAJECTORY_MAX_HORIZON:
+        return 0
+    return CONTROL_TRAJECTORY_HEADER.size + int(horizon) * 16
 
 _CRC_TAB = (0x0000, 0x1021, 0x2042, 0x3063, 0x4084, 0x50A5, 0x60C6, 0x70E7,
             0x8108, 0x9129, 0xA14A, 0xB16B, 0xC18C, 0xD1AD, 0xE1CE, 0xF1EF)
@@ -177,6 +195,81 @@ def encode_direct_control(steering, throttle, throttle_type, timestamp_us):
     return encode(MSG_DIRECT_CONTROL, body)
 
 
+def encode_control_trajectory(timestamp_us, solution_time_us, dt, poses,
+                              controls, control_method=THROTTLE_DUTY):
+    """Frame a finite-horizon plan without directly actuating it.
+
+    poses is [(x, y), ...]; controls is [(steering, duty_or_amps), ...].
+    Both arrays have exactly `horizon` entries. dt is encoded as IEEE binary16
+    on the wire; all coordinates and controls remain float32.
+    """
+    poses = tuple(tuple(v) for v in poses)
+    controls = tuple(tuple(v) for v in controls)
+    horizon = len(poses)
+
+    if horizon != len(controls) or not trajectory_payload_size(horizon):
+        raise ValueError("poses and controls need the same 1..14 length")
+    if int(timestamp_us) <= 0 or int(solution_time_us) <= 0:
+        raise ValueError("trajectory timestamps must be UTC microseconds")
+    if not math.isfinite(float(dt)) or not float(dt) > 0.0:
+        raise ValueError("trajectory dt must be finite and positive")
+    if control_method not in (THROTTLE_DUTY, THROTTLE_CURRENT):
+        raise ValueError("control_method must be duty (0) or current (1)")
+
+    limit = (DIRECT_CURRENT_MAX if control_method == THROTTLE_CURRENT
+             else DIRECT_DUTY_MAX)
+    flat_poses = []
+    flat_controls = []
+
+    for pose, control in zip(poses, controls):
+        if len(pose) != 2 or len(control) != 2:
+            raise ValueError("each pose and control must contain two values")
+        x, y = map(float, pose)
+        steering, motor = map(float, control)
+        if not (math.isfinite(x) and math.isfinite(y)):
+            raise ValueError("trajectory poses must be finite")
+        if not abs(steering) <= DIRECT_STEER_MAX:
+            raise ValueError("trajectory steering is outside +/-1")
+        if not abs(motor) <= limit:
+            raise ValueError("trajectory motor value is outside mode range")
+        flat_poses.extend((x, y))
+        flat_controls.extend((steering, motor))
+
+    try:
+        header = CONTROL_TRAJECTORY_HEADER.pack(
+            int(timestamp_us), int(solution_time_us), horizon, float(dt),
+            int(control_method))
+    except (OverflowError, struct.error) as exc:
+        raise ValueError("trajectory dt is not representable as float16") \
+            from exc
+
+    encoded_dt = struct.unpack_from("<e", header, 17)[0]
+    if not math.isfinite(encoded_dt) or not encoded_dt > 0.0:
+        raise ValueError("trajectory dt rounds outside positive float16")
+
+    values = struct.pack(f"<{horizon * 4}f", *(flat_poses + flat_controls))
+    return encode(MSG_CONTROL_TRAJ, header + values)
+
+
+def decode_control_trajectory(payload: bytes):
+    if len(payload) < CONTROL_TRAJECTORY_HEADER.size:
+        raise ValueError("short CONTROL_TRAJ payload")
+    timestamp_us, solution_time_us, horizon, dt, method = \
+        CONTROL_TRAJECTORY_HEADER.unpack_from(payload)
+    if len(payload) != trajectory_payload_size(horizon):
+        raise ValueError("CONTROL_TRAJ length does not match horizon")
+    values = struct.unpack_from(f"<{horizon * 4}f", payload,
+                                CONTROL_TRAJECTORY_HEADER.size)
+    split = horizon * 2
+    poses = tuple(zip(values[:split:2], values[1:split:2]))
+    controls = tuple(zip(values[split::2], values[split + 1::2]))
+    return {"timestamp_us": timestamp_us,
+            "solution_time_us": solution_time_us,
+            "horizon": horizon, "dt": dt,
+            "poses": poses, "controls": controls,
+            "control_method": method}
+
+
 def host_now_us() -> int:
     """Host MONOTONIC microseconds - the timebase the exchange is measured in.
 
@@ -217,7 +310,12 @@ def encode_timesync_start(count: int) -> bytes:
 
 def encode_timesync_end(utc_offset_us: int, trip_us: int,
                         samples: int) -> bytes:
-    """utc_offset_us: add to the board's MONOTONIC time to get UTC."""
+    """utc_offset_us: observed UTC minus board TIM5 at this sync.
+
+    The board uses the first observation for absolute phase. Later calls
+    estimate the affine clock rate and slew residual phase without stepping
+    corrected UTC.
+    """
     return encode(MSG_TIMESYNC_END,
                   TIMESYNC_END.pack(int(utc_offset_us), int(trip_us),
                                     int(samples)))
@@ -254,6 +352,7 @@ def decode_vehicle_state(payload: bytes) -> dict:
     ahead" and the two must stay distinguishable. Check it with math.isnan.
     """
     f = VEHICLE_STATE.unpack(payload)
+    rc_status = f[24]
     return {
         "timestamp_us": f[0],
         "position": f[1:4],            # local ENU, m
@@ -268,6 +367,14 @@ def decode_vehicle_state(payload: bytes) -> dict:
         "solution_status": f[21],
         "reset_counter": f[22],
         "source_valid": f[23],
+        "rc_status": rc_status,
+        "rc_steering_pwm": ((rc_status >> RC_STEER_SHIFT) & RC_PWM_MASK),
+        "rc_throttle_pwm": ((rc_status >> RC_THROTTLE_SHIFT) & RC_PWM_MASK),
+        "armed": bool(rc_status & RC_ARMED),
+        "control_source": "AUTO" if rc_status & RC_AUTO else "RC",
+        "trigger_high": bool(rc_status & RC_TRIGGER_HIGH),
+        "control_method": (THROTTLE_CURRENT if rc_status & RC_CURRENT
+                           else THROTTLE_DUTY),
     }
 
 
@@ -370,6 +477,17 @@ class Parser:
         if want != self.crc_rx:
             self.crc_errors += 1
             return None
+
+        if self.id == MSG_CONTROL_TRAJ:
+            if self.len < CONTROL_TRAJECTORY_HEADER.size:
+                self.bad_length += 1
+                return None
+            horizon = self.payload[16]
+            if self.len != trajectory_payload_size(horizon):
+                self.bad_length += 1
+                return None
+            self.frames += 1
+            return self.id, bytes(self.payload)
 
         expect = PAYLOAD_LEN.get(self.id)
         if expect is None:

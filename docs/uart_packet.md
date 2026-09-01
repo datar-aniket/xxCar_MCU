@@ -31,7 +31,7 @@ daemons (`SENS_EN`, `SENS_AUX_EN`). Nothing needs starting by hand.
 
 - `0xFE` sync byte.
 - `id` message id, section 3.
-- `len` payload length in bytes, 0..64.
+- `len` payload length in bytes, 0..244.
 - `crc` CRC16 over **`id`, `len` and `payload`** — not over the sync byte.
 
 Total overhead is 5 bytes.
@@ -52,7 +52,7 @@ direction fails to route rather than half-working.
 | Id | Name | Direction | Payload |
 |---|---|---|---|
 | 1 | `EXTERNAL_POSE` | companion → board | 48 |
-| 2 | `CONTROL_TRAJ` | companion → board | *reserved, undefined* |
+| 2 | `CONTROL_TRAJ` | companion → board | `20 + 16*horizon`, max 244 |
 | 3 | `TIMESYNC_REQ` | companion → board | 8 |
 | 4 | `TIMESYNC_REP` | board → companion | 24 |
 | 5 | `TIMESYNC_START` | companion → board | 8 |
@@ -66,9 +66,10 @@ separately and is not benign: it means the two ends disagree about a format.
 
 ## 4. Byte order
 
-**Little-endian, throughout.** Integers and IEEE-754 floats are laid out as
-the STM32 stores them, so a payload is a direct `memcpy` of the struct at both
-ends.
+**Little-endian, throughout.** Fixed-layout messages use naturally aligned C
+structures. `CONTROL_TRAJ` is explicitly packed because its binary16 `dt` is
+at an unaligned offset; use the documented offsets or the supplied codec
+rather than `memcpy` of a compiler-defined structure.
 
 > Note the contrast with [`can_packet.md`](can_packet.md), where every VESC
 > field is **big**-endian. The two protocols in this tree disagree, and
@@ -299,7 +300,28 @@ hardware timer.
 | 88 | `uint8` | `solution_status` | — | bits below |
 | 89 | `uint8` | `reset_counter` | — | estimator reset generation |
 | 90 | `uint8` | `source_valid` | — | which inputs were fresh |
-| 91 | `uint8[5]` | pad | | |
+| 91 | `uint8` | pad | — | zero |
+| 92 | `uint32` | `rc_status` | — | packed RC/control state |
+
+### rc_status
+
+The final four bytes carry raw operator inputs and the state actually selected
+by the safety router without increasing the 96-byte packet size:
+
+| Bits | Meaning |
+|---|---|
+| 0..11 | steering PWM in µs, from `RC_MAP_STEERING` |
+| 12..23 | throttle/control PWM in µs, from `RC_MAP_THROTTLE` |
+| 24 | armed (`1`) / disarmed (`0`) |
+| 25 | AUTO (`1`) / RC (`0`) source selected by the router |
+| 26 | physical RC channel 6 trigger high (`1`) / low (`0`) |
+| 27 | current/torque control (`1`) / duty-cycle control (`0`) |
+| 28..31 | reserved, zero |
+
+Each PWM occupies 12 bits (`value & 0x0fff`). When RC is unavailable both PWM
+values are zero and `COMP_SRC_RC` is clear. The CH6 bit is its live input level
+using `RC_SW_HIGH`; the control-mode bit is the router's latched selection.
+They can therefore differ after a momentary CH6 trigger is released.
 
 ### The frames are not all the same
 
@@ -480,6 +502,7 @@ hard for a rate loop, EKF3 is unaffected.
 | 1 | `COMP_SRC_GYRO` | `angular_velocity` is real |
 | 2 | `COMP_SRC_ACCEL` | `accel` is real |
 | 3 | `COMP_SRC_VESC` | the three VESC channels are real |
+| 4 | `COMP_SRC_RC` | packed steering/throttle PWM values are fresh |
 
 **Check this before trusting a zero.** A stopped VESC and a stationary
 vehicle both report zero wheel torque, and only one of them means the vehicle
@@ -552,16 +575,63 @@ state = {
     "solution_status": f[21],
     "reset_counter": f[22],
     "source_valid": f[23],
+    "rc_status": f[24],
 }
 ```
 
 `tools/comp_link.py` carries this as `decode_vehicle_state()`, and
 `tests/comp_proto_cross_test.py` pins it against the C encoder byte for byte.
 
-## 8. DIRECT_CONTROL (id 7, 24 bytes)
+## 8. CONTROL_TRAJ (id 2, variable length)
+
+A finite-horizon plan computed against a known pose. Receiving this message
+publishes the `control_trajectory` uORB topic; it does **not** directly move
+the vehicle. A trajectory follower can later select the time-appropriate
+element and publish an immediate `control_cmd` through the safety router.
+
+The payload is a 20-byte header, followed by exactly `horizon` pose pairs and
+then exactly `horizon` control pairs:
+
+| Offset | Type | Field | Meaning |
+|---|---|---|---|
+| 0 | `uint64` | `timestamp_us` | UTC µs, sender's current time |
+| 8 | `uint64` | `solution_time_us` | UTC µs of the pose used to solve the plan |
+| 16 | `uint8` | `horizon` | number of pose and control entries, 1..14 |
+| 17 | `float16` | `dt` | seconds between trajectory entries |
+| 19 | `uint8` | `control_method` | 0 = duty, 1 = current |
+| 20 | `float32[horizon][2]` | `poses` | `(x, y)` in local ENU, metres |
+| `20 + 8*horizon` | `float32[horizon][2]` | `controls` | `(steering, duty_or_amps)` |
+
+`dt` is IEEE-754 binary16, little-endian. Every other floating-point field is
+IEEE-754 binary32. Pose and control arrays have the same count: horizon `N`
+means `N` poses and `N` controls, not `N+1` poses.
+
+The maximum horizon is 14 because `20 + 16*14 = 244`, the protocol payload
+ceiling. Both timestamps are required and converted back to TIM5 with the
+affine clock relation. A plan is rejected when its current timestamp is stale
+or far in the future, its solution time is in the future relative to current
+time, `dt` is invalid, or any pose/control is non-finite or out of range.
+
+`control_method` uses the board actuator enum:
+
+- `0`: steering −1..+1 and duty −1..+1.
+- `1`: steering −1..+1 and current −50..+50 A.
+
+```python
+frame = comp_link.encode_control_trajectory(
+    timestamp_us=utc_now_us,
+    solution_time_us=localization_pose_utc_us,
+    dt=0.05,
+    poses=[(1.0, 2.0), (1.1, 2.0)],
+    controls=[(0.1, 0.20), (0.08, 0.18)],
+    control_method=comp_link.THROTTLE_DUTY,
+)
+```
+
+## 9. DIRECT_CONTROL (id 7, 24 bytes)
 
 An immediate actuator command. This is the higher-priority half of the
-autonomous input; `CONTROL_TRAJ` is the other and is not defined yet.
+autonomous input; `CONTROL_TRAJ` carries a complete non-actuating plan.
 
 | Offset | Type | Field | Meaning |
 |---|---|---|---|
@@ -606,7 +676,7 @@ command on the wire still becomes 20 A at the motor.
 ### The timestamp is required
 
 Unlike `EXTERNAL_POSE`, a zero timestamp is **not** accepted, and neither is
-any timestamp before the clocks have been related (section 9). A pose with no
+any timestamp before the clocks have been related (section 10). A pose with no
 usable stamp costs accuracy; a command with no usable stamp cannot be aged,
 and an actuator command of unknown age is the one thing this link must not act
 on. Both cases are counted in `rx_direct_stale`.
@@ -660,7 +730,7 @@ design.
              last age 3.2 ms of 100 ms budget (AUTO_CMD_TO_MS)
 ```
 
-## 9. Clock synchronisation
+## 10. Clock synchronisation
 
 Timestamps are only meaningful once the clocks are related. Two mechanisms
 work together.
@@ -675,7 +745,10 @@ A bracketed exchange, all initiated by the companion:
    when it asked. The board answers each with `TIMESYNC_REP`:
    `{ uint64 host_tx_us, uint64 board_rx_us, uint64 board_tx_us }`.
 3. `TIMESYNC_END` — `{ int64 utc_offset_us, uint32 trip_us, uint32 samples }`,
-   telling the board what the companion concluded.
+   telling the board the observed `UTC - TIM5` offset. The first completed
+   sync establishes absolute UTC. Later observations estimate the scale in
+   `corrected_UTC = a * TIM5 + b`; phase error is removed by a bounded rate
+   slew, so corrected UTC never steps when a periodic sync completes.
 
 With four timestamps per exchange:
 
@@ -697,15 +770,16 @@ What it buys is that the *board* knows what the companion concluded, so
 whether its peer thinks the clocks are aligned.
 
 **The board never adopts UTC as its own timebase.** Every internal timestamp
-stays monotonic, because monotonic is the only clock that cannot step. UTC is
-a wire format: converted going out, converted coming back, never seen by the
-estimator.
+stays in TIM5, because monotonic is the only clock that cannot step. UTC is a
+wire format: converted going out, converted back through the exact inverse,
+and never seen by the estimator. `CLOCK_REALTIME`/RTC is set only by the first
+authoritative sync and then free-runs; it is not used in either conversion.
 
 ### PPS
 
 Drive **TELEM2 CTS** (PC9) with a 3.3 V rising edge on the UTC second. The
-board captures it on TIM3 at 1 MHz and steers its UTC offset so that edge
-lands on a whole second.
+board captures it on TIM3 at 1 MHz and steers the affine UTC rate so the
+established pulse phase remains fixed without stepping corrected UTC.
 
 Because the pulse comes *from* the companion, its edge is that machine's own
 second boundary — which makes this a direct microsecond-resolution
@@ -718,7 +792,7 @@ A timesync burst, or the RTC, must establish the absolute time first —
 
 `pps status` shows lock state, period and edge counts.
 
-## 10. Minimal sender
+## 11. Minimal sender
 
 ```python
 import struct, serial
@@ -747,7 +821,7 @@ port.write(external_pose(1.5, -2.25, 0.5, 1755000000000000, reset_counter=3))
 Check that against the test vector in section 6 before trusting it against
 the board.
 
-## 11. Diagnostics
+## 12. Diagnostics
 
 `companion status` on the NSH console reports, among others:
 

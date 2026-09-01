@@ -62,6 +62,7 @@ ORB_NAME_FITS("vehicle_state_tx");
 ORB_NAME_FITS("vesc_status");
 ORB_NAME_FITS("actuator_command");
 ORB_NAME_FITS("control_cmd");
+ORB_NAME_FITS("control_trajectory");
 ORB_NAME_FITS("vehicle_imu");
 ORB_NAME_FITS("estimator_state");
 ORB_NAME_FITS("estimator_diag");
@@ -147,7 +148,9 @@ static_assert(offsetof(struct vehicle_state_tx_s, side_slip_rad) == 84,
 static_assert(offsetof(struct vehicle_state_tx_s, accel) == 88, "layout");
 static_assert(offsetof(struct vehicle_state_tx_s, wheel_torque_nm) == 100,
               "layout");
-static_assert(offsetof(struct vehicle_state_tx_s, solution_status) == 112,
+static_assert(offsetof(struct vehicle_state_tx_s, rc_status) == 112,
+              "layout");
+static_assert(offsetof(struct vehicle_state_tx_s, solution_status) == 116,
               "layout");
 static_assert(sizeof(struct vehicle_state_tx_s) == 120, "layout");
 static_assert(VEHICLE_STATE_TX_QUEUE_SIZE >= 32u,
@@ -173,6 +176,20 @@ static_assert(offsetof(struct control_cmd_s, motor)     ==  8, "layout");
 static_assert(offsetof(struct control_cmd_s, steering)  == 12, "layout");
 static_assert(offsetof(struct control_cmd_s, mode)      == 16, "layout");
 static_assert(sizeof(struct control_cmd_s)              == 24, "layout");
+
+static_assert(offsetof(struct control_trajectory_s, timestamp) == 0,
+              "layout");
+static_assert(offsetof(struct control_trajectory_s, timestamp_sample) == 8,
+              "layout");
+static_assert(offsetof(struct control_trajectory_s, solution_time) == 16,
+              "layout");
+static_assert(offsetof(struct control_trajectory_s, dt) == 24, "layout");
+static_assert(offsetof(struct control_trajectory_s, poses) == 28, "layout");
+static_assert(offsetof(struct control_trajectory_s, controls) == 140,
+              "layout");
+static_assert(offsetof(struct control_trajectory_s, horizon) == 252,
+              "layout");
+static_assert(sizeof(struct control_trajectory_s) == 256, "layout");
 
 static_assert(offsetof(struct vehicle_imu_s, timestamp)         ==  0, "layout");
 static_assert(offsetof(struct vehicle_imu_s, timestamp_sample)  ==  8, "layout");
@@ -295,6 +312,7 @@ static const char vehicle_state_tx_format[] =
   ",angular_velocity[2]:%hf,side_slip_rad:%hf"
   ",accel[0]:%hf,accel[1]:%hf,accel[2]:%hf"
   ",wheel_torque_nm:%hf,steering_angle:%hf,motor_speed_ms:%hf"
+  ",rc_status:%" PRIu32
   ",solution_status:%hhu,reset_counter:%hhu,source_valid:%hhu";
 
 static const char vesc_status_format[] =
@@ -314,6 +332,40 @@ static const char control_cmd_format[] =
   "timestamp:%" PRIu64
   ",motor:%hf,steering:%hf"
   ",mode:%hhu";
+
+static const char control_trajectory_format[] =
+  "timestamp:%" PRIu64
+  ",timestamp_sample:%" PRIu64
+  ",solution_time:%" PRIu64 ",dt:%hf"
+  ",poses[0][0]:%hf,poses[0][1]:%hf"
+  ",poses[1][0]:%hf,poses[1][1]:%hf"
+  ",poses[2][0]:%hf,poses[2][1]:%hf"
+  ",poses[3][0]:%hf,poses[3][1]:%hf"
+  ",poses[4][0]:%hf,poses[4][1]:%hf"
+  ",poses[5][0]:%hf,poses[5][1]:%hf"
+  ",poses[6][0]:%hf,poses[6][1]:%hf"
+  ",poses[7][0]:%hf,poses[7][1]:%hf"
+  ",poses[8][0]:%hf,poses[8][1]:%hf"
+  ",poses[9][0]:%hf,poses[9][1]:%hf"
+  ",poses[10][0]:%hf,poses[10][1]:%hf"
+  ",poses[11][0]:%hf,poses[11][1]:%hf"
+  ",poses[12][0]:%hf,poses[12][1]:%hf"
+  ",poses[13][0]:%hf,poses[13][1]:%hf"
+  ",controls[0][0]:%hf,controls[0][1]:%hf"
+  ",controls[1][0]:%hf,controls[1][1]:%hf"
+  ",controls[2][0]:%hf,controls[2][1]:%hf"
+  ",controls[3][0]:%hf,controls[3][1]:%hf"
+  ",controls[4][0]:%hf,controls[4][1]:%hf"
+  ",controls[5][0]:%hf,controls[5][1]:%hf"
+  ",controls[6][0]:%hf,controls[6][1]:%hf"
+  ",controls[7][0]:%hf,controls[7][1]:%hf"
+  ",controls[8][0]:%hf,controls[8][1]:%hf"
+  ",controls[9][0]:%hf,controls[9][1]:%hf"
+  ",controls[10][0]:%hf,controls[10][1]:%hf"
+  ",controls[11][0]:%hf,controls[11][1]:%hf"
+  ",controls[12][0]:%hf,controls[12][1]:%hf"
+  ",controls[13][0]:%hf,controls[13][1]:%hf"
+  ",horizon:%hhu,control_method:%hhu";
 
 static const char vehicle_imu_format[] =
   "timestamp:%" PRIu64
@@ -389,6 +441,8 @@ ORB_DEFINE(vesc_status, struct vesc_status_s, vesc_status_format);
 ORB_DEFINE(actuator_command, struct actuator_command_s,
            actuator_command_format);
 ORB_DEFINE(control_cmd, struct control_cmd_s, control_cmd_format);
+ORB_DEFINE(control_trajectory, struct control_trajectory_s,
+           control_trajectory_format);
 ORB_DEFINE(vehicle_imu, struct vehicle_imu_s, vehicle_imu_format);
 ORB_DEFINE(estimator_state, struct estimator_state_s,
            estimator_state_format);
@@ -565,6 +619,22 @@ int control_cmd_publish(int fd, FAR const struct control_cmd_s *msg)
     }
 
   return orb_publish(ORB_ID(control_cmd), fd, msg);
+}
+
+int control_trajectory_advertise(void)
+{
+  return orb_advertise(ORB_ID(control_trajectory), NULL);
+}
+
+int control_trajectory_publish(int fd,
+                               FAR const struct control_trajectory_s *msg)
+{
+  if (fd < 0 || msg == NULL)
+    {
+      return -EINVAL;
+    }
+
+  return orb_publish(ORB_ID(control_trajectory), fd, msg);
 }
 
 int vehicle_imu_advertise(int instance)

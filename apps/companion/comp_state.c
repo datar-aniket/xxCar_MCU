@@ -179,4 +179,34 @@ void comp_state_build(FAR const struct comp_state_inputs_s *in,
       out->motor_speed_ms = in->motor_counts_per_s * in->speed_k;
       out->source_valid |= COMP_SRC_VESC;
     }
+
+  if (in->rc_valid)
+    {
+      out->rc_status =
+        (((uint32_t)in->rc_steering_pwm & COMP_RC_PWM_MASK) <<
+         COMP_RC_STEER_SHIFT) |
+        (((uint32_t)in->rc_throttle_pwm & COMP_RC_PWM_MASK) <<
+         COMP_RC_THROTTLE_SHIFT);
+      out->source_valid |= COMP_SRC_RC;
+    }
+
+  if (in->control_armed)
+    {
+      out->rc_status |= COMP_RC_ARMED;
+    }
+
+  if (in->control_auto)
+    {
+      out->rc_status |= COMP_RC_AUTO;
+    }
+
+  if (in->trigger_high)
+    {
+      out->rc_status |= COMP_RC_TRIGGER_HIGH;
+    }
+
+  if (in->control_current)
+    {
+      out->rc_status |= COMP_RC_CURRENT;
+    }
 }

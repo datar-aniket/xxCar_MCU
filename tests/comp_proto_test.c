@@ -5,6 +5,7 @@
  ****************************************************************************/
 
 #include <assert.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -53,6 +54,24 @@ static struct comp_external_pose_s sample_pose(void)
   return p;
 }
 
+static size_t sample_trajectory(uint8_t *payload)
+{
+  uint64_t timestamp = 1234567890123ull;
+  uint64_t solution = 1234567880000ull;
+  float values[8] = {1.0f, 2.0f, 1.5f, 2.5f,
+                     -0.25f, 0.2f, 0.5f, -0.1f};
+
+  memset(payload, 0, COMP_MAX_PAYLOAD);
+  memcpy(payload + COMP_TRAJ_TIMESTAMP_OFS, &timestamp, sizeof(timestamp));
+  memcpy(payload + COMP_TRAJ_SOLUTION_OFS, &solution, sizeof(solution));
+  payload[COMP_TRAJ_HORIZON_OFS] = 2;
+  payload[COMP_TRAJ_DT_OFS] = 0x66;       /* binary16 0.05 = 0x2a66 */
+  payload[COMP_TRAJ_DT_OFS + 1] = 0x2a;
+  payload[COMP_TRAJ_METHOD_OFS] = COMP_THROTTLE_DUTY;
+  memcpy(payload + COMP_TRAJ_DATA_OFS, values, sizeof(values));
+  return comp_control_trajectory_payload_size(2);
+}
+
 /* The layout is the wire format. If these ever disagree the companion reads
  * convincing nonsense, so the compiler proves them instead.
  */
@@ -61,6 +80,7 @@ static void test_layout(void)
 {
   assert(sizeof(struct comp_external_pose_s) == 48);
   assert(sizeof(struct comp_vehicle_state_s) == 96);
+  assert(offsetof(struct comp_vehicle_state_s, rc_status) == 92);
   assert(comp_payload_len(COMP_MSG_EXTERNAL_POSE) == 48);
   assert(comp_payload_len(COMP_MSG_VEHICLE_STATE) == 96);
   assert(comp_payload_len(COMP_MSG_TIMESYNC_REQ) == 8);
@@ -69,7 +89,61 @@ static void test_layout(void)
   assert(sizeof(struct comp_timesync_rep_s) == 24);
   assert(sizeof(struct comp_direct_control_s) == 24);
   assert(comp_payload_len(COMP_MSG_DIRECT_CONTROL) == 24);
+  assert(comp_payload_len(COMP_MSG_CONTROL_TRAJ) == 0);
+  assert(comp_control_trajectory_payload_size(1) == 36);
+  assert(comp_control_trajectory_payload_size(14) == 244);
+  assert(comp_control_trajectory_payload_size(0) == 0);
+  assert(comp_control_trajectory_payload_size(15) == 0);
   assert(comp_payload_len(200) == 0);
+}
+
+static void test_control_trajectory_round_trip(void)
+{
+  struct comp_control_trajectory_s decoded;
+  uint8_t payload[COMP_MAX_PAYLOAD];
+  uint8_t frame[COMP_MAX_PAYLOAD + COMP_FRAME_OVERHEAD];
+  size_t len = sample_trajectory(payload);
+  int n = comp_encode(COMP_MSG_CONTROL_TRAJ, payload, (uint8_t)len,
+                      frame, sizeof(frame));
+
+  comp_parser_init(&g_parser);
+  assert(feed(frame, (size_t)n) == COMP_MSG_CONTROL_TRAJ);
+  assert(g_parser.len == len);
+  assert(comp_control_trajectory_decode(g_parser.payload, g_parser.len,
+                                        &decoded));
+  assert(decoded.timestamp_us == 1234567890123ull);
+  assert(decoded.solution_time_us == 1234567880000ull);
+  assert(decoded.horizon == 2);
+  assert(fabsf(decoded.dt - 0.05f) < 0.0001f);
+  assert(decoded.poses[0][0] == 1.0f);
+  assert(decoded.poses[1][1] == 2.5f);
+  assert(decoded.controls[0][0] == -0.25f);
+  assert(decoded.controls[1][1] == -0.1f);
+}
+
+static void test_control_trajectory_rejects_bad_length_and_values(void)
+{
+  struct comp_control_trajectory_s decoded;
+  uint8_t payload[COMP_MAX_PAYLOAD];
+  uint8_t frame[COMP_MAX_PAYLOAD + COMP_FRAME_OVERHEAD];
+  size_t len = sample_trajectory(payload);
+  float invalid = 1.1f;
+  int n;
+
+  n = comp_encode(COMP_MSG_CONTROL_TRAJ, payload, (uint8_t)(len - 1),
+                  frame, sizeof(frame));
+  comp_parser_init(&g_parser);
+  assert(feed(frame, (size_t)n) == 0);
+  assert(g_parser.bad_length == 1);
+
+  memcpy(payload + COMP_TRAJ_DATA_OFS + 4u * sizeof(float),
+         &invalid, sizeof(invalid));
+  assert(!comp_control_trajectory_decode(payload, len, &decoded));
+
+  sample_trajectory(payload);
+  payload[COMP_TRAJ_DT_OFS] = 0;
+  payload[COMP_TRAJ_DT_OFS + 1] = 0;
+  assert(!comp_control_trajectory_decode(payload, len, &decoded));
 }
 
 static struct comp_direct_control_s sample_command(void)
@@ -423,6 +497,8 @@ int main(void)
   test_back_to_back();
   test_timesync_round_trip();
   test_direct_control_round_trip();
+  test_control_trajectory_round_trip();
+  test_control_trajectory_rejects_bad_length_and_values();
   test_throttle_modes_are_the_documented_numbers();
   test_direct_control_accepts_the_full_range();
   test_direct_control_limits_are_per_mode();
