@@ -209,7 +209,7 @@ struct comp_vehicle_state_s
   float    accel[3];          /* 64: m/s^2, body FLU */
 
   float    wheel_torque_nm;   /* 76: VESC current x VESC_TORQUE_K */
-  float    steering_angle;    /* 80: VESC ADC volts x VESC_STEER_K */
+  float    steering_angle;    /* 80: VESC ADC x K, or mapped sent command */
   float    motor_speed_ms;    /* 84: tachometer rate x VESC_SPEED_K */
 
   uint8_t  solution_status;   /* 88: ESTIMATOR_* validity bits */
@@ -245,6 +245,7 @@ struct comp_vehicle_state_s
 #define COMP_SRC_ACCEL       (1u << 2)
 #define COMP_SRC_VESC        (1u << 3)
 #define COMP_SRC_RC          (1u << 4)
+#define COMP_SRC_STEERING    (1u << 5)
 
 /* Clock synchronisation, request and reply.
  *

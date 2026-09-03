@@ -72,9 +72,13 @@ static uint64_t g_tx_last_sample;
 static float g_torque_k = 1.0f;
 static float g_steer_k = 1.0f;
 static float g_speed_k = 1.0f;
+static uint8_t g_steer_source;
 static uint8_t g_rc_steering_index;
 static uint8_t g_rc_throttle_index;
 static uint16_t g_rc_switch_high;
+
+#define COMP_STEER_SOURCE_VESC_ADC 0u
+#define COMP_STEER_SOURCE_COMMAND  1u
 
 /* How old an autonomous command may be by the time it lands here.
  *
@@ -930,7 +934,6 @@ static void comp_transmit(int fd, int state_pub, int est_sub, int gyro_sub,
     {
       in.vesc_valid = true;
       in.current_a = vesc.current_a;
-      in.adc_volts = vesc.adc_volts;
 
       /* Already differentiated and filtered by the VESC daemon, which sees
        * every STATUS_5 at 400 Hz. Doing it here would be too late: this
@@ -939,6 +942,28 @@ static void comp_transmit(int fd, int state_pub, int est_sub, int gyro_sub,
        */
 
       in.motor_counts_per_s = vesc.speed_cps;
+
+      if (g_steer_source == COMP_STEER_SOURCE_COMMAND)
+        {
+          /* This is the pulse after the router, VESC mapping, safety state,
+           * and clamp. It therefore describes what was actually transmitted,
+           * whether the selected control source was RC or autonomous.
+           */
+
+          if (vesc.servo_us != 0)
+            {
+              in.steering_valid = true;
+              in.steering_measured = false;
+              in.steering_feedback =
+                comp_state_servo_feedback(vesc.servo_us);
+            }
+        }
+      else
+        {
+          in.steering_valid = true;
+          in.steering_measured = true;
+          in.steering_feedback = vesc.adc_volts;
+        }
     }
 
   if (rc_sub >= 0 && router.rc_valid &&
@@ -1262,6 +1287,7 @@ static int companion_daemon(int argc, FAR char *argv[])
   g_torque_k = param_f32("VESC_TORQUE_K");
   g_steer_k = param_f32("VESC_STEER_K");
   g_speed_k = param_f32("VESC_SPEED_K");
+  g_steer_source = (uint8_t)param_i32("STEER_FB_SRC");
   {
     int32_t steering_map = param_i32("RC_MAP_STEERING");
     int32_t throttle_map = param_i32("RC_MAP_THROTTLE");

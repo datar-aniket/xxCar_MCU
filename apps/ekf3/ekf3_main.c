@@ -130,11 +130,11 @@ static void print_status(void)
 
   printf("  horizon %" PRIu32 " ms  replay %u samples"
          "  ring overflow imu %" PRIu32 " mag %" PRIu32 " baro %" PRIu32
-         " ext %" PRIu32
+         " ext %" PRIu32 " wheel %" PRIu32
          "\n",
          status.horizon_ms, status.output_replay,
          status.imu_overflow, status.mag_overflow, status.baro_overflow,
-         status.extnav_overflow);
+         status.extnav_overflow, status.wheel_overflow);
   printf("  clocks TIM5 - MONOTONIC current %+" PRIi64
          " us  change since EKF start %+" PRIi64 " us\n",
          status.clock_skew_us,
@@ -367,26 +367,71 @@ static void print_status(void)
          core->duplicate_count, core->backward_count, core->gap_count,
          core->source_reset_count, core->numerical_reset_count,
          status.publish_errors);
-  /* The wheels. The threshold is in counts per second, not m/s, so it does
-   * not depend on VESC_SPEED_K - which is what lets this work before that
-   * scale has been calibrated.
+  /* Moving wheel odometry is independently source-selected. It must not be
+   * hidden when wheel-stop ZUPT is disabled: they share a VESC topic, but
+   * make different physical claims.
+   */
+
+  if (!status.wheel_fusion_selected)
+    {
+      printf("  wheel odom OFF - set active EK3_SRCn_VELXY=7 to select it\n");
+    }
+  else
+    {
+      printf("  wheel odom %+.3f m/s  yaw rate %+.3f rad/s  %s\n",
+             (double)status.wheel_speed_mps,
+             (double)status.wheel_yaw_rate,
+             status.wheel_slipping ? "SLIP - NOT FUSED" : "traction OK");
+      printf("             accel VESC %+.3f raw %+.3f filtered"
+             "  IMU X %+.3f filtered  TC %.2fs margin %.2f m/s2\n",
+             (double)status.wheel_accel_raw,
+             (double)status.wheel_accel_filtered,
+             (double)status.imu_accel_filtered,
+             (double)status.wheel_accel_tau,
+             (double)status.wheel_slip_margin);
+      printf("             innov forward/lateral %+.3f %+.3f m/s"
+             " NIS %.3f %.3f  accept %" PRIu32 " reject %" PRIu32 "\n",
+             (double)core->last_wheel_innov[0],
+             (double)core->last_wheel_innov[1],
+             (double)core->last_wheel_nis[0],
+             (double)core->last_wheel_nis[1],
+             core->wheel_accept_count, core->wheel_reject_count);
+      printf("             K %.9g  noise %.2f/%.2f m/s gate %.1f sigma"
+             "  rate %" PRIu32 "Hz delay %.2fms\n",
+             (double)status.wheel_speed_k,
+             (double)status.wheel_noise,
+             (double)status.wheel_lateral_noise,
+             (double)status.wheel_gate,
+             status.wheel_fusion_rate_hz,
+             (double)status.wheel_delay_us / 1000.0);
+      printf("             wheel->IMU XY %+.3f %+.3f m"
+             "  slip blocked %" PRIu32 " bad %" PRIu32
+             " decimated %" PRIu32 " overflow %" PRIu32 "\n",
+             (double)status.wheel_position[0],
+             (double)status.wheel_position[1],
+             status.wheel_slip_block_count, status.wheel_bad,
+             status.wheel_decimated, status.wheel_overflow);
+    }
+
+  /* The stop threshold is in counts per second, not m/s, so it does not
+   * depend on VESC_SPEED_K. This lets ZUPT work before the scale is calibrated.
    */
 
   if (!status.zupt_enabled)
     {
-      printf("  wheels     zero-velocity aiding off (EK3_ZUPT_EN=0)\n");
+      printf("  wheel ZUPT zero-velocity aiding off (EK3_ZUPT_EN=0)\n");
     }
   else if (!status.wheel_available)
     {
-      printf("  wheels     no vesc_status - zero-velocity aiding inactive\n");
+      printf("  wheel ZUPT no vesc_status - zero-velocity aiding inactive\n");
     }
   else if (!status.wheel_fresh)
     {
-      printf("  wheels     vesc_status STALE - zero-velocity aiding blocked\n");
+      printf("  wheel ZUPT vesc_status STALE - zero-velocity aiding blocked\n");
     }
   else
     {
-      printf("  wheels     %.1f counts/s  %s (threshold %.1f)  IMU %s\n",
+      printf("  wheel ZUPT %.1f counts/s  %s (threshold %.1f)  IMU %s\n",
              (double)status.last_wheel_cps,
              status.zupt_stopped ? "STOPPED" : "moving",
              (double)status.zupt_threshold_cps,

@@ -80,6 +80,22 @@ void comp_state_remove_gravity(FAR const float q[4], FAR const float accel[3],
     }
 }
 
+float comp_state_servo_feedback(uint16_t servo_us)
+{
+  float feedback = ((float)servo_us - 1500.0f) / 1000.0f;
+
+  if (feedback < -0.5f)
+    {
+      feedback = -0.5f;
+    }
+  else if (feedback > 0.5f)
+    {
+      feedback = 0.5f;
+    }
+
+  return feedback;
+}
+
 void comp_state_build(FAR const struct comp_state_inputs_s *in,
                       uint64_t timestamp_us,
                       FAR struct comp_vehicle_state_s *out)
@@ -175,9 +191,21 @@ void comp_state_build(FAR const struct comp_state_inputs_s *in,
   if (in->vesc_valid)
     {
       out->wheel_torque_nm = in->current_a * in->torque_k;
-      out->steering_angle = in->adc_volts * in->steer_k;
       out->motor_speed_ms = in->motor_counts_per_s * in->speed_k;
       out->source_valid |= COMP_SRC_VESC;
+    }
+
+  if (in->steering_valid)
+    {
+      /* Only an actual VESC ADC measurement uses the physical calibration.
+       * The sent-command source is already in its requested -0.5..+0.5
+       * feedback range and must not be multiplied by VESC_STEER_K.
+       */
+
+      out->steering_angle = in->steering_measured ?
+                            in->steering_feedback * in->steer_k :
+                            in->steering_feedback;
+      out->source_valid |= COMP_SRC_STEERING;
     }
 
   if (in->rc_valid)

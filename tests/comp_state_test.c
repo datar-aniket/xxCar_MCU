@@ -402,8 +402,10 @@ static void test_build_scalars(void)
   memset(&in, 0, sizeof(in));
   in.vesc_valid = true;
   in.current_a = 3.0f;
-  in.adc_volts = 1.65f;
   in.motor_counts_per_s = 2000.0f;
+  in.steering_valid = true;
+  in.steering_measured = true;
+  in.steering_feedback = 1.65f;
   in.torque_k = 2.0f;
   in.steer_k = 10.0f;
   in.speed_k = 0.001f;
@@ -414,6 +416,33 @@ static void test_build_scalars(void)
   assert(CLOSE(out.steering_angle, 16.5f));
   assert(CLOSE(out.motor_speed_ms, 2.0f));
   assert((out.source_valid & COMP_SRC_VESC) != 0);
+  assert((out.source_valid & COMP_SRC_STEERING) != 0);
+}
+
+static void test_sent_servo_feedback(void)
+{
+  struct comp_state_inputs_s in;
+  struct comp_vehicle_state_s out;
+
+  assert(CLOSE(comp_state_servo_feedback(1000), -0.5f));
+  assert(CLOSE(comp_state_servo_feedback(1250), -0.25f));
+  assert(CLOSE(comp_state_servo_feedback(1500), 0.0f));
+  assert(CLOSE(comp_state_servo_feedback(1750), 0.25f));
+  assert(CLOSE(comp_state_servo_feedback(2000), 0.5f));
+  assert(CLOSE(comp_state_servo_feedback(800), -0.5f));
+  assert(CLOSE(comp_state_servo_feedback(2200), 0.5f));
+
+  memset(&in, 0, sizeof(in));
+  in.steering_valid = true;
+  in.steering_measured = false;
+  in.steering_feedback = 0.25f;
+  in.steer_k = 100.0f;
+
+  comp_state_build(&in, 0, &out);
+
+  assert(CLOSE(out.steering_angle, 0.25f));
+  assert((out.source_valid & COMP_SRC_STEERING) != 0);
+  assert((out.source_valid & COMP_SRC_VESC) == 0);
 }
 
 static void test_build_packs_rc_and_control_status(void)
@@ -486,6 +515,7 @@ int main(void)
   test_build_accel_needs_attitude();
   test_build_accel_removes_ekf_bias();
   test_build_scalars();
+  test_sent_servo_feedback();
   test_build_packs_rc_and_control_status();
   test_build_velocity_is_body();
 

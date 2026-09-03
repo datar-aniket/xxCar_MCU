@@ -92,9 +92,43 @@ struct ekf3_status_s
   bool     zupt_stopped;      /* wheels currently reading stopped */
   uint64_t zupt_stop_since_us;/* source sample time of stop transition */
   bool     wheel_available;   /* vesc_status is being received */
-  bool     wheel_fresh;       /* newest wheel sample is <= 100 ms old */
+  bool     wheel_fresh;       /* newest wheel sample is <= 200 ms old */
   uint64_t last_wheel_sample_us;
   float    last_wheel_cps;
+
+  /* Moving wheel velocity, selected by EK3_SRCn_VELXY=7. */
+
+  bool     wheel_fusion_selected;
+  float    wheel_speed_k;
+  float    wheel_noise;
+  float    wheel_lateral_noise;
+  float    wheel_gate;
+  float    wheel_accel_tau;
+  float    wheel_slip_margin;
+  float    wheel_position[2];       /* wheel reference -> IMU, body XY */
+  uint32_t wheel_fusion_rate_hz;
+  uint32_t wheel_delay_us;
+  uint32_t wheel_in;
+  uint32_t wheel_decimated;
+  uint32_t wheel_bad;
+  uint32_t wheel_overflow;
+  uint32_t wheel_slip_block_count;
+  uint64_t last_wheel_queued_us;
+  float    wheel_speed_mps;
+  float    wheel_accel_raw;
+  float    wheel_accel_filtered;
+  float    imu_accel_filtered;
+  float    wheel_yaw_rate;
+  bool     wheel_slipping;
+
+  /* Exact delayed sample attempted on the most recent filter step. These
+   * feed estimator_diag; the live fields above feed `ekf3 status`.
+   */
+
+  uint64_t wheel_diag_timestamp;
+  float    wheel_diag_speed_mps;
+  float    wheel_diag_accel_mps2;
+  float    wheel_diag_imu_accel_mps2;
 
   float    height_limit;      /* EK3_HGT_LIM, m; 0 = unbounded */
   float    position_hold_limit; /* EK3_POSHOLD_M, m; 0 = free */

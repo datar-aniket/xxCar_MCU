@@ -50,8 +50,11 @@ struct comp_state_inputs_s
 
   bool     vesc_valid;
   float    current_a;
-  float    adc_volts;
   float    motor_counts_per_s;
+
+  bool     steering_valid;
+  bool     steering_measured; /* true for VESC ADC, false for sent command */
+  float    steering_feedback; /* V for ADC; -0.5..+0.5 for sent command */
 
   bool     rc_valid;
   uint16_t rc_steering_pwm;
@@ -81,6 +84,10 @@ void comp_state_enu_to_body(FAR const float q[4], FAR const float v[3],
 
 void comp_state_remove_gravity(FAR const float q[4], FAR const float accel[3],
                                FAR float out[3]);
+
+/* 1000..2000 us maps linearly to -0.5..+0.5. Out-of-range pulses saturate. */
+
+float comp_state_servo_feedback(uint16_t servo_us);
 
 void comp_state_build(FAR const struct comp_state_inputs_s *in,
                       uint64_t timestamp_us,

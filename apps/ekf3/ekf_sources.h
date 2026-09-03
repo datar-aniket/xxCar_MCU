@@ -6,6 +6,7 @@
 #define __APPS_EKF3_EKF_SOURCES_H
 
 #include <stddef.h>
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifndef FAR
@@ -45,5 +46,12 @@ struct ekf_source_config_s
 
 int ekf_sources_load(FAR struct ekf_source_config_s *config,
                      FAR char *error, size_t error_length);
+
+/* True when source is the active VELXY source, or appears in any source set
+ * while the ArduPilot-compatible FUSE_ALL_VELOCITIES option is set.
+ */
+
+bool ekf_sources_use_velocity_xy(
+  FAR const struct ekf_source_config_s *config, uint8_t source);
 
 #endif /* __APPS_EKF3_EKF_SOURCES_H */

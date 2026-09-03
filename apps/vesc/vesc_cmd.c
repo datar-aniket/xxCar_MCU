@@ -68,15 +68,60 @@ static uint16_t cmd_steer_us(float steering,
   return (uint16_t)lroundf(us);
 }
 
+/* Apply the mechanical centre correction at the final pulse stage. Doing it
+ * here makes the correction identical for live control, disarmed trim, and
+ * every failsafe-neutral path. The encoder repeats this 900..2100 bound as a
+ * last-resort wire-safety check.
+ */
+
+static uint16_t cmd_steer_offset(uint16_t servo_us,
+                                 FAR const struct vesc_limits_s *lim,
+                                 FAR bool *clamped)
+{
+  int32_t corrected = (int32_t)servo_us + (int32_t)lim->steer_offset;
+
+  if (corrected < (int32_t)VESC_SERVO_US_MIN)
+    {
+      *clamped = true;
+      corrected = VESC_SERVO_US_MIN;
+    }
+  else if (corrected > (int32_t)VESC_SERVO_US_MAX)
+    {
+      *clamped = true;
+      corrected = VESC_SERVO_US_MAX;
+    }
+
+  return (uint16_t)corrected;
+}
+
+int16_t vesc_cmd_rc_trim(uint16_t pwm)
+{
+  float trim;
+
+  if (pwm < VESC_RC_TRIM_PWM_MIN)
+    {
+      pwm = VESC_RC_TRIM_PWM_MIN;
+    }
+  else if (pwm > VESC_RC_TRIM_PWM_MAX)
+    {
+      pwm = VESC_RC_TRIM_PWM_MAX;
+    }
+
+  trim = ((float)pwm - (float)VESC_RC_TRIM_PWM_MID) *
+         ((float)VESC_RC_TRIM_US_MAX /
+          ((float)VESC_RC_TRIM_PWM_MAX - (float)VESC_RC_TRIM_PWM_MID));
+  return (int16_t)lroundf(trim);
+}
+
 static void cmd_neutral(uint8_t packet_id, uint8_t reason,
                         FAR const struct vesc_limits_s *lim,
                         FAR struct vesc_cmd_out_s *out)
 {
   out->packet_id = packet_id;
   out->motor = 0.0f;
-  out->servo_us = lim->steer_trim;
   out->reason = reason;
   out->clamped = false;
+  out->servo_us = cmd_steer_offset(lim->steer_trim, lim, &out->clamped);
 }
 
 void vesc_cmd_resolve(bool armed, bool have_setpoint,
@@ -138,8 +183,9 @@ void vesc_cmd_resolve(bool armed, bool have_setpoint,
   out->reason = VESC_CMD_ARMED;
   out->clamped = false;
   out->motor = cmd_clamp(motor, -limit, limit, &out->clamped);
-  out->servo_us =
-    cmd_steer_us(cmd_clamp(steering, -1.0f, 1.0f, &out->clamped), lim);
+  out->servo_us = cmd_steer_offset(
+    cmd_steer_us(cmd_clamp(steering, -1.0f, 1.0f, &out->clamped), lim),
+    lim, &out->clamped);
 }
 
 bool vesc_cmd_may_arm(bool have_setpoint, float motor,

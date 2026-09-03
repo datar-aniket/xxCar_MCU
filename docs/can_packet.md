@@ -18,7 +18,7 @@ Custom single-frame packet to transmit motor current and servo position simultan
 DLC: 6 Bytes
 Payload Layout (Big-Endian):
 Bytes 0–3:int32_t– Motor Current in Amps $\times 1000$ (e.g., $5.0,\text{A} \rightarrow 5000$)
-Bytes 4–5:int16_t– Steering Servo Pulse Width in microseconds ($\mu\text{s}$, range: $800$ to $2200,\mu\text{s}$)
+Bytes 4–5:int16_t– Steering Servo Pulse Width in microseconds ($\mu\text{s}$, firmware bounded to $900$ to $2100,\mu\text{s}$)
 
 Implementation:
 
@@ -28,7 +28,7 @@ Custom single-frame packet to transmit motor duty cycle and servo position simul
 DLC: 6 Bytes
 Payload Layout (Big-Endian):
 Bytes 0–3:int32_t– Duty Cycle Ratio $\times 100,000$ (e.g., $0.05 \rightarrow 5000$)
-Bytes 4–5:int16_t– Steering Servo Pulse Width in microseconds ($\mu\text{s}$, range: $800$ to $2200,\mu\text{s}$)
+Bytes 4–5:int16_t– Steering Servo Pulse Width in microseconds ($\mu\text{s}$, firmware bounded to $900$ to $2100,\mu\text{s}$)
 
 Implementation:
 

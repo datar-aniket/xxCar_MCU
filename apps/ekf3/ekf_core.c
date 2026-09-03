@@ -564,6 +564,7 @@ static void restart_alignment(FAR struct ekf_core_s *ekf)
   ekf->have_extnav_reset = false;
   ekf->extnav_consecutive_rejects = 0;
   ekf->last_baro_height = 0.0f;
+  ekf->last_wheel_timestamp = 0;
 
   /* The heading datum goes with the alignment that established it. Keeping
    * yaw_absolute across a restart would claim north for a heading that is
@@ -1221,10 +1222,14 @@ uint8_t ekf_core_observability(FAR const struct ekf_core_s *ekf)
    * arrives.
    */
 
-  if (ekf->last_zupt_timestamp != 0 && ekf->extnav_timeout_us > 0 &&
-      ekf->last_timestamp_sample >= ekf->last_zupt_timestamp &&
-      ekf->last_timestamp_sample - ekf->last_zupt_timestamp <
-        (uint64_t)ekf->extnav_timeout_us)
+  if ((ekf->last_zupt_timestamp != 0 && ekf->extnav_timeout_us > 0 &&
+       ekf->last_timestamp_sample >= ekf->last_zupt_timestamp &&
+       ekf->last_timestamp_sample - ekf->last_zupt_timestamp <
+         (uint64_t)ekf->extnav_timeout_us) ||
+      (ekf->last_wheel_timestamp != 0 && ekf->wheel_timeout_us > 0 &&
+       ekf->last_timestamp_sample >= ekf->last_wheel_timestamp &&
+       ekf->last_timestamp_sample - ekf->last_wheel_timestamp <
+         (uint64_t)ekf->wheel_timeout_us))
     {
       return EKF_OBS_VELOCITY;
     }
@@ -1332,7 +1337,8 @@ static void constrain_position(FAR struct ekf_core_s *ekf)
 {
   int axis;
 
-  if (!(ekf->position_hold_limit > 0.0f) || ekf_core_position_aided(ekf))
+  if (!(ekf->position_hold_limit > 0.0f) ||
+      ekf_core_observability(ekf) >= EKF_OBS_VELOCITY)
     {
       ekf->position_holding = false;
       return;
@@ -2999,6 +3005,108 @@ int ekf_core_fuse_zero_velocity(FAR struct ekf_core_s *ekf, float noise,
   return 1;
 }
 
+void ekf_core_set_wheel_config(FAR struct ekf_core_s *ekf,
+                               uint32_t timeout_us)
+{
+  if (ekf != NULL)
+    {
+      ekf->wheel_timeout_us = timeout_us;
+    }
+}
+
+int ekf_core_fuse_wheel_velocity(FAR struct ekf_core_s *ekf,
+                                 float speed_mps, float yaw_rate,
+                                 FAR const float wheel_pos_xy[2],
+                                 float forward_noise, float lateral_noise,
+                                 float gate)
+{
+  float rotation[3][3];
+  float forward[2];
+  float left[2];
+  float measurement[2];
+  float noise[2];
+  float norm;
+  int accepted = 0;
+  int axis;
+
+  if (ekf == NULL || !ekf->initialized || wheel_pos_xy == NULL ||
+      !isfinite(speed_mps) || !isfinite(yaw_rate) ||
+      !isfinite(wheel_pos_xy[0]) || !isfinite(wheel_pos_xy[1]) ||
+      !(forward_noise > 0.0f) || !isfinite(forward_noise) ||
+      !(lateral_noise > 0.0f) || !isfinite(lateral_noise) ||
+      !(gate > 0.0f) || !isfinite(gate))
+    {
+      return -1;
+    }
+
+  quaternion_to_rotation(ekf->quaternion, rotation);
+  forward[0] = rotation[0][0];
+  forward[1] = rotation[1][0];
+  norm = sqrtf(forward[0] * forward[0] + forward[1] * forward[1]);
+
+  if (!isfinite(norm) || norm < 0.1f)
+    {
+      return -1;
+    }
+
+  forward[0] /= norm;
+  forward[1] /= norm;
+  left[0] = -forward[1];
+  left[1] = forward[0];
+
+  /* wheel_pos_xy is wheel/reference point -> IMU in body axes. */
+
+  measurement[0] = speed_mps - yaw_rate * wheel_pos_xy[1];
+  measurement[1] = yaw_rate * wheel_pos_xy[0];
+  noise[0] = forward_noise;
+  noise[1] = lateral_noise;
+
+  for (axis = 0; axis < 2; axis++)
+    {
+      float h[EKF_STATE_DIM];
+      FAR const float *direction = axis == 0 ? forward : left;
+      float predicted;
+      float residual;
+      int result;
+
+      memset(h, 0, sizeof(h));
+      h[3] = direction[0];
+      h[4] = direction[1];
+      predicted = h[3] * ekf->velocity[0] + h[4] * ekf->velocity[1];
+      residual = measurement[axis] - predicted;
+      ekf->last_wheel_innov[axis] = residual;
+
+      /* Wheel odometry supplies planar velocity only. In particular, zero
+       * every attitude, vertical, position and bias gain row rather than
+       * allowing covariance cross-terms to invent information it lacks.
+       */
+
+      result = measurement_update_1d(ekf, h, residual,
+                                     noise[axis] * noise[axis], gate,
+                                     &ekf->last_wheel_nis[axis],
+                                     EKF_GAIN_VELOCITY_XY, NULL);
+
+      if (result < 0)
+        {
+          return -1;
+        }
+
+      accepted += result;
+    }
+
+  if (accepted == 0)
+    {
+      ekf->wheel_reject_count++;
+      return 0;
+    }
+
+  ekf->wheel_accept_count++;
+  ekf->last_wheel_timestamp = ekf->last_timestamp_sample;
+  ekf->observability = ekf_core_observability(ekf);
+  constrain_position(ekf);
+  return 1;
+}
+
 int ekf_core_fuse_baro(FAR struct ekf_core_s *ekf, float pressure_hpa,
                        float noise, float gate_sigma)
 {
@@ -3119,6 +3227,10 @@ uint8_t ekf_core_solution_status(FAR const struct ekf_core_s *ekf)
   if (ekf_core_position_aided(ekf))
     {
       status |= EKF_SOLUTION_POSITION_HORIZ | EKF_SOLUTION_VELOCITY_HORIZ;
+    }
+  else if (ekf_core_observability(ekf) >= EKF_OBS_VELOCITY)
+    {
+      status |= EKF_SOLUTION_VELOCITY_HORIZ;
     }
 
   return status;

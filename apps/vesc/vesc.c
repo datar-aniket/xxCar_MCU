@@ -25,6 +25,7 @@
 #include "vesc_cmd.h"
 #include "vesc_speed.h"
 #include "../param/param.h"
+#include "../rc_in/rc_in.h"
 #include "../uorb_msgs/uorb_msgs.h"
 
 #define VESC_PRIORITY   (SCHED_PRIORITY_DEFAULT + 10)
@@ -42,6 +43,11 @@
  */
 
 #define VESC_DRAIN_MAX  32
+
+#define VESC_RC_TRIM_CHANNEL  7u
+#define VESC_RC_TRIM_INDEX    (VESC_RC_TRIM_CHANNEL - 1u)
+#define VESC_RC_PWM_VALID_MIN 750u
+#define VESC_RC_PWM_VALID_MAX 2250u
 
 /* The two mode enumerations have to agree. They are declared separately
  * because vesc_cmd.h must compile on a host without uORB, so this is the
@@ -182,6 +188,7 @@ static void vesc_handle(FAR const struct fdcan_frame_s *frame, int pub,
   out.current_a = decoded.current_a;
   out.adc_volts = decoded.adc_volts;
   out.controller_id = controller_id;
+  out.servo_us = s->last_servo_us;
 
   /* Differentiate and filter here, on every frame, before anything
    * downsamples this topic.
@@ -268,6 +275,33 @@ static void vesc_take_setpoints(int sub, FAR struct vesc_daemon_status_s *s)
     }
 }
 
+static void vesc_take_rc(int sub, FAR struct vesc_daemon_status_s *s)
+{
+  struct rc_in_s rc;
+  bool updated = false;
+  uint64_t now;
+
+  if (sub < 0 || orb_check(sub, &updated) < 0 || !updated ||
+      orb_copy(ORB_ID(rc_in), sub, &rc) < 0)
+    {
+      return;
+    }
+
+  now = vesc_now_us();
+  if (rc.timestamp == 0 || rc.timestamp > now)
+    {
+      rc.timestamp = now;
+    }
+
+  s->rc_trim_stamp_us = rc.timestamp;
+  s->rc_trim_pwm = rc.count >= VESC_RC_TRIM_CHANNEL ?
+                   rc.channel[VESC_RC_TRIM_INDEX] : 0u;
+  s->rc_trim_input_valid = rc.ok != 0 && rc.failsafe == 0 &&
+                           rc.count >= VESC_RC_TRIM_CHANNEL &&
+                           s->rc_trim_pwm >= VESC_RC_PWM_VALID_MIN &&
+                           s->rc_trim_pwm <= VESC_RC_PWM_VALID_MAX;
+}
+
 /* Disarm when telemetry stops.
  *
  * Checked on the LOOP, not on message arrival - the trigger is an absence,
@@ -315,10 +349,26 @@ static void vesc_telemetry_watchdog(FAR struct vesc_daemon_status_s *s)
 static void vesc_transmit(FAR struct vesc_daemon_status_s *s)
 {
   struct vesc_cmd_out_s cmd;
+  struct vesc_limits_s limits;
   struct fdcan_frame_s frame;
   uint64_t now = vesc_now_us();
   uint64_t age = 0;
   bool ok;
+
+  s->rc_trim_active = s->rc_trim_input_valid &&
+                      s->rc_trim_stamp_us != 0 &&
+                      s->rc_trim_stamp_us <= now &&
+                      now - s->rc_trim_stamp_us <=
+                      (uint64_t)s->rc_timeout_ms * 1000ull;
+  s->rc_trim_us = s->rc_trim_active ?
+                  vesc_cmd_rc_trim(s->rc_trim_pwm) : 0;
+
+  /* Apply the live trim after the control router. This deliberately has no
+   * dependency on whether the routed command came from RC or Auto.
+   */
+
+  limits = s->limits;
+  limits.steer_offset = (int16_t)(limits.steer_offset + s->rc_trim_us);
 
   if (g_setpoint.valid && now > g_setpoint.stamp_us)
     {
@@ -327,7 +377,7 @@ static void vesc_transmit(FAR struct vesc_daemon_status_s *s)
 
   vesc_cmd_resolve(g_armed, g_setpoint.valid, g_setpoint.mode,
                    g_setpoint.motor, g_setpoint.steering,
-                   age, s->cmd_timeout_ms, &s->limits, &cmd);
+                   age, s->cmd_timeout_ms, &limits, &cmd);
 
   if (cmd.reason < VESC_CMD_NREASON)
     {
@@ -382,6 +432,7 @@ static int vesc_daemon(int argc, FAR char *argv[])
   struct vesc_daemon_status_s status;
   int pub = -1;
   int sub = -1;
+  int rc_sub = -1;
   int result = EXIT_FAILURE;
   bool can_ready = false;
   uint64_t next_tx_us;
@@ -394,12 +445,14 @@ static int vesc_daemon(int argc, FAR char *argv[])
   status.tx_rate = (uint32_t)param_i32("VESC_TX_RATE");
   status.tlm_timeout_ms = (uint32_t)param_i32("VESC_TLM_TO_MS");
   status.cmd_timeout_ms = (uint32_t)param_i32("VESC_CMD_TO_MS");
+  status.rc_timeout_ms = (uint32_t)param_i32("RC_INPUT_TO_MS");
   g_cmd_timeout_ms = status.cmd_timeout_ms;
   status.limits.cur_max = param_f32("VESC_CUR_MAX");
   status.limits.duty_max = param_f32("VESC_DUTY_MAX");
   status.limits.steer_min = (uint16_t)param_i32("VESC_STEER_MIN");
   status.limits.steer_trim = (uint16_t)param_i32("VESC_STEER_TRIM");
   status.limits.steer_max = (uint16_t)param_i32("VESC_STEER_MAX");
+  status.limits.steer_offset = (int16_t)param_i32("VESC_STEER_OFS");
   vesc_speed_init(&g_speed, (float)param_i32("VESC_TLM_HZ"),
                   param_f32("VESC_SPD_LPF"));
 
@@ -443,6 +496,20 @@ static int vesc_daemon(int argc, FAR char *argv[])
       goto out;
     }
 
+  rc_sub = orb_subscribe(ORB_ID(rc_in));
+
+  if (rc_sub < 0)
+    {
+      syslog(LOG_ERR, "[vesc] cannot subscribe rc_in (%d)\n", errno);
+      goto out;
+    }
+
+  if (param_i32("RC_MAP_ARM") == VESC_RC_TRIM_CHANNEL)
+    {
+      syslog(LOG_WARNING,
+             "[vesc] RC channel 7 is both steering trim and RC_MAP_ARM\n");
+    }
+
   tx_period_us = 1000000ull / status.tx_rate;
   next_tx_us = vesc_now_us();
 
@@ -471,6 +538,7 @@ static int vesc_daemon(int argc, FAR char *argv[])
 
       vesc_telemetry_watchdog(&status);
       vesc_take_setpoints(sub, &status);
+      vesc_take_rc(rc_sub, &status);
 
       /* Transmit only once the controller id is known. VESC_CAN_ID at 0 is
        * discovery mode, and there the id would be a guess - commanding a
@@ -528,6 +596,11 @@ out:
   if (sub >= 0)
     {
       orb_unsubscribe(sub);
+    }
+
+  if (rc_sub >= 0)
+    {
+      orb_unsubscribe(rc_sub);
     }
 
   if (pub >= 0)

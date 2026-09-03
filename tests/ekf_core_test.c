@@ -2306,6 +2306,122 @@ static void test_zero_velocity_raises_observability(void)
   assert(ekf_core_observability(&ekf) == EKF_OBS_ATTITUDE);
 }
 
+static void test_wheel_velocity_constrains_planar_motion(void)
+{
+  struct ekf_core_s ekf;
+  uint64_t timestamp;
+  const float zero_gyro[3] = {0.0f, 0.0f, 0.0f};
+  const float wheel_to_imu[2] = {0.0f, 0.0f};
+  unsigned i;
+
+  ekf_core_init(&ekf);
+  initialize_tilted(&ekf, &timestamp, 0.0f, 0.0f, zero_gyro);
+  ekf_core_set_wheel_config(&ekf, 200000u);
+
+  for (i = 0; i < 20; i++)
+    {
+      assert(ekf_core_fuse_wheel_velocity(
+        &ekf, 2.0f, 0.0f, wheel_to_imu, 0.2f, 0.3f, 5.0f) >= 0);
+    }
+
+  assert(ekf.velocity[0] > 1.8f);
+  assert_near(ekf.velocity[1], 0.0f, 1.0e-6f);
+  assert(ekf.wheel_accept_count > 0);
+  assert(ekf_core_observability(&ekf) == EKF_OBS_VELOCITY);
+  assert((ekf_core_solution_status(&ekf) & EKF_SOLUTION_VELOCITY_HORIZ) != 0);
+  assert((ekf_core_solution_status(&ekf) & EKF_SOLUTION_POSITION_HORIZ) == 0);
+}
+
+static void test_wheel_yaw_rate_compensates_imu_lever_arm(void)
+{
+  struct ekf_core_s ekf;
+  uint64_t timestamp;
+  const float zero_gyro[3] = {0.0f, 0.0f, 0.0f};
+  const float wheel_to_imu[2] = {0.5f, 0.0f};
+  unsigned i;
+
+  ekf_core_init(&ekf);
+  initialize_tilted(&ekf, &timestamp, 0.0f, 0.0f, zero_gyro);
+
+  for (i = 0; i < 20; i++)
+    {
+      ekf_core_fuse_wheel_velocity(&ekf, 2.0f, 2.0f, wheel_to_imu,
+                                   0.2f, 0.2f, 5.0f);
+    }
+
+  /* At yaw zero, wheel->IMU x=0.5 m and wz=2 rad/s adds +1 m/s left. */
+
+  assert(ekf.velocity[0] > 1.8f);
+  assert(ekf.velocity[1] > 0.8f);
+}
+
+static void test_wheel_velocity_rotates_into_navigation_xy(void)
+{
+  struct ekf_core_s ekf;
+  uint64_t timestamp;
+  const float zero_gyro[3] = {0.0f, 0.0f, 0.0f};
+  const float wheel_to_imu[2] = {0.0f, 0.0f};
+  unsigned i;
+
+  ekf_core_init(&ekf);
+  initialize_tilted(&ekf, &timestamp, 0.0f, 0.0f, zero_gyro);
+
+  /* At +90 degrees yaw, body forward is navigation +Y. */
+
+  ekf.quaternion[0] = cosf(TEST_PI * 0.25f);
+  ekf.quaternion[1] = 0.0f;
+  ekf.quaternion[2] = 0.0f;
+  ekf.quaternion[3] = sinf(TEST_PI * 0.25f);
+
+  for (i = 0; i < 20; i++)
+    {
+      ekf_core_fuse_wheel_velocity(&ekf, 2.0f, 0.0f, wheel_to_imu,
+                                   0.2f, 0.2f, 5.0f);
+    }
+
+  assert_near(ekf.velocity[0], 0.0f, 1.0e-5f);
+  assert(ekf.velocity[1] > 1.8f);
+}
+
+static void test_wheel_velocity_masks_unmeasured_states(void)
+{
+  struct ekf_core_s ekf;
+  uint64_t timestamp;
+  const float zero_gyro[3] = {0.0f, 0.0f, 0.0f};
+  const float wheel_to_imu[2] = {0.0f, 0.0f};
+  float quaternion[4];
+  float position[3];
+  float biases[6];
+
+  ekf_core_init(&ekf);
+  initialize_tilted(&ekf, &timestamp, 0.04f, -0.03f, zero_gyro);
+  ekf.velocity[0] = 1.0f;
+  ekf.velocity[2] = 0.7f;
+
+  /* Explicit cross-covariance makes this test fail if the gain mask is
+   * removed; diagonal covariance alone cannot move the unmeasured states.
+   */
+
+  ekf.covariance[EKF_P_INDEX(0, 3)] = 0.01f;
+  ekf.covariance[EKF_P_INDEX(3, 0)] = 0.01f;
+  ekf.covariance[EKF_P_INDEX(6, 3)] = 0.01f;
+  ekf.covariance[EKF_P_INDEX(3, 6)] = 0.01f;
+  ekf.covariance[EKF_P_INDEX(12, 3)] = 0.01f;
+  ekf.covariance[EKF_P_INDEX(3, 12)] = 0.01f;
+  memcpy(quaternion, ekf.quaternion, sizeof(quaternion));
+  memcpy(position, ekf.position, sizeof(position));
+  memcpy(biases, ekf.gyro_bias, sizeof(ekf.gyro_bias));
+  memcpy(&biases[3], ekf.accel_bias, sizeof(ekf.accel_bias));
+
+  assert(ekf_core_fuse_wheel_velocity(
+    &ekf, 1.5f, 0.0f, wheel_to_imu, 0.2f, 0.3f, 5.0f) == 1);
+  assert(memcmp(quaternion, ekf.quaternion, sizeof(quaternion)) == 0);
+  assert(memcmp(position, ekf.position, sizeof(position)) == 0);
+  assert_near(ekf.velocity[2], 0.7f, 1.0e-9f);
+  assert(memcmp(biases, ekf.gyro_bias, sizeof(ekf.gyro_bias)) == 0);
+  assert(memcmp(&biases[3], ekf.accel_bias, sizeof(ekf.accel_bias)) == 0);
+}
+
 /* A moving vehicle must keep a tilt reference.
  *
  * The standstill update does not run while driving, so without this roll and
@@ -2363,14 +2479,6 @@ static void test_observability_tiers_nest(void)
   assert(EKF_OBS_ATTITUDE < EKF_OBS_VELOCITY);
   assert(EKF_OBS_VELOCITY < EKF_OBS_POSITION);
 }
-
-/* NOTE: EKF_OBS_VELOCITY is not reachable today.
- *
- * ekf_core_observability returns ATTITUDE or POSITION and nothing between,
- * because no velocity-only source is wired in yet - optical flow and wheel
- * speed both belong there. Adding one requires a validity branch and its own
- * measurement update; propagation already covers every state.
- */
 
 /* Zero restores free dead reckoning, for anything that is not a car. */
 
@@ -2584,6 +2692,10 @@ int main(void)
   test_zero_velocity_update_pulls_velocity_down();
   test_zero_velocity_update_leaves_attitude_and_position();
   test_zero_velocity_raises_observability();
+  test_wheel_velocity_constrains_planar_motion();
+  test_wheel_yaw_rate_compensates_imu_lever_arm();
+  test_wheel_velocity_rotates_into_navigation_xy();
+  test_wheel_velocity_masks_unmeasured_states();
   test_tilt_reference_while_moving();
   test_observability_tiers_nest();
   test_unaided_states_still_propagate();

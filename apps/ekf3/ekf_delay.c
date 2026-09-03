@@ -131,6 +131,29 @@ bool ekf_delay_push_mag(FAR struct ekf_delay_s *d,
   return !lost;
 }
 
+bool ekf_delay_push_wheel(FAR struct ekf_delay_s *d,
+                          FAR const struct ekf_wheel_sample_s *sample)
+{
+  bool lost = false;
+
+  if (d == NULL || sample == NULL)
+    {
+      return false;
+    }
+
+  if (d->wheel_count == EKF_WHEEL_QUEUE_SIZE)
+    {
+      d->wheel_overflow_count++;
+      d->wheel_count--;
+      lost = true;
+    }
+
+  d->wheel[d->wheel_head] = *sample;
+  d->wheel_head = (uint16_t)((d->wheel_head + 1) % EKF_WHEEL_QUEUE_SIZE);
+  d->wheel_count++;
+  return !lost;
+}
+
 uint64_t ekf_delay_horizon_time(FAR const struct ekf_delay_s *d,
                                 uint64_t newest_imu_time_us)
 {
@@ -228,6 +251,38 @@ bool ekf_delay_next_mag(FAR struct ekf_delay_s *d, uint64_t horizon_time,
       if (horizon_time - stamp <= max_age_us)
         {
           *out = d->mag[index];
+          return true;
+        }
+    }
+
+  return false;
+}
+
+bool ekf_delay_next_wheel(FAR struct ekf_delay_s *d, uint64_t horizon_time,
+                          uint64_t max_age_us,
+                          FAR struct ekf_wheel_sample_s *out)
+{
+  if (d == NULL || out == NULL)
+    {
+      return false;
+    }
+
+  while (d->wheel_count > 0)
+    {
+      uint16_t index = ring_oldest(d->wheel_head, d->wheel_count,
+                                   EKF_WHEEL_QUEUE_SIZE);
+      uint64_t stamp = d->wheel[index].timestamp_sample;
+
+      if (stamp > horizon_time)
+        {
+          return false;
+        }
+
+      d->wheel_count--;
+
+      if (horizon_time - stamp <= max_age_us)
+        {
+          *out = d->wheel[index];
           return true;
         }
     }

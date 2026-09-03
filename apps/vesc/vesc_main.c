@@ -148,10 +148,15 @@ static void print_status(void)
          s.reason_count[VESC_CMD_BAD_MODE]);
 
   printf("  setpts  %" PRIu32 "  limits cur %.1f A  duty %.2f  "
-         "steer %u/%u/%u us\n",
+         "steer %u/%u/%u offset %d us\n",
          s.setpoints, (double)s.limits.cur_max, (double)s.limits.duty_max,
          (unsigned)s.limits.steer_min, (unsigned)s.limits.steer_trim,
-         (unsigned)s.limits.steer_max);
+         (unsigned)s.limits.steer_max, (int)s.limits.steer_offset);
+
+  printf("  trim    RC7 %u us -> %+d us%s  effective offset %+d us\n",
+         (unsigned)s.rc_trim_pwm, (int)s.rc_trim_us,
+         s.rc_trim_active ? "" : " (inactive)",
+         (int)s.limits.steer_offset + (int)s.rc_trim_us);
 }
 
 /* Publish a setpoint at the daemon's rate for a bounded time, then stop.

@@ -25,6 +25,7 @@
 #include "ekf3.h"
 #include "ekf_extnav_frame.h"
 #include "ekf_extnav_time.h"
+#include "ekf_wheel.h"
 #include "../param/param.h"
 #include "../uorb_msgs/uorb_msgs.h"
 #include "../../boards/fmuv6c/src/fmuv6c.h"
@@ -42,7 +43,7 @@
 #define EKF3_BARO_MAX_AGE_US  500000ull
 #define EKF3_MAG_MAX_AGE_US   500000ull
 #define EKF3_EXT_MAX_AGE_US   500000ull
-#define EKF3_WHEEL_MAX_AGE_US 100000ull
+#define EKF3_WHEEL_MAX_AGE_US 200000ull
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static volatile bool g_running;
@@ -55,6 +56,8 @@ static struct ekf3_status_s g_status;
  */
 
 static struct ekf_delay_s g_delay;
+static struct ekf_wheel_accel_filter_s g_wheel_accel_filter;
+static struct ekf_wheel_lpf_s g_imu_accel_filter;
 
 /* The attitude monitor lanes. File-scope for the same reason the delay ring
  * is: 1400 bytes each, and ekf3_status() copies its struct wholesale under a
@@ -251,12 +254,22 @@ static void publish_diagnostics(
   message.gravity_deviation = status->zupt_gravity_deviation;
   message.extnav_test_ratio = core->extnav_test_ratio;
   message.wheel_speed_cps = status->last_wheel_cps;
+  message.wheel_speed_mps = status->wheel_diag_speed_mps;
+  message.wheel_accel_mps2 = status->wheel_diag_accel_mps2;
+  message.imu_accel_mps2 = status->wheel_diag_imu_accel_mps2;
+  memcpy(message.wheel_innov, core->last_wheel_innov,
+         sizeof(message.wheel_innov));
+  memcpy(message.wheel_nis, core->last_wheel_nis,
+         sizeof(message.wheel_nis));
+  message.wheel_timestamp = status->wheel_diag_timestamp;
   message.extnav_accept_count = core->extnav_accept_count;
   message.extnav_reject_count = core->extnav_reject_count;
   message.zupt_accept_count = core->zupt_accept_count;
   message.zupt_reject_count = core->zupt_reject_count;
   message.gravity_accept_count = core->gravity_accept_count;
   message.gravity_reject_count = core->gravity_reject_count;
+  message.wheel_accept_count = core->wheel_accept_count;
+  message.wheel_reject_count = core->wheel_reject_count;
   message.reset_counter = core->reset_counter;
   message.instance = sample->instance;
 
@@ -790,9 +803,14 @@ static void monitor_compare(FAR struct ekf3_status_s *status,
 static void drain_wheel(int sub, FAR struct ekf3_status_s *status)
 {
   struct vesc_status_s wheel;
+  struct ekf_wheel_sample_s sample;
+  uint64_t corrected_time;
+  uint32_t period_us;
+  float speed_mps;
   bool stopped;
 
-  if (sub < 0 || !status->zupt_enabled)
+  if (sub < 0 ||
+      (!status->zupt_enabled && !status->wheel_fusion_selected))
     {
       return;
     }
@@ -806,6 +824,7 @@ static void drain_wheel(int sub, FAR struct ekf3_status_s *status)
   status->wheel_available = true;
   status->last_wheel_sample_us = wheel.timestamp_sample;
   status->last_wheel_cps = wheel.speed_cps;
+  status->wheel_in++;
 
   if (stopped)
     {
@@ -822,6 +841,54 @@ static void drain_wheel(int sub, FAR struct ekf3_status_s *status)
     }
 
   status->zupt_stopped = stopped;
+
+  if (!status->wheel_fusion_selected ||
+      !isfinite(wheel.speed_cps) || !isfinite(status->wheel_speed_k) ||
+      fabsf(status->wheel_speed_k) < 1.0e-12f ||
+      wheel.timestamp_sample == 0)
+    {
+      if (status->wheel_fusion_selected)
+        {
+          status->wheel_bad++;
+        }
+
+      return;
+    }
+
+  speed_mps = wheel.speed_cps * status->wheel_speed_k;
+  status->wheel_speed_mps = speed_mps;
+
+  if (!ekf_wheel_accel_update(&g_wheel_accel_filter, speed_mps,
+                               wheel.timestamp_sample,
+                               status->wheel_accel_tau,
+                               &status->wheel_accel_raw))
+    {
+      status->wheel_accel_filtered = g_wheel_accel_filter.accel_mps2;
+      return;
+    }
+
+  status->wheel_accel_filtered = g_wheel_accel_filter.accel_mps2;
+  period_us = 1000000u / status->wheel_fusion_rate_hz;
+
+  if (status->last_wheel_queued_us != 0 &&
+      wheel.timestamp_sample - status->last_wheel_queued_us < period_us)
+    {
+      status->wheel_decimated++;
+      return;
+    }
+
+  status->last_wheel_queued_us = wheel.timestamp_sample;
+  corrected_time = wheel.timestamp_sample > status->wheel_delay_us ?
+                   wheel.timestamp_sample - status->wheel_delay_us : 1u;
+  memset(&sample, 0, sizeof(sample));
+  sample.timestamp_sample = corrected_time;
+  sample.speed_mps = speed_mps;
+  sample.accel_mps2 = status->wheel_accel_filtered;
+
+  if (!ekf_delay_push_wheel(&g_delay, &sample))
+    {
+      status->wheel_overflow = g_delay.wheel_overflow_count;
+    }
 }
 
 static void publish_output(int publisher, FAR struct ekf3_status_s *status,
@@ -922,6 +989,9 @@ static int ekf3_daemon(int argc, FAR char *argv[])
       goto out;
     }
 
+  status.wheel_fusion_selected =
+    ekf_sources_use_velocity_xy(&status.sources, EKF_SOURCE_WHEEL);
+
   subscriber = orb_subscribe(ORB_ID(vehicle_imu));
   publisher = estimator_state_advertise();
   diag_publisher = estimator_diag_advertise();
@@ -955,12 +1025,25 @@ static int ekf3_daemon(int argc, FAR char *argv[])
   status.zupt_variance_limit = param_f32("EK3_ZUPT_AVAR");
   status.zupt_dwell_us =
     (uint32_t)param_i32("EK3_ZUPT_DW_MS") * 1000u;
+  status.wheel_speed_k = param_f32("VESC_SPEED_K");
+  status.wheel_noise = param_f32("EK3_WHL_NSE");
+  status.wheel_lateral_noise = param_f32("EK3_WHL_LAT_NSE");
+  status.wheel_gate = param_f32("EK3_WHL_GATE");
+  status.wheel_accel_tau = param_f32("EK3_WHL_ACC_TC");
+  status.wheel_slip_margin = param_f32("EK3_WHL_SLIP");
+  status.wheel_fusion_rate_hz = (uint32_t)param_i32("EK3_WHL_RATE");
+  status.wheel_position[0] = param_f32("EK3_WHL_POS_X");
+  status.wheel_position[1] = param_f32("EK3_WHL_POS_Y");
+  {
+    float delay_us = param_f32("EK3_WHL_DLY_MS") * 1000.0f;
+    status.wheel_delay_us = (uint32_t)(delay_us + 0.5f);
+  }
 
   /* The wheels. Absent if the VESC link is not running, which costs the
    * zero-velocity aid and nothing else.
    */
 
-  if (status.zupt_enabled)
+  if (status.zupt_enabled || status.wheel_fusion_selected)
     {
       wheel_sub = orb_subscribe(ORB_ID(vesc_status));
     }
@@ -1043,7 +1126,10 @@ static int ekf3_daemon(int argc, FAR char *argv[])
 
   ekf_core_set_mag_config(&status.core, status.declination,
                           status.yaw_noise * status.yaw_noise);
+  ekf_core_set_wheel_config(&status.core, EKF3_WHEEL_MAX_AGE_US);
   ekf_delay_init(&g_delay, status.horizon_ms);
+  ekf_wheel_accel_init(&g_wheel_accel_filter);
+  memset(&g_imu_accel_filter, 0, sizeof(g_imu_accel_filter));
 
   fds[nfds].fd = subscriber;
   fds[nfds].events = POLLIN;
@@ -1103,6 +1189,14 @@ static int ekf3_daemon(int argc, FAR char *argv[])
         {
           ekf_core_reset(&status.core);
           ekf_delay_init(&g_delay, status.horizon_ms);
+          ekf_wheel_accel_init(&g_wheel_accel_filter);
+          memset(&g_imu_accel_filter, 0, sizeof(g_imu_accel_filter));
+          status.last_wheel_queued_us = 0;
+          status.wheel_accel_raw = 0.0f;
+          status.wheel_accel_filtered = 0.0f;
+          status.imu_accel_filtered = 0.0f;
+          status.wheel_slipping = false;
+          status.wheel_diag_timestamp = 0;
           status.reset_requests++;
           g_should_reset = false;
           status_publish(&status);
@@ -1123,6 +1217,7 @@ static int ekf3_daemon(int argc, FAR char *argv[])
           status.mag_overflow = g_delay.mag_overflow_count;
           status.extnav_overflow = g_delay.extnav_overflow_count;
           status.baro_overflow = g_delay.baro_overflow_count;
+          status.wheel_overflow = g_delay.wheel_overflow_count;
           status_publish(&status);
           continue;
         }
@@ -1191,6 +1286,80 @@ static int ekf3_daemon(int argc, FAR char *argv[])
                                   gravity_reject_before);
               continue;
             }
+
+          if (process_result == EKF_PROCESS_PREDICTED &&
+              status.wheel_fusion_selected)
+            {
+              status.imu_accel_filtered = ekf_wheel_lpf_update(
+                &g_imu_accel_filter,
+                status.core.last_residual_accel_body[0],
+                sample.delta_velocity_dt, status.wheel_accel_tau);
+            }
+
+          /* Wheel velocity is recalled to this delayed IMU state, just like
+           * every other aiding measurement. VESC speed supplies body X; the
+           * z gyro supplies heading propagation and omega-cross-r lever-arm
+           * motion. The core additionally fuses the car's lateral body
+           * velocity constraint, producing an x/y navigation reference.
+           */
+
+          {
+            struct ekf_wheel_sample_s wheel_sample;
+
+            status.wheel_diag_timestamp = 0;
+            status.wheel_diag_speed_mps = 0.0f;
+            status.wheel_diag_accel_mps2 = 0.0f;
+            status.wheel_diag_imu_accel_mps2 = 0.0f;
+
+            while (ekf_delay_next_wheel(&g_delay,
+                                         sample.timestamp_sample,
+                                         EKF3_WHEEL_MAX_AGE_US,
+                                         &wheel_sample))
+              {
+                float stop_mps = fabsf(status.wheel_speed_k) *
+                                 status.zupt_threshold_cps;
+                bool wheel_stopped = fabsf(wheel_sample.speed_mps) <=
+                                     stop_mps;
+
+                status.wheel_diag_timestamp =
+                  wheel_sample.timestamp_sample;
+                status.wheel_diag_speed_mps = wheel_sample.speed_mps;
+                status.wheel_diag_accel_mps2 = wheel_sample.accel_mps2;
+                status.wheel_diag_imu_accel_mps2 =
+                  status.imu_accel_filtered;
+
+                status.wheel_slipping = ekf_wheel_slipping(
+                  wheel_sample.accel_mps2, status.imu_accel_filtered,
+                  status.wheel_slip_margin);
+                if (sample.delta_angle_dt > 0.0f)
+                  {
+                    status.wheel_yaw_rate =
+                      sample.delta_angle[2] / sample.delta_angle_dt -
+                      status.core.gyro_bias[2];
+                  }
+                else
+                  {
+                    status.wheel_yaw_rate = 0.0f;
+                  }
+
+                if (!status.core.initialized || wheel_stopped)
+                  {
+                    continue;
+                  }
+
+                if (status.wheel_slipping)
+                  {
+                    status.wheel_slip_block_count++;
+                    continue;
+                  }
+
+                ekf_core_fuse_wheel_velocity(
+                  &status.core, wheel_sample.speed_mps,
+                  status.wheel_yaw_rate, status.wheel_position,
+                  status.wheel_noise, status.wheel_lateral_noise,
+                  status.wheel_gate);
+              }
+          }
 
           /* Source selection makes a measurement ELIGIBLE. The health gating
            * inside the fusion decides whether it is USED. A parameter never
@@ -1335,6 +1504,7 @@ static int ekf3_daemon(int argc, FAR char *argv[])
       status.mag_overflow = g_delay.mag_overflow_count;
       status.baro_overflow = g_delay.baro_overflow_count;
       status.extnav_overflow = g_delay.extnav_overflow_count;
+      status.wheel_overflow = g_delay.wheel_overflow_count;
       status_publish(&status);
     }
 

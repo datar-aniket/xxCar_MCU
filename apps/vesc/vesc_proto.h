@@ -80,8 +80,8 @@ bool vesc_decode_status5(FAR const uint8_t *data, uint8_t dlc,
 
 /* The microsecond range docs/can_packet.md gives for the servo field. */
 
-#define VESC_SERVO_US_MIN             800u
-#define VESC_SERVO_US_MAX             2200u
+#define VESC_SERVO_US_MIN             900u
+#define VESC_SERVO_US_MAX             2100u
 
 /* Protocol ceilings, NOT vehicle limits. The vehicle limits are parameters
  * and are applied before this. These exist so that a value the wire format

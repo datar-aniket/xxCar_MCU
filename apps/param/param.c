@@ -661,6 +661,34 @@ static const struct param_def_s g_params[] =
   { "EK3_ZUPT_DW_MS", PARAM_TYPE_INT32, I32(150), I32(0), I32(2000),
     "Stopped-wheel dwell before zero velocity (ms)" },
 
+  /* Moving wheel odometry. EK3_SRCn_VELXY=7 selects this path, matching
+   * ArduPilot's source numbering. VESC_SPEED_K must be calibrated: unlike a
+   * zero-speed decision, moving velocity cannot be fused in raw counts/s.
+   *
+   * The wheel and IMU longitudinal accelerations are each passed through the
+   * same first-order time constant before the slip comparison. This gives a
+   * real persistence test instead of dropping fusion on one quantized tick.
+   */
+
+  { "EK3_WHL_NSE", PARAM_TYPE_FLOAT, F32(0.20f), F32(0.02f), F32(5.0f),
+    "Wheel forward velocity measurement noise (m/s)" },
+  { "EK3_WHL_LAT_NSE", PARAM_TYPE_FLOAT, F32(0.30f), F32(0.02f), F32(5.0f),
+    "Wheel lateral constraint noise (m/s)" },
+  { "EK3_WHL_GATE", PARAM_TYPE_FLOAT, F32(5.0f), F32(1.0f), F32(100.0f),
+    "Wheel velocity innovation gate (sigma)" },
+  { "EK3_WHL_ACC_TC", PARAM_TYPE_FLOAT, F32(0.20f), F32(0.02f), F32(2.0f),
+    "Wheel/IMU acceleration slip-filter time constant (s)" },
+  { "EK3_WHL_SLIP", PARAM_TYPE_FLOAT, F32(1.0f), F32(0.1f), F32(10.0f),
+    "Wheel acceleration excess declaring slip (m/s2)" },
+  { "EK3_WHL_RATE", PARAM_TYPE_INT32, I32(50), I32(5), I32(100),
+    "Wheel velocity fusion rate (Hz)" },
+  { "EK3_WHL_DLY_MS", PARAM_TYPE_FLOAT, F32(4.5f), F32(0.0f), F32(100.0f),
+    "Wheel speed derivative/filter delay (ms)" },
+  { "EK3_WHL_POS_X", PARAM_TYPE_FLOAT, F32(0.0f), F32(-5.0f), F32(5.0f),
+    "Wheel reference to IMU X offset, body forward (m)" },
+  { "EK3_WHL_POS_Y", PARAM_TYPE_FLOAT, F32(0.0f), F32(-5.0f), F32(5.0f),
+    "Wheel reference to IMU Y offset, body left (m)" },
+
   { "EK3_TILT_MOVE", PARAM_TYPE_INT32, I32(1), I32(0), I32(1),
     "Fuse gravity as a tilt reference while moving" },
 
@@ -781,12 +809,14 @@ static const struct param_def_s g_params[] =
     "Motor current magnitude ceiling (A)" },
   { "VESC_DUTY_MAX", PARAM_TYPE_FLOAT, F32(0.30f), F32(0.0f), F32(1.0f),
     "Motor duty magnitude ceiling (0-1)" },
-  { "VESC_STEER_MIN", PARAM_TYPE_INT32, I32(1100), I32(800), I32(2200),
+  { "VESC_STEER_MIN", PARAM_TYPE_INT32, I32(1100), I32(900), I32(2100),
     "Servo pulse at steering -1, full right (us)" },
-  { "VESC_STEER_TRIM", PARAM_TYPE_INT32, I32(1500), I32(800), I32(2200),
+  { "VESC_STEER_TRIM", PARAM_TYPE_INT32, I32(1500), I32(900), I32(2100),
     "Servo pulse at steering 0, straight (us)" },
-  { "VESC_STEER_MAX", PARAM_TYPE_INT32, I32(1900), I32(800), I32(2200),
+  { "VESC_STEER_MAX", PARAM_TYPE_INT32, I32(1900), I32(900), I32(2100),
     "Servo pulse at steering +1, full left (us)" },
+  { "VESC_STEER_OFS", PARAM_TYPE_INT32, I32(0), I32(-300), I32(300),
+    "Final steering servo pulse offset (us)" },
 
   /* Scalars turning VESC telemetry into the engineering units the companion
    * expects. All 1.0 until the vehicle is characterised - a guessed gear
@@ -797,7 +827,9 @@ static const struct param_def_s g_params[] =
   { "VESC_TORQUE_K", PARAM_TYPE_FLOAT, F32(1.0f), F32(-1000.0f),
     F32(1000.0f), "Motor current to wheel torque (Nm per A)" },
   { "VESC_STEER_K", PARAM_TYPE_FLOAT, F32(1.0f), F32(-1000.0f), F32(1000.0f),
-    "Steering ADC to angle (rad per V)" },
+    "VESC steering ADC to angle (rad per V)" },
+  { "STEER_FB_SRC", PARAM_TYPE_INT32, I32(0), I32(0), I32(1),
+    "Feedback: 0 VESC ADC, 1 sent servo command", PARAM_RANGE_ENUM },
   { "VESC_SPEED_K", PARAM_TYPE_FLOAT, F32(1.0f), F32(-1000.0f), F32(1000.0f),
     "Tachometer rate to ground speed (m/s per count/s)" },
 

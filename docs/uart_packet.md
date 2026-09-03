@@ -295,7 +295,7 @@ hardware timer.
 | 60 | `float32` | `side_slip_rad` | body FLU | rad, NaN below 0.3 m/s |
 | 64 | `float32[3]` | `accel` | body FLU | m/s², gravity removed |
 | 76 | `float32` | `wheel_torque_nm` | — | Nm |
-| 80 | `float32` | `steering_angle` | — | scaled ADC |
+| 80 | `float32` | `steering_angle` | — | selected steering feedback |
 | 84 | `float32` | `motor_speed_ms` | — | m/s |
 | 88 | `uint8` | `solution_status` | — | bits below |
 | 89 | `uint8` | `reset_counter` | — | estimator reset generation |
@@ -370,10 +370,18 @@ raw 9.8 m/s² as vehicle acceleration.
 | Field | Source | Scalar | Default |
 |---|---|---|---|
 | `wheel_torque_nm` | `vesc_status.current_a` | `VESC_TORQUE_K` | 1.0 |
-| `steering_angle` | `vesc_status.adc_volts` | `VESC_STEER_K` | 1.0 |
+| `steering_angle`, `STEER_FB_SRC=0` | `vesc_status.adc_volts` | `VESC_STEER_K` | 1.0 |
+| `steering_angle`, `STEER_FB_SRC=1` | last servo pulse sent to VESC | 1000–2000 us → -0.5–+0.5 | — |
 | `motor_speed_ms` | tachometer rate | `VESC_SPEED_K` | 1.0 |
 | (filter cutoff) | — | `VESC_SPD_LPF` | 100 Hz |
 | (expected telemetry rate) | — | `VESC_TLM_HZ` | 400 Hz |
+
+`VESC_STEER_OFS` accepts -300 to +300 us and is added to the mapped servo pulse after
+`VESC_STEER_MIN/TRIM/MAX`. The transmitted result is bounded to 900–2100 us,
+so command-derived feedback includes the applied offset. A valid, fresh RC
+channel 7 adds a live trim on top in both RC and Auto modes: 1000–2000 us maps
+linearly to -100–+100 us. If RC is stale, in failsafe, or CH7 is unavailable,
+its contribution is zero.
 
 All three scalars default to **1.0**, so until the vehicle is characterised
 these carry raw amps, raw volts and raw counts per second. That is
@@ -501,8 +509,9 @@ hard for a rate loop, EKF3 is unaffected.
 | 0 | `COMP_SRC_ESTIMATOR` | pose, velocity and status are real |
 | 1 | `COMP_SRC_GYRO` | `angular_velocity` is real |
 | 2 | `COMP_SRC_ACCEL` | `accel` is real |
-| 3 | `COMP_SRC_VESC` | the three VESC channels are real |
+| 3 | `COMP_SRC_VESC` | VESC current and motor speed are real |
 | 4 | `COMP_SRC_RC` | packed steering/throttle PWM values are fresh |
+| 5 | `COMP_SRC_STEERING` | selected steering feedback is valid |
 
 **Check this before trusting a zero.** A stopped VESC and a stationary
 vehicle both report zero wheel torque, and only one of them means the vehicle

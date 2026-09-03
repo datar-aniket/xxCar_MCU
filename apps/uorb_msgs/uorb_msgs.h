@@ -274,7 +274,8 @@ struct vesc_status_s
    */
 
   float    speed_cps;             /* 32 */
-  uint8_t  pad2[4];               /* 36 */
+  uint16_t servo_us;              /* 36: pulse actually sent to the VESC */
+  uint8_t  pad2[2];               /* 38 */
 };
 
 /* A command for the actuators: one drive motor and one steering servo.
@@ -284,7 +285,7 @@ struct vesc_status_s
  *
  * Not microseconds, because that hard-codes one servo's geometry into every
  * publisher and turns a linkage change into a controller change. The daemon
- * owns the mapping through VESC_STEER_MIN / _TRIM / _MAX.
+ * owns the mapping through VESC_STEER_MIN / _TRIM / _MAX / _OFS.
  *
  * Not radians, because that claims a calibrated road-wheel angle.
  * vesc_status deliberately publishes the steering ADC as raw volts rather
@@ -503,16 +504,24 @@ struct estimator_diag_s
   float    gravity_deviation;          /* 200: abs(filtered norm - g) */
   float    extnav_test_ratio;          /* 204: low-passed joint ratio */
   float    wheel_speed_cps;            /* 208: last tachometer speed */
-  uint32_t extnav_accept_count;        /* 212: cumulative */
-  uint32_t extnav_reject_count;        /* 216: cumulative */
-  uint32_t zupt_accept_count;          /* 220: cumulative */
-  uint32_t zupt_reject_count;          /* 224: cumulative */
-  uint32_t gravity_accept_count;       /* 228: cumulative */
-  uint32_t gravity_reject_count;       /* 232: cumulative */
-  uint16_t reset_counter;              /* 236: estimator generation */
-  uint16_t flags;                      /* 238: EST_DIAG_* */
-  uint8_t  instance;                   /* 240: EKF lane, currently zero */
-  uint8_t  pad[7];                     /* 241: trailing only */
+  float    wheel_speed_mps;            /* 212: converted longitudinal speed */
+  float    wheel_accel_mps2;           /* 216: filtered VESC acceleration */
+  float    imu_accel_mps2;             /* 220: filtered residual body X */
+  float    wheel_innov[2];             /* 224: forward/lateral velocity */
+  float    wheel_nis[2];               /* 232: normalized innovation sq */
+  uint64_t wheel_timestamp;            /* 240: delayed wheel sample or zero */
+  uint32_t extnav_accept_count;        /* 248: cumulative */
+  uint32_t extnav_reject_count;        /* 252: cumulative */
+  uint32_t zupt_accept_count;          /* 256: cumulative */
+  uint32_t zupt_reject_count;          /* 260: cumulative */
+  uint32_t gravity_accept_count;       /* 264: cumulative */
+  uint32_t gravity_reject_count;       /* 268: cumulative */
+  uint32_t wheel_accept_count;         /* 272: cumulative */
+  uint32_t wheel_reject_count;         /* 276: cumulative */
+  uint16_t reset_counter;              /* 280: estimator generation */
+  uint16_t flags;                      /* 282: EST_DIAG_* */
+  uint8_t  instance;                   /* 284: EKF lane, currently zero */
+  uint8_t  pad[3];                     /* 285: trailing only */
 };
 
 /* About 320 ms at 400 Hz: enough to ride through the SD-card stalls the

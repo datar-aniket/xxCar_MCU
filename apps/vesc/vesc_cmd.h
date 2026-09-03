@@ -51,6 +51,15 @@
 
 #define VESC_CMD_ZERO_EPS     0.001f
 
+/* Fixed live steering trim requested from RC channel 7. Values outside the
+ * transmitter's nominal range saturate at the corresponding trim endpoint.
+ */
+
+#define VESC_RC_TRIM_PWM_MIN  1000u
+#define VESC_RC_TRIM_PWM_MID  1500u
+#define VESC_RC_TRIM_PWM_MAX  2000u
+#define VESC_RC_TRIM_US_MAX   100
+
 struct vesc_limits_s
 {
   float    cur_max;      /* A, magnitude ceiling in current mode */
@@ -58,6 +67,7 @@ struct vesc_limits_s
   uint16_t steer_min;    /* us at steering -1 */
   uint16_t steer_trim;   /* us at steering 0 */
   uint16_t steer_max;    /* us at steering +1 */
+  int16_t  steer_offset; /* us added after mapping, before final clamp */
 };
 
 struct vesc_cmd_out_s
@@ -83,6 +93,10 @@ void vesc_cmd_resolve(bool armed, bool have_setpoint,
                       uint64_t age_us, uint32_t timeout_ms,
                       FAR const struct vesc_limits_s *lim,
                       FAR struct vesc_cmd_out_s *out);
+
+/* Map RC channel 7 from 1000..2000 us to -100..+100 us. */
+
+int16_t vesc_cmd_rc_trim(uint16_t pwm);
 
 /* May the daemon be armed right now?
  *

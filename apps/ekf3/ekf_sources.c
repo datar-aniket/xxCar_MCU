@@ -133,3 +133,34 @@ int ekf_sources_load(FAR struct ekf_source_config_s *config,
 
   return 0;
 }
+
+bool ekf_sources_use_velocity_xy(
+  FAR const struct ekf_source_config_s *config, uint8_t source)
+{
+  int set;
+
+  if (config == NULL || config->active_set >= EKF_SOURCE_SET_COUNT)
+    {
+      return false;
+    }
+
+  if (config->set[config->active_set].velocity_xy == source)
+    {
+      return true;
+    }
+
+  if ((config->options & 1u) == 0)
+    {
+      return false;
+    }
+
+  for (set = 0; set < EKF_SOURCE_SET_COUNT; set++)
+    {
+      if (config->set[set].velocity_xy == source)
+        {
+          return true;
+        }
+    }
+
+  return false;
+}

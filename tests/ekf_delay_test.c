@@ -111,6 +111,28 @@ static void test_horizon_clamped(void)
   assert(g_delay.horizon_us == (uint32_t)EKF_DELAY_MAX_MS * 1000u);
 }
 
+static void test_wheel_respects_horizon_and_age(void)
+{
+  struct ekf_wheel_sample_s sample;
+  struct ekf_wheel_sample_s out;
+
+  ekf_delay_init(&g_delay, 20);
+  memset(&sample, 0, sizeof(sample));
+  sample.timestamp_sample = 10000;
+  sample.speed_mps = 1.5f;
+  sample.accel_mps2 = 0.4f;
+  assert(ekf_delay_push_wheel(&g_delay, &sample));
+
+  assert(!ekf_delay_next_wheel(&g_delay, 9000, 50000, &out));
+  assert(ekf_delay_next_wheel(&g_delay, 12000, 50000, &out));
+  assert(out.timestamp_sample == 10000);
+  assert(out.speed_mps == 1.5f);
+
+  sample.timestamp_sample = 20000;
+  assert(ekf_delay_push_wheel(&g_delay, &sample));
+  assert(!ekf_delay_next_wheel(&g_delay, 80001, 60000, &out));
+}
+
 /* Overwriting an unconsumed sample is counted and reported, and the NEW
  * sample survives. Losing the newest data to preserve the oldest unprocessed
  * data would be the wrong trade for an estimator.
@@ -359,6 +381,7 @@ int main(void)
   test_horizon_withholds_recent();
   test_horizon_saturates();
   test_horizon_clamped();
+  test_wheel_respects_horizon_and_age();
   test_overflow_counted();
   test_consumed_entries_recycle_without_loss();
   test_stale_measurement_discarded();

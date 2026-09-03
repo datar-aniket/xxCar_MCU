@@ -29,6 +29,16 @@ int main(void)
   assert(config.set[0].velocity_z == EKF_SOURCE_NONE);
   assert(config.set[0].yaw == EKF_SOURCE_BARO_OR_COMPASS);
   assert(config.set[1].position_xy == EKF_SOURCE_EXTERNAL_NAV);
+  assert(!ekf_sources_use_velocity_xy(&config, EKF_SOURCE_WHEEL));
+
+  config.set[0].velocity_xy = EKF_SOURCE_WHEEL;
+  assert(ekf_sources_use_velocity_xy(&config, EKF_SOURCE_WHEEL));
+  config.set[0].velocity_xy = EKF_SOURCE_OPTICAL_FLOW;
+
+  config.set[2].velocity_xy = EKF_SOURCE_WHEEL;
+  assert(!ekf_sources_use_velocity_xy(&config, EKF_SOURCE_WHEEL));
+  config.options = 1;
+  assert(ekf_sources_use_velocity_xy(&config, EKF_SOURCE_WHEEL));
 
   /* Values are within the generic parameter bounds but meaningless for the
    * requested state. The category layer, not range clamping, must reject. */

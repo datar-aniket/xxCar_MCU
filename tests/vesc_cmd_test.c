@@ -23,6 +23,7 @@ static const struct vesc_limits_s g_lim =
   .steer_min  = 1100,
   .steer_trim = 1500,
   .steer_max  = 1900,
+  .steer_offset = 0,
 };
 
 #define CLOSE(a, b) (fabsf((a) - (b)) < 1.0e-4f)
@@ -225,6 +226,62 @@ static void test_steering_reversed(void)
   assert(o.servo_us == 1900);
 }
 
+static void test_steering_offset_and_final_bounds(void)
+{
+  struct vesc_limits_s lim = g_lim;
+  struct vesc_cmd_out_s o;
+
+  /* Offset is applied after the asymmetric steering map. */
+
+  lim.steer_offset = 125;
+  vesc_cmd_resolve(true, true, VESC_MODE_DUTY, 0.0f, 0.5f,
+                   0, 200, &lim, &o);
+  assert(o.servo_us == 1825); /* mapped 1700 + 125 */
+  assert(!o.clamped);
+
+  /* Neutral and every failsafe path receive the same centre correction. */
+
+  vesc_cmd_resolve(false, true, VESC_MODE_DUTY, 0.2f, -1.0f,
+                   0, 200, &lim, &o);
+  assert(o.reason == VESC_CMD_DISARMED);
+  assert(o.servo_us == 1625);
+  assert(!o.clamped);
+
+  lim.steer_offset = -200;
+  vesc_cmd_resolve(true, false, VESC_MODE_DUTY, 0.0f, 0.0f,
+                   0, 200, &lim, &o);
+  assert(o.reason == VESC_CMD_NO_SETPOINT);
+  assert(o.servo_us == 1300);
+
+  /* The value handed to the encoder can never leave 900..2100 us. */
+
+  lim.steer_offset = 300;
+  vesc_cmd_resolve(true, true, VESC_MODE_DUTY, 0.0f, 1.0f,
+                   0, 200, &lim, &o);
+  assert(o.servo_us == 2100);
+  assert(o.clamped);
+
+  lim.steer_offset = -300;
+  vesc_cmd_resolve(true, true, VESC_MODE_DUTY, 0.0f, -1.0f,
+                   0, 200, &lim, &o);
+  assert(o.servo_us == 900);
+  assert(o.clamped);
+}
+
+static void test_rc_live_trim_map(void)
+{
+  assert(vesc_cmd_rc_trim(1000) == -100);
+  assert(vesc_cmd_rc_trim(1250) == -50);
+  assert(vesc_cmd_rc_trim(1500) == 0);
+  assert(vesc_cmd_rc_trim(1750) == 50);
+  assert(vesc_cmd_rc_trim(2000) == 100);
+
+  /* Receiver values beyond the nominal stick/knob range saturate. */
+
+  assert(vesc_cmd_rc_trim(750) == -100);
+  assert(vesc_cmd_rc_trim(2250) == 100);
+}
+
 /* NaN compares false against every bound. Written the wrong way round, the
  * range check passes it straight through to an undefined cast.
  */
@@ -324,6 +381,8 @@ int main(void)
   test_steering_maps_to_endpoints();
   test_steering_asymmetric();
   test_steering_reversed();
+  test_steering_offset_and_final_bounds();
+  test_rc_live_trim_map();
   test_non_finite_is_neutral();
   test_may_arm();
   test_telemetry_lost();

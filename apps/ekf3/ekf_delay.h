@@ -38,6 +38,7 @@
 #define EKF_IMU_RING_SIZE        48
 #define EKF_MAG_QUEUE_SIZE        8
 #define EKF_BARO_QUEUE_SIZE       4
+#define EKF_WHEEL_QUEUE_SIZE     16
 /* 100 ms at a 240 Hz motion-capture rate is 24 poses. 32 leaves room for
  * arrival jitter and task scheduling. The old four-entry queue represented
  * only 40 ms at 100 Hz, so EK3_DELAY_MS=100 overwrote every pose before the
@@ -60,6 +61,18 @@ struct ekf_mag_sample_s
   bool     calibrated;
 };
 
+/* VESC longitudinal velocity after conversion to m/s. accel_mps2 is the
+ * first-order-filtered derivative at this same sample time and is retained
+ * with the measurement so the delayed slip gate compares like with like.
+ */
+
+struct ekf_wheel_sample_s
+{
+  uint64_t timestamp_sample;
+  float    speed_mps;
+  float    accel_mps2;
+};
+
 struct ekf_delay_s
 {
   struct ekf_imu_sample_s imu[EKF_IMU_RING_SIZE];
@@ -75,11 +88,16 @@ struct ekf_delay_s
   uint16_t mag_head;
   uint16_t mag_count;
 
+  struct ekf_wheel_sample_s wheel[EKF_WHEEL_QUEUE_SIZE];
+  uint16_t wheel_head;
+  uint16_t wheel_count;
+
   uint32_t horizon_us;
 
   uint32_t imu_overflow_count;   /* unconsumed sample overwritten */
   uint32_t baro_overflow_count;
   uint32_t mag_overflow_count;
+  uint32_t wheel_overflow_count;
 
   struct ekf_extnav_sample_s extnav[EKF_EXTNAV_QUEUE_SIZE];
   uint16_t extnav_head;
@@ -106,6 +124,8 @@ bool ekf_delay_push_baro(FAR struct ekf_delay_s *d,
                          FAR const struct ekf_baro_sample_s *sample);
 bool ekf_delay_push_mag(FAR struct ekf_delay_s *d,
                         FAR const struct ekf_mag_sample_s *sample);
+bool ekf_delay_push_wheel(FAR struct ekf_delay_s *d,
+                          FAR const struct ekf_wheel_sample_s *sample);
 
 /* The absolute time the filter is allowed to advance to: the newest IMU sample
  * time minus the horizon, saturating at zero rather than wrapping.  Using the
@@ -138,6 +158,9 @@ bool ekf_delay_next_baro(FAR struct ekf_delay_s *d, uint64_t horizon_time,
 bool ekf_delay_next_mag(FAR struct ekf_delay_s *d, uint64_t horizon_time,
                         uint64_t max_age_us,
                         FAR struct ekf_mag_sample_s *out);
+bool ekf_delay_next_wheel(FAR struct ekf_delay_s *d, uint64_t horizon_time,
+                          uint64_t max_age_us,
+                          FAR struct ekf_wheel_sample_s *out);
 bool ekf_delay_push_extnav(FAR struct ekf_delay_s *d,
                            FAR const struct ekf_extnav_sample_s *sample);
 bool ekf_delay_next_extnav(FAR struct ekf_delay_s *d, uint64_t horizon_time,

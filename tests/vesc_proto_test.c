@@ -215,7 +215,7 @@ static void test_encode_current_positive(void)
 }
 
 /*  -3.25 A x 1000 = -3250  = 0xFFFFF34E
- *   800 us                = 0x0320
+ *   800 us clamps to 900   = 0x0384
  *
  * Negative is where a lost sign extension hides: it survives every positive
  * case and then commands the motor the wrong way.
@@ -228,11 +228,11 @@ static void test_encode_current_negative(void)
   assert(vesc_encode_current_servo(-3.25f, 800, out));
   assert(out[0] == 0xff && out[1] == 0xff &&
          out[2] == 0xf3 && out[3] == 0x4e);
-  assert(out[4] == 0x03 && out[5] == 0x20);
+  assert(out[4] == 0x03 && out[5] == 0x84);
 }
 
 /*  0.53 duty x 100000 = 53000 = 0x0000CF08
- *  2200 us                    = 0x0898
+ *  2200 us clamps to 2100     = 0x0834
  *
  * THIS TEST IS ABOUT ROUNDING, and the value is not arbitrary. The nearest
  * float to 0.53 is 0.52999997138977, and 0.53f * 100000.0f lands on the
@@ -253,7 +253,7 @@ static void test_encode_duty_rounds(void)
   assert(vesc_encode_duty_servo(0.53f, 2200, out));
   assert(out[0] == 0x00 && out[1] == 0x00 &&
          out[2] == 0xcf && out[3] == 0x08);
-  assert(out[4] == 0x08 && out[5] == 0x98);
+  assert(out[4] == 0x08 && out[5] == 0x34);
 }
 
 /*  8.03 A x 1000 = 8030 = 0x00001F5E
@@ -359,10 +359,10 @@ static void test_encode_clamps(void)
   /* Servo microseconds clamp to the range can_packet.md gives. */
 
   assert(vesc_encode_duty_servo(0.0f, 100, out));
-  assert(out[4] == 0x03 && out[5] == 0x20);      /* 800 */
+  assert(out[4] == 0x03 && out[5] == 0x84);      /* 900 */
 
   assert(vesc_encode_duty_servo(0.0f, 5000, out));
-  assert(out[4] == 0x08 && out[5] == 0x98);      /* 2200 */
+  assert(out[4] == 0x08 && out[5] == 0x34);      /* 2100 */
 }
 
 static void test_encode_null(void)

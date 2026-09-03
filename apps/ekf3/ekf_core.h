@@ -223,6 +223,17 @@ struct ekf_core_s
   uint64_t last_zupt_timestamp;
   float    last_zupt_nis[3];
 
+  /* Moving wheel odometry. The observation constrains horizontal velocity
+   * only; it cannot directly move attitude, vertical velocity or position.
+   */
+
+  uint32_t wheel_accept_count;
+  uint32_t wheel_reject_count;
+  uint64_t last_wheel_timestamp;
+  uint32_t wheel_timeout_us;
+  float    last_wheel_innov[2];   /* forward and lateral body velocity */
+  float    last_wheel_nis[2];
+
   uint8_t  inhibit_mask;
 
   /* Persistent inhibit from EK3_ABIAS_EN / EK3_GBIAS_EN. ORed with the
@@ -589,6 +600,21 @@ void ekf_core_set_process_noise(FAR struct ekf_core_s *ekf, float gyro,
 
 int ekf_core_fuse_zero_velocity(FAR struct ekf_core_s *ekf, float noise,
                                 float gate);
+
+/* Fuse longitudinal wheel speed plus the non-holonomic lateral constraint.
+ * yaw_rate and wheel_pos_xy translate the wheel/reference-point velocity to
+ * the IMU origin: v_imu = v_wheel + omega x r, where r is wheel->IMU.
+ * Returns 1 accepted, 0 gated, -1 unusable.
+ */
+
+int ekf_core_fuse_wheel_velocity(FAR struct ekf_core_s *ekf,
+                                 float speed_mps, float yaw_rate,
+                                 FAR const float wheel_pos_xy[2],
+                                 float forward_noise, float lateral_noise,
+                                 float gate);
+
+void ekf_core_set_wheel_config(FAR struct ekf_core_s *ekf,
+                               uint32_t timeout_us);
 
 /* Independent permission for a wheel-derived zero-velocity update.
  *

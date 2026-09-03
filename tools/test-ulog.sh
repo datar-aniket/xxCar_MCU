@@ -37,6 +37,10 @@ assert abs(by['external_pose'].data['x'][0] - 1.2) < 0.01
 assert abs(by['estimator_diag'].data['residual_accel_body[2]'][0] + 0.01665) < 1e-4
 assert by['estimator_diag'].data['flags'][0] == 0x1143
 assert by['estimator_diag'].data['extnav_timestamp'][0] == 850
+assert abs(by['estimator_diag'].data['wheel_speed_mps'][0] - 0.5) < 1e-4
+assert abs(by['estimator_diag'].data['wheel_innov[0]'][0] - 0.1) < 1e-4
+assert by['estimator_diag'].data['wheel_timestamp'][0] == 875
+assert by['estimator_diag'].data['wheel_accept_count'][0] == 9
 assert abs(by['vehicle_accel'].data['y'][0] - 0.08) < 1e-4
 assert by['vehicle_state_tx'].data['accel_timestamp_sample'][0] == 990
 assert abs(by['vehicle_state_tx'].data['accel[1]'][0] - 0.08) < 1e-4

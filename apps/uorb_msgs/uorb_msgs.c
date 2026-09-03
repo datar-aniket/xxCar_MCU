@@ -163,6 +163,7 @@ static_assert(offsetof(struct vesc_status_s, current_a)        == 20, "layout");
 static_assert(offsetof(struct vesc_status_s, adc_volts)        == 24, "layout");
 static_assert(offsetof(struct vesc_status_s, controller_id)    == 28, "layout");
 static_assert(offsetof(struct vesc_status_s, speed_cps)        == 32, "layout");
+static_assert(offsetof(struct vesc_status_s, servo_us)         == 36, "layout");
 static_assert(sizeof(struct vesc_status_s)                     == 40, "layout");
 
 static_assert(offsetof(struct actuator_command_s, timestamp) ==  0, "layout");
@@ -239,11 +240,16 @@ static_assert(offsetof(struct estimator_diag_s, zupt_nis)             == 176, "l
 static_assert(offsetof(struct estimator_diag_s, gravity_nis)          == 188, "layout");
 static_assert(offsetof(struct estimator_diag_s, extnav_test_ratio)    == 204, "layout");
 static_assert(offsetof(struct estimator_diag_s, wheel_speed_cps)      == 208, "layout");
-static_assert(offsetof(struct estimator_diag_s, extnav_accept_count)  == 212, "layout");
-static_assert(offsetof(struct estimator_diag_s, reset_counter)        == 236, "layout");
-static_assert(offsetof(struct estimator_diag_s, flags)                == 238, "layout");
-static_assert(offsetof(struct estimator_diag_s, instance)             == 240, "layout");
-static_assert(sizeof(struct estimator_diag_s)                         == 248, "layout");
+static_assert(offsetof(struct estimator_diag_s, wheel_speed_mps)      == 212, "layout");
+static_assert(offsetof(struct estimator_diag_s, wheel_innov)          == 224, "layout");
+static_assert(offsetof(struct estimator_diag_s, wheel_nis)            == 232, "layout");
+static_assert(offsetof(struct estimator_diag_s, wheel_timestamp)      == 240, "layout");
+static_assert(offsetof(struct estimator_diag_s, extnav_accept_count)  == 248, "layout");
+static_assert(offsetof(struct estimator_diag_s, wheel_accept_count)   == 272, "layout");
+static_assert(offsetof(struct estimator_diag_s, reset_counter)        == 280, "layout");
+static_assert(offsetof(struct estimator_diag_s, flags)                == 282, "layout");
+static_assert(offsetof(struct estimator_diag_s, instance)             == 284, "layout");
+static_assert(sizeof(struct estimator_diag_s)                         == 288, "layout");
 static_assert(ESTIMATOR_DIAG_QUEUE_SIZE >= 64u,
               "estimator_diag queue must absorb ordinary SD stalls");
 
@@ -321,7 +327,7 @@ static const char vesc_status_format[] =
   ",tachometer:%" PRIi32
   ",current_a:%hf,adc_volts:%hf"
   ",controller_id:%hhu"
-  ",speed_cps:%hf";
+  ",speed_cps:%hf,servo_us:%hu";
 
 static const char actuator_command_format[] =
   "timestamp:%" PRIu64
@@ -418,9 +424,14 @@ static const char estimator_diag_format[] =
   ",zupt_nis[0]:%hf,zupt_nis[1]:%hf,zupt_nis[2]:%hf"
   ",gravity_nis:%hf,accel_norm:%hf,accel_variance:%hf"
   ",gravity_deviation:%hf,extnav_test_ratio:%hf,wheel_speed_cps:%hf"
+  ",wheel_speed_mps:%hf,wheel_accel_mps2:%hf,imu_accel_mps2:%hf"
+  ",wheel_innov[0]:%hf,wheel_innov[1]:%hf"
+  ",wheel_nis[0]:%hf,wheel_nis[1]:%hf"
+  ",wheel_timestamp:%" PRIu64
   ",extnav_accept_count:%" PRIu32 ",extnav_reject_count:%" PRIu32
   ",zupt_accept_count:%" PRIu32 ",zupt_reject_count:%" PRIu32
   ",gravity_accept_count:%" PRIu32 ",gravity_reject_count:%" PRIu32
+  ",wheel_accept_count:%" PRIu32 ",wheel_reject_count:%" PRIu32
   ",reset_counter:%hu,flags:%hu,instance:%hhu";
 #endif
 

@@ -97,11 +97,11 @@
 
 #define LOG_PART_BYTES  (100u * 1024u * 1024u)
 
-/* Largest record we serialise (estimator_diag, 248 bytes including trailing
- * C padding; 241 meaningful bytes are written).
+/* Largest record we serialise (estimator_diag, 288 bytes including trailing
+ * C padding; 285 meaningful bytes are written).
  */
 
-#define LOG_RECMAX    256
+#define LOG_RECMAX    320
 #define LOG_DRAIN_MAX 1024
 #define LOG_READ_BATCH 32
 
@@ -225,10 +225,14 @@ g_formats[] =
     "float[2] extnav_nis;float[3] extnav_measurement;float[3] zupt_nis;"
     "float gravity_nis;float accel_norm;float accel_variance;"
     "float gravity_deviation;float extnav_test_ratio;"
-    "float wheel_speed_cps;uint32_t extnav_accept_count;"
+    "float wheel_speed_cps;float wheel_speed_mps;"
+    "float wheel_accel_mps2;float imu_accel_mps2;"
+    "float[2] wheel_innov;float[2] wheel_nis;uint64_t wheel_timestamp;"
+    "uint32_t extnav_accept_count;"
     "uint32_t extnav_reject_count;uint32_t zupt_accept_count;"
     "uint32_t zupt_reject_count;uint32_t gravity_accept_count;"
-    "uint32_t gravity_reject_count;uint16_t reset_counter;uint16_t flags;"
+    "uint32_t gravity_reject_count;uint32_t wheel_accept_count;"
+    "uint32_t wheel_reject_count;uint16_t reset_counter;uint16_t flags;"
     "uint8_t instance;" },
 };
 
@@ -262,7 +266,7 @@ static const struct log_topic_s g_topics[] =
   { NULL,            ORB_ID(external_pose),      0, "external_pose",   0, 54, "LOG_EKF"  },
   { NULL,            ORB_ID(vehicle_accel),      0, "vehicle_accel",   0, 30, "LOG_EKF"  },
   { NULL,            ORB_ID(vehicle_state_tx),   0, "vehicle_state_tx",0, 119,"LOG_EKF"  },
-  { NULL,            ORB_ID(estimator_diag),     0, "estimator_diag",  0, 241,"LOG_EKF"  },
+  { NULL,            ORB_ID(estimator_diag),     0, "estimator_diag",  0, 285,"LOG_EKF"  },
 };
 
 #define NTOPICS ((int)(sizeof(g_topics) / sizeof(g_topics[0])))

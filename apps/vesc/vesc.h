@@ -57,6 +57,18 @@ struct vesc_daemon_status_s
   uint32_t cmd_timeout_ms;
   struct vesc_limits_s limits;
 
+  /* The fixed CH7 live trim is added after control routing, so it applies to
+   * both RC and automatic steering. An unhealthy/stale RC sample contributes
+   * zero, leaving the parameter offset in force.
+   */
+
+  uint32_t rc_timeout_ms;
+  uint64_t rc_trim_stamp_us;
+  uint16_t rc_trim_pwm;
+  int16_t  rc_trim_us;
+  bool     rc_trim_input_valid;
+  bool     rc_trim_active;
+
   uint32_t setpoints;                   /* actuator_command messages taken */
   uint32_t tx_sent;                     /* frames handed to the driver */
   uint32_t tx_errors;                   /* driver refused the frame */
