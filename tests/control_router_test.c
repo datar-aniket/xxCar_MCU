@@ -103,6 +103,17 @@ static void test_mapping_and_reversal(void)
   assert(fabsf(out.steering - 1.0f) < 1e-6f);
   assert(fabsf(out.motor - 0.3f) < 1e-6f);
 
+  /* RC remains a stick-to-limit mapping: half stick produces half of the
+   * configured 30% duty ceiling.
+   */
+
+  c.throttle.deadzone = 0;
+  in.rc_channel[2] = 1750;
+  in.now_us += 1000;
+  step(&c, &s, &in, &out);
+  assert(fabsf(out.rc_throttle - 0.5f) < 1e-6f);
+  assert(fabsf(out.motor - 0.15f) < 1e-6f);
+
   c.steering.negative = 2000;
   c.steering.positive = 1000;
   in.rc_channel[0] = 1000;
@@ -224,6 +235,23 @@ static void test_auto_and_source_hold(void)
   assert(out.source == ROUTER_SOURCE_AUTO);
   assert(fabsf(out.motor - 0.1f) < 1e-6f);
   assert(fabsf(out.steering + 0.25f) < 1e-6f);
+
+  /* AUTO duty is already normalized duty, so the limit must only clip it;
+   * it must never rescale the whole -1..1 command range.  With a 30% limit,
+   * 10% passes unchanged and 50% clips to 30%.
+   */
+
+  in.auto_motor = 0.5f;
+  in.now_us += 1000;
+  in.auto_timestamp = in.now_us;
+  step(&c, &s, &in, &out);
+  assert(fabsf(out.motor - 0.3f) < 1e-6f);
+
+  in.auto_motor = -0.5f;
+  in.now_us += 1000;
+  in.auto_timestamp = in.now_us;
+  step(&c, &s, &in, &out);
+  assert(fabsf(out.motor + 0.3f) < 1e-6f);
 
   in.now_us += c.auto_timeout_us + 1u;
   step(&c, &s, &in, &out);

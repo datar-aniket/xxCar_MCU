@@ -524,6 +524,7 @@ struct ekf_extnav_sample_s
   float    time_sigma;      /* sample-time uncertainty, seconds */
   uint8_t  reset_counter;   /* the SOURCE's frame-reset generation */
   bool     valid;
+  bool     reset_datum;     /* make this sample the external datum */
 };
 
 /* Dropout after which horizontal validity is withdrawn. A setter rather than

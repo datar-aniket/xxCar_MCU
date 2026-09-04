@@ -533,6 +533,8 @@ static void test_companion_parameters(void)
 static void test_vesc_parameters(void)
 {
   int32_t v;
+  float ekf_speed_k;
+  float state_speed_k;
 
   if (param_find("VESC_EN") < 0 ||
       param_find("VESC_CAN_ID") < 0 ||
@@ -581,6 +583,21 @@ static void test_vesc_parameters(void)
   if (param_get_i32("VESC_BITRATE", &v) < 0 || v != 1000000)
     {
       fail("VESC_BITRATE does not default to 1 Mbit/s");
+    }
+
+  if (param_get_f32("VESC_SPEED_K", &ekf_speed_k) < 0 ||
+      param_get_f32("VESC_STATE_K", &state_speed_k) < 0 ||
+      fabsf(ekf_speed_k - 1.0f) > 1.0e-6f ||
+      fabsf(state_speed_k - 1.0f) > 1.0e-6f)
+    {
+      fail("VESC EKF/state speed scales are missing or have bad defaults");
+    }
+
+  if (param_set_f32("VESC_STATE_K", 10.0f) < 0 ||
+      param_get_f32("VESC_SPEED_K", &ekf_speed_k) < 0 ||
+      fabsf(ekf_speed_k - 1.0f) > 1.0e-6f)
+    {
+      fail("VESC state speed scale changed the independent EKF scale");
     }
 
   /* A controller id is one byte on the wire. 256 cannot be expressed and

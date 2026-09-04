@@ -14,11 +14,12 @@ scale factor fitted through wheelspin, a scrubbing turn, or a stretch where
 the estimator itself did not know how fast it was going is worse than no
 scale factor, because it looks calibrated.
 
-The estimator's velocity is an acceptable reference here only because it is
-not derived from the wheels.  The zero-velocity update is deliberately
-K-independent - it asserts zero, never a speed - so nothing in this fit is
-circular today.  If wheel speed is ever fused as a velocity measurement, this
-tool must take its reference from the external fix directly instead.
+The estimator's velocity is an acceptable reference only while moving-wheel
+fusion is disabled. The zero-velocity update is deliberately K-independent -
+it asserts zero, never a speed - but EK3_SRCn_VELXY=7 does fuse the same wheel
+rate this tool is trying to calibrate and would make the fit circular. Select
+a non-wheel velocity source during calibration, then restore source 7 after
+installing the result.
 """
 
 from dataclasses import dataclass
@@ -109,11 +110,10 @@ def usable(sample: dict) -> bool:
 def fit(pairs) -> WheelFit:
     """pairs: iterable of (tachometer_rate, forward_speed_ms).
 
-    The rate is whatever VESC_SPEED_K was set to at capture time multiplied
-    into it, so calibrate with that parameter at 1.0 and the rate is raw
-    counts per second.  Calibrating against an already-scaled reading gives a
-    CORRECTION to the existing K, not the K itself, which is a good way to
-    apply the same factor twice.
+    The state-message rate is multiplied by VESC_STATE_K, so calibrate with
+    that parameter at 1.0 and the rate is raw counts per second. Calibrating
+    against an already-scaled reading gives a correction rather than the
+    actual VESC_SPEED_K, which is a good way to apply the same factor twice.
     """
     rows = [(float(c), float(v)) for c, v in pairs]
 
@@ -209,9 +209,9 @@ def main(argv=None):
     parser.add_argument("--seconds", type=float, default=60.0)
     args = parser.parse_args(argv)
 
-    print("Set VESC_SPEED_K to 1.0 and reboot before running this, or the")
-    print("result is a correction to the existing value rather than the")
-    print("value itself.\n")
+    print("Set VESC_STATE_K to 1.0 and reboot before running this, or the")
+    print("result is a correction to the state-message scale rather than")
+    print("the actual VESC_SPEED_K.\n")
     print(f"Drive smoothly over a range of speeds for {args.seconds:.0f} s.")
     print("Straight lines only - turning scrubs the wheels and those samples")
     print("are discarded anyway.\n")

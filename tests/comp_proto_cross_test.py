@@ -42,6 +42,7 @@ int main(void)
   struct comp_external_pose_s ext;
   struct comp_vehicle_state_s est;
   struct comp_direct_control_s cmd;
+  struct comp_datum_reset_s datum;
   unsigned char traj[COMP_MAX_PAYLOAD];
   uint64_t traj_timestamp = 1234567890123ull;
   uint64_t solution_timestamp = 1234567880000ull;
@@ -49,7 +50,8 @@ int main(void)
                           -0.25f, 0.2f, 0.5f, -0.1f};
   int n;
 
-  printf("%zu %zu %zu\n", sizeof(ext), sizeof(est), sizeof(cmd));
+  printf("%zu %zu %zu %zu\n", sizeof(ext), sizeof(est), sizeof(cmd),
+         sizeof(datum));
 
   memset(&ext, 0, sizeof(ext));
   ext.timestamp_us = 1234567890123ull;
@@ -71,10 +73,7 @@ int main(void)
   est.velocity[0] = 0.25f; est.velocity[1] = -0.5f; est.velocity[2] = 0.125f;
   est.angular_velocity[0] = 0.01f; est.angular_velocity[1] = -0.02f;
   est.angular_velocity[2] = 0.03f;
-  est.side_slip_rad = 0.0f;   /* a literal here, not NAN: NaN never compares
-                               * equal, so a byte comparison is the only way
-                               * to check it and that is not what this test
-                               * is for. */
+  est.side_slip_rad = 0.0f;
   est.accel[0] = 0.5f; est.accel[1] = -1.5f; est.accel[2] = 0.25f;
   est.wheel_torque_nm = 2.75f;
   est.steering_angle = -0.35f;
@@ -94,6 +93,11 @@ int main(void)
   cmd.throttle = 12.5f;
   cmd.throttle_type = COMP_THROTTLE_CURRENT;
   n = comp_encode(COMP_MSG_DIRECT_CONTROL, &cmd, sizeof(cmd), frame,
+                  sizeof(frame));
+  dump(frame, n);
+
+  datum.request_counter = 0x12345678u;
+  n = comp_encode(COMP_MSG_DATUM_RESET, &datum, sizeof(datum), frame,
                   sizeof(frame));
   dump(frame, n);
 
@@ -128,12 +132,13 @@ def main():
         out = subprocess.run([str(exe)], check=True, capture_output=True,
                              text=True).stdout.split()
 
-    c_ext_size, c_est_size, c_cmd_size = (int(out[0]), int(out[1]),
-                                          int(out[2]))
-    c_ext_frame = bytes.fromhex(out[3])
-    c_est_frame = bytes.fromhex(out[4])
-    c_cmd_frame = bytes.fromhex(out[5])
-    c_traj_frame = bytes.fromhex(out[6])
+    c_ext_size, c_est_size, c_cmd_size, c_datum_size = (
+        int(out[0]), int(out[1]), int(out[2]), int(out[3]))
+    c_ext_frame = bytes.fromhex(out[4])
+    c_est_frame = bytes.fromhex(out[5])
+    c_cmd_frame = bytes.fromhex(out[6])
+    c_datum_frame = bytes.fromhex(out[7])
+    c_traj_frame = bytes.fromhex(out[8])
 
     assert c_ext_size == comp_link.EXTERNAL_POSE.size, (
         f"external_pose: C says {c_ext_size}, "
@@ -144,6 +149,9 @@ def main():
     assert c_cmd_size == comp_link.DIRECT_CONTROL.size, (
         f"direct_control: C says {c_cmd_size}, "
         f"Python says {comp_link.DIRECT_CONTROL.size}")
+    assert c_datum_size == comp_link.DATUM_RESET.size, (
+        f"datum_reset: C says {c_datum_size}, "
+        f"Python says {comp_link.DATUM_RESET.size}")
 
     py_ext = comp_link.encode_external_pose(
         -12.5, 3.25, 1.5707963,
@@ -178,6 +186,11 @@ def main():
     assert py_cmd == c_cmd_frame, (
         f"DIRECT_CONTROL bytes differ\n  C:  {c_cmd_frame.hex()}\n"
         f"  py: {py_cmd.hex()}")
+
+    py_datum = comp_link.encode_datum_reset(0x12345678)
+    assert py_datum == c_datum_frame, (
+        f"DATUM_RESET bytes differ\n  C:  {c_datum_frame.hex()}\n"
+        f"  py: {py_datum.hex()}")
 
     py_traj = comp_link.encode_control_trajectory(
         1234567890123, 1234567880000, 0.05,

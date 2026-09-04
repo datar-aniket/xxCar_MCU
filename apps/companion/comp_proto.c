@@ -70,6 +70,9 @@ uint8_t comp_payload_len(uint8_t id)
       case COMP_MSG_DIRECT_CONTROL:
         return (uint8_t)sizeof(struct comp_direct_control_s);
 
+      case COMP_MSG_DATUM_RESET:
+        return (uint8_t)sizeof(struct comp_datum_reset_s);
+
       case COMP_MSG_CONTROL_TRAJ:
         return 0; /* variable; validated against its horizon in the parser */
 

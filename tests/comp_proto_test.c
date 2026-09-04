@@ -89,12 +89,33 @@ static void test_layout(void)
   assert(sizeof(struct comp_timesync_rep_s) == 24);
   assert(sizeof(struct comp_direct_control_s) == 24);
   assert(comp_payload_len(COMP_MSG_DIRECT_CONTROL) == 24);
+  assert(sizeof(struct comp_datum_reset_s) == 4);
+  assert(comp_payload_len(COMP_MSG_DATUM_RESET) == 4);
   assert(comp_payload_len(COMP_MSG_CONTROL_TRAJ) == 0);
   assert(comp_control_trajectory_payload_size(1) == 36);
   assert(comp_control_trajectory_payload_size(14) == 244);
   assert(comp_control_trajectory_payload_size(0) == 0);
   assert(comp_control_trajectory_payload_size(15) == 0);
   assert(comp_payload_len(200) == 0);
+}
+
+static void test_datum_reset_round_trip(void)
+{
+  struct comp_datum_reset_s in;
+  struct comp_datum_reset_s out;
+  uint8_t frame[COMP_MAX_PAYLOAD + COMP_FRAME_OVERHEAD];
+  int n;
+
+  in.request_counter = 0x12345678u;
+  n = comp_encode(COMP_MSG_DATUM_RESET, &in, sizeof(in), frame,
+                  sizeof(frame));
+  assert(n == (int)sizeof(in) + COMP_FRAME_OVERHEAD);
+
+  comp_parser_init(&g_parser);
+  assert(feed(frame, (size_t)n) == COMP_MSG_DATUM_RESET);
+  assert(g_parser.len == sizeof(in));
+  memcpy(&out, g_parser.payload, sizeof(out));
+  assert(out.request_counter == in.request_counter);
 }
 
 static void test_control_trajectory_round_trip(void)
@@ -496,6 +517,7 @@ int main(void)
   test_unknown_id_versus_bad_length();
   test_back_to_back();
   test_timesync_round_trip();
+  test_datum_reset_round_trip();
   test_direct_control_round_trip();
   test_control_trajectory_round_trip();
   test_control_trajectory_rejects_bad_length_and_values();

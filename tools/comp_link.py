@@ -36,6 +36,7 @@ MSG_TIMESYNC_REP = 4
 MSG_TIMESYNC_START = 5
 MSG_TIMESYNC_END = 6
 MSG_DIRECT_CONTROL = 7
+MSG_DATUM_RESET = 8
 MSG_VEHICLE_STATE = 16
 
 POSE_FLAG_VALID = 1 << 0
@@ -87,8 +88,10 @@ assert VEHICLE_STATE.size == 96, VEHICLE_STATE.size
 
 # struct comp_direct_control_s - 24 bytes
 DIRECT_CONTROL = struct.Struct("<QffB7x")
+DATUM_RESET = struct.Struct("<I")
 
 assert DIRECT_CONTROL.size == 24, DIRECT_CONTROL.size
+assert DATUM_RESET.size == 4, DATUM_RESET.size
 
 # struct comp_timesync_req_s / _rep_s
 TIMESYNC_REQ = struct.Struct("<Q")
@@ -109,6 +112,7 @@ PAYLOAD_LEN = {
     MSG_TIMESYNC_START: TIMESYNC_START.size,
     MSG_TIMESYNC_END: TIMESYNC_END.size,
     MSG_DIRECT_CONTROL: DIRECT_CONTROL.size,
+    MSG_DATUM_RESET: DATUM_RESET.size,
 }
 
 
@@ -158,6 +162,18 @@ def encode_external_pose(x, y, yaw, cov=None, valid=True, reset_counter=0,
                               POSE_FLAG_VALID if valid else 0,
                               int(reset_counter) & 0xFF)
     return encode(MSG_EXTERNAL_POSE, body)
+
+
+def encode_datum_reset(request_counter: int) -> bytes:
+    """Use the next valid EXTERNAL_POSE as the EKF's X/Y/yaw datum.
+
+    Increment request_counter for each intentional reset. Re-sending the same
+    counter is safe: the board treats it as a duplicate and does not arm a
+    second discontinuity.
+    """
+    if not 0 <= int(request_counter) <= 0xFFFFFFFF:
+        raise ValueError("datum reset counter must fit uint32")
+    return encode(MSG_DATUM_RESET, DATUM_RESET.pack(int(request_counter)))
 
 
 
@@ -347,9 +363,8 @@ def timesync_solve(rep: dict, host_rx_us: int):
 def decode_vehicle_state(payload: bytes) -> dict:
     """Unpack a VEHICLE_STATE.
 
-    side_slip_rad is NaN until the estimator carries it as a state - NOT
-    zero, because zero is a real slip angle meaning "travelling straight
-    ahead" and the two must stay distinguishable. Check it with math.isnan.
+    side_slip_rad is zero below the board's minimum useful horizontal speed.
+    Check SRC_ESTIMATOR in source_valid when availability matters.
     """
     f = VEHICLE_STATE.unpack(payload)
     rc_status = f[24]
@@ -359,10 +374,13 @@ def decode_vehicle_state(payload: bytes) -> dict:
         "quaternion": f[4:8],          # w x y z, body FLU -> ENU
         "velocity": f[8:11],           # BODY frame, m/s
         "angular_velocity": f[11:14],  # body, rad/s
-        "side_slip_rad": f[14],        # NaN until estimated
+        "side_slip_rad": f[14],        # zero below minimum useful speed
         "accel": f[15:18],             # body, m/s^2, gravity removed
         "wheel_torque_nm": f[18],
         "steering_angle": f[19],
+        # Scaled by VESC_STATE_K. At its default 1.0 this is raw filtered
+        # tachometer counts/s; it is m/s only when that parameter is the
+        # calibrated count-rate-to-speed factor.
         "motor_speed_ms": f[20],
         "solution_status": f[21],
         "reset_counter": f[22],

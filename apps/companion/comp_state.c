@@ -112,13 +112,6 @@ void comp_state_build(FAR const struct comp_state_inputs_s *in,
   memset(out, 0, sizeof(*out));
   out->timestamp_us = timestamp_us;
 
-  /* NaN until there is a velocity to measure it against. Not zero: zero is a
-   * perfectly good slip angle - "travelling straight ahead" - and a consumer
-   * could not tell the two apart.
-   */
-
-  out->side_slip_rad = NAN;
-
   if (in->est_valid)
     {
       memcpy(out->position, in->position, sizeof(out->position));
@@ -144,6 +137,12 @@ void comp_state_build(FAR const struct comp_state_inputs_s *in,
         {
           out->side_slip_rad = atan2f(out->velocity[1], out->velocity[0]);
         }
+
+      /* Below COMP_SLIP_MIN_SPEED the direction of travel is dominated by
+       * velocity noise. The zero from memset is intentional and finite;
+       * source_valid, not NaN payload values, tells a consumer whether an
+       * estimator velocity was available.
+       */
 
       out->solution_status = in->solution_status;
       out->reset_counter = in->reset_counter;
@@ -191,7 +190,7 @@ void comp_state_build(FAR const struct comp_state_inputs_s *in,
   if (in->vesc_valid)
     {
       out->wheel_torque_nm = in->current_a * in->torque_k;
-      out->motor_speed_ms = in->motor_counts_per_s * in->speed_k;
+      out->motor_speed_ms = in->motor_counts_per_s * in->state_speed_k;
       out->source_valid |= COMP_SRC_VESC;
     }
 

@@ -87,7 +87,6 @@
 #define EKF_GAIN_POSITION_Z         EKF_GAIN_BIT(8)
 #define EKF_GAIN_GYRO_BIAS          ((uint16_t)0x0e00u)
 #define EKF_GAIN_ACCEL_BIAS         ((uint16_t)0x7000u)
-#define EKF_GAIN_ACCEL_BIAS_Z       EKF_GAIN_BIT(14)
 
 #define EKF_GAIN_GRAVITY \
   (EKF_GAIN_ATTITUDE | EKF_GAIN_GYRO_BIAS | EKF_GAIN_ACCEL_BIAS)
@@ -96,7 +95,7 @@
 #define EKF_GAIN_HORIZONTAL_POSITION \
   (EKF_GAIN_VELOCITY_XY | EKF_GAIN_POSITION_XY)
 #define EKF_GAIN_HEIGHT \
-  (EKF_GAIN_VELOCITY_Z | EKF_GAIN_POSITION_Z | EKF_GAIN_ACCEL_BIAS_Z)
+  (EKF_GAIN_VELOCITY_Z | EKF_GAIN_POSITION_Z)
 
 static bool vector_finite(FAR const float value[3])
 {
@@ -1417,26 +1416,34 @@ static void constrain_position(FAR struct ekf_core_s *ekf)
     }
 }
 
-static void constrain_height(FAR struct ekf_core_s *ekf)
+static bool constrain_height_kinematics(FAR float position[3],
+                                        FAR float velocity[3],
+                                        float limit)
 {
   float excess;
 
-  if (!(ekf->height_limit > 0.0f))
+  if (!(limit > 0.0f) || fabsf(position[2]) <= limit)
     {
-      return;
+      return false;
     }
 
-  if (fabsf(ekf->position[2]) <= ekf->height_limit)
+  excess = position[2] > 0.0f ? 1.0f : -1.0f;
+  position[2] = excess * limit;
+
+  if (velocity[2] * excess > 0.0f)
     {
-      return;
+      velocity[2] = 0.0f;
     }
 
-  excess = ekf->position[2] > 0.0f ? 1.0f : -1.0f;
-  ekf->position[2] = excess * ekf->height_limit;
+  return true;
+}
 
-  if (ekf->velocity[2] * excess > 0.0f)
+static void constrain_height(FAR struct ekf_core_s *ekf)
+{
+  if (!constrain_height_kinematics(ekf->position, ekf->velocity,
+                                   ekf->height_limit))
     {
-      ekf->velocity[2] = 0.0f;
+      return;
     }
 
   if (ekf->covariance[EKF_P_INDEX(8, 8)] < EKF_HEIGHT_LIMIT_VAR)
@@ -3157,6 +3164,18 @@ int ekf_core_fuse_baro(FAR struct ekf_core_s *ekf, float pressure_hpa,
   h[8] = 1.0f;
   residual = height - ekf->position[2];
 
+  /* A barometer observes height, not accelerometer bias. Position/velocity
+   * propagation creates P(z, accel_bias_z), but using that cross-covariance
+   * to learn bias makes slow pressure drift look exactly like a persistent
+   * vertical acceleration. It is especially destructive on a ground vehicle
+   * with a tight height bound: the bound discards the height excursion while
+   * the false bias correction remains and winds up on every update.
+   *
+   * Keep vertical velocity observable through P(vz,z), but learn accel bias
+   * only from the stationary gravity and zero-velocity paths that actually
+   * separate it from vehicle motion.
+   */
+
   result = measurement_update_1d(ekf, h, residual, noise * noise,
                                  gate_sigma, &ekf->last_baro_nis,
                                  EKF_GAIN_HEIGHT, NULL);
@@ -3284,6 +3303,16 @@ void ekf_core_output_predict(FAR const struct ekf_core_s *ekf,
           return;
         }
 
+      /* The delayed-state replay is the state that leaves the estimator.
+       * Apply the same vehicle-height contract after every replayed process
+       * step as the horizon state receives after every live process step.
+       * Otherwise EK3_HGT_LIM bounds the hidden filter state but the
+       * published output can exceed it by the whole replay interval.
+       */
+
+      constrain_height_kinematics(out->position, out->velocity,
+                                  ekf->height_limit);
+
       out->timestamp_sample = sample->timestamp_sample;
       out->samples_replayed++;
     }
@@ -3330,6 +3359,9 @@ static void extnav_set_datum(FAR struct ekf_core_s *ekf,
                              float pos_noise, float yaw_noise,
                              bool want_position, bool want_yaw)
 {
+  bool discontinuity = (want_position && ekf->extnav_datum_set) ||
+                       (want_yaw && ekf->yaw_absolute);
+
   if (want_position)
     {
       ekf->position[0] = s->x;
@@ -3342,6 +3374,15 @@ static void extnav_set_datum(FAR struct ekf_core_s *ekf,
       ekf->last_extnav_noise = pos_noise;
       ekf->last_extnav_timestamp = ekf->last_timestamp_sample;
       ekf->last_extnav_rx_timestamp = ekf->last_timestamp_sample;
+      ekf->extnav_test_ratio = 0.0f;
+      ekf->extnav_fault_since = 0;
+      ekf->extnav_healthy = true;
+      ekf->extnav_bias_inhibited = false;
+      ekf->position_holding = false;
+      ekf->inhibit_mask = 0;
+      memset(ekf->last_extnav_innov, 0,
+             sizeof(ekf->last_extnav_innov));
+      memset(ekf->last_extnav_nis, 0, sizeof(ekf->last_extnav_nis));
 
       /* A datum is the strongest possible accepted position update. */
 
@@ -3352,6 +3393,16 @@ static void extnav_set_datum(FAR struct ekf_core_s *ekf,
     {
       reset_yaw_absolute(ekf, s->yaw, yaw_noise * yaw_noise);
       ekf->yaw_absolute = true;
+    }
+
+  /* Announce an actual jump, but not the first datum acquired after EKF
+   * alignment. VEHICLE_STATE consumers use this generation to avoid
+   * differentiating the discontinuity into a fictitious velocity spike.
+   */
+
+  if (discontinuity)
+    {
+      ekf->reset_counter++;
     }
 }
 
@@ -3497,6 +3548,22 @@ int ekf_core_fuse_extnav(FAR struct ekf_core_s *ekf,
                         timing_noise * timing_noise);
     }
 
+  /* A companion DATUM_RESET is atomic with this already transformed,
+   * timestamped pose. It resets only external X/Y and external yaw; the
+   * inertial trajectory, velocity, roll/pitch, IMU biases, barometer datum
+   * and alignment remain untouched. Synchronise the source generation so
+   * the same pose cannot immediately cause a second redatum below.
+   */
+
+  if (s->reset_datum)
+    {
+      ekf->extnav_source_reset = s->reset_counter;
+      ekf->have_extnav_reset = true;
+      extnav_set_datum(ekf, s, pos_noise, yaw_noise, want_position,
+                       want_yaw);
+      return -2;
+    }
+
   /* The source relocalised. That is worth more than twenty gated
    * innovations telling us the same thing more slowly.
    */
@@ -3568,15 +3635,6 @@ int ekf_core_fuse_extnav(FAR struct ekf_core_s *ekf,
         extnav_set_datum(ekf, s, pos_noise, yaw_noise,
                          need_position_datum, need_yaw_datum ||
                          (need_position_datum && want_yaw));
-
-        if (need_position_datum)
-          {
-            ekf->extnav_test_ratio = 0.0f;
-            ekf->extnav_fault_since = 0;
-            ekf->extnav_healthy = true;
-            ekf->position_holding = false;
-            ekf->inhibit_mask = 0;
-          }
 
         return -2;
       }

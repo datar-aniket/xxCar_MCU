@@ -693,7 +693,7 @@ static const struct param_def_s g_params[] =
     "Fuse gravity as a tilt reference while moving" },
 
   { "EK3_HGT_LIM", PARAM_TYPE_FLOAT, F32(50.0f), F32(0.0f), F32(1000.0f),
-    "Height bound above the alignment point (m, 0 = off)" },
+    "Height safety bound about alignment (m, 0=off; not aiding)" },
 
   /* Horizontal bound applied while NOTHING is aiding position.
    *
@@ -831,7 +831,9 @@ static const struct param_def_s g_params[] =
   { "STEER_FB_SRC", PARAM_TYPE_INT32, I32(0), I32(0), I32(1),
     "Feedback: 0 VESC ADC, 1 sent servo command", PARAM_RANGE_ENUM },
   { "VESC_SPEED_K", PARAM_TYPE_FLOAT, F32(1.0f), F32(-1000.0f), F32(1000.0f),
-    "Tachometer rate to ground speed (m/s per count/s)" },
+    "Tachometer rate to EKF ground speed (m/s per count/s)" },
+  { "VESC_STATE_K", PARAM_TYPE_FLOAT, F32(1.0f), F32(-1000.0f),
+    F32(1000.0f), "Tachometer rate scale in VEHICLE_STATE" },
 
   /* Motor speed filtering, applied in the VESC daemon on every STATUS_5.
    *

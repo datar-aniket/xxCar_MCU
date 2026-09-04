@@ -17,7 +17,7 @@ The board claims whichever serial port has its `SER_*_FUNC` parameter set to
 | TELEM2 | `/dev/ttyS3` (UART5) | `SER_TEL2_FUNC` | `SER_TEL2_BAUD` | 921600 |
 
 8N1, no flow control on the data lines. TELEM2's CTS pin is repurposed as the
-PPS input — see section 8 — so hardware flow control must stay off.
+PPS input — see section 11 — so hardware flow control must stay off.
 
 The link starts at boot when `COMP_EN` is 1, which is the default, along with
 the estimator (`EKF3_EN`), the IMU integrator (`IMU_DELTA_EN`) and the sensor
@@ -58,6 +58,7 @@ direction fails to route rather than half-working.
 | 5 | `TIMESYNC_START` | companion → board | 8 |
 | 6 | `TIMESYNC_END` | companion → board | 16 |
 | 7 | `DIRECT_CONTROL` | companion → board | 24 |
+| 8 | `DATUM_RESET` | companion → board | 4 |
 | 16 | `VEHICLE_STATE` | board → companion | 96 |
 
 An unknown id is counted and ignored — that is a companion newer than the
@@ -131,7 +132,7 @@ separately from a working sync (`companion status` shows both) precisely so
 that a timesync which has quietly stopped working is never mistaken for a
 source that never timestamped at all.
 
-Complete a timesync (section 8) before sending UTC timestamps. Sending them
+Complete a timesync (section 11) before sending UTC timestamps. Sending them
 beforehand is worse than sending zero: the board counts them and falls back
 to arrival stamping anyway.
 
@@ -292,11 +293,11 @@ hardware timer.
 | 20 | `float32[4]` | `quaternion` | body→ENU | w, x, y, z |
 | 36 | `float32[3]` | `velocity` | **body FLU** | m/s |
 | 48 | `float32[3]` | `angular_velocity` | body FLU | rad/s |
-| 60 | `float32` | `side_slip_rad` | body FLU | rad, NaN below 0.3 m/s |
+| 60 | `float32` | `side_slip_rad` | body FLU | rad, zero below 0.3 m/s |
 | 64 | `float32[3]` | `accel` | body FLU | m/s², gravity removed |
 | 76 | `float32` | `wheel_torque_nm` | — | Nm |
 | 80 | `float32` | `steering_angle` | — | selected steering feedback |
-| 84 | `float32` | `motor_speed_ms` | — | m/s |
+| 84 | `float32` | `motor_speed_ms` | — | tachometer rate × `VESC_STATE_K` |
 | 88 | `uint8` | `solution_status` | — | bits below |
 | 89 | `uint8` | `reset_counter` | — | estimator reset generation |
 | 90 | `uint8` | `source_valid` | — | which inputs were fresh |
@@ -349,10 +350,15 @@ Horizontal components only; a climb is not side slip. Left-positive, matching
 body y and ISO 8855, so sliding to the left of the nose gives a positive
 angle.
 
-**NaN below 0.3 m/s.** At rest the direction of travel is noise, and
-reporting whatever `atan2` makes of two near-zero numbers would be worse than
-saying nothing. NaN is also what distinguishes "not computed" from a genuine
-zero, which means "travelling straight ahead" — test with `isnan()`.
+Let `horizontal_speed = hypot(velocity[0], velocity[1])`. When it is at least
+0.3 m/s, the transmitted value is
+`atan2(velocity[1], velocity[0])`. Below 0.3 m/s the packet reports exactly
+`0.0f`, because the direction of travel is dominated by velocity noise at
+rest. Vertical velocity is deliberately excluded from the threshold.
+
+If estimator state is unavailable, `side_slip_rad` is also `0.0f` and
+`COMP_SRC_ESTIMATOR` is clear in `source_valid`. Consumers must use that bit
+when availability matters; a NaN sentinel is no longer emitted.
 
 ### accel
 
@@ -372,7 +378,7 @@ raw 9.8 m/s² as vehicle acceleration.
 | `wheel_torque_nm` | `vesc_status.current_a` | `VESC_TORQUE_K` | 1.0 |
 | `steering_angle`, `STEER_FB_SRC=0` | `vesc_status.adc_volts` | `VESC_STEER_K` | 1.0 |
 | `steering_angle`, `STEER_FB_SRC=1` | last servo pulse sent to VESC | 1000–2000 us → -0.5–+0.5 | — |
-| `motor_speed_ms` | tachometer rate | `VESC_SPEED_K` | 1.0 |
+| `motor_speed_ms` | tachometer rate | `VESC_STATE_K` | 1.0 |
 | (filter cutoff) | — | `VESC_SPD_LPF` | 100 Hz |
 | (expected telemetry rate) | — | `VESC_TLM_HZ` | 400 Hz |
 
@@ -383,10 +389,16 @@ channel 7 adds a live trim on top in both RC and Auto modes: 1000–2000 us maps
 linearly to -100–+100 us. If RC is stale, in failsafe, or CH7 is unavailable,
 its contribution is zero.
 
-All three scalars default to **1.0**, so until the vehicle is characterised
-these carry raw amps, raw volts and raw counts per second. That is
-deliberate: a guessed gear ratio is worse than an honest raw number, because
-it looks calibrated.
+All state-message scalars default to **1.0**, so until the vehicle is
+characterised these carry raw amps, raw volts and raw tachometer counts per
+second. `VESC_SPEED_K` is separate and is used only by the EKF's internal
+wheel-velocity fusion. This allows the EKF to use calibrated m/s while the
+state message continues to carry the raw filtered rate with
+`VESC_STATE_K=1.0`.
+
+The raw rate is tachometer counts/s, not literal ERPM. The VESC tachometer
+uses six counts per electrical revolution, so ERPM is counts/s × 10. Set
+`VESC_STATE_K=10.0` when literal ERPM is required on the state link.
 
 #### Calibrating `VESC_SPEED_K`
 
@@ -396,7 +408,7 @@ against the tachometer rate, through the origin, because zero counts must
 mean zero velocity.
 
 ```
-param set VESC_SPEED_K 1.0     # else the result is a correction, not the value
+param set VESC_STATE_K 1.0     # expose raw counts/s to the calibration tool
 param save                     # then reboot
 python3 tools/wheel_cal.py /dev/pixhawk_6c --seconds 60
 ```
@@ -409,11 +421,11 @@ reference when it does not know its own speed. The fit is refused outright
 below 200 samples or a 1 m/s speed span, since a dataset taken at one speed
 yields a confident number describing only that speed.
 
-The estimator's velocity is a legitimate reference here only because it is
-not derived from the wheels. The zero-velocity update is deliberately
-K-independent — it asserts zero, never a speed — so the fit is not circular.
-Were wheel speed ever fused as a velocity measurement, this tool would have
-to take its reference from the external fix directly.
+The zero-velocity update is K-independent—it asserts zero, never a speed—but
+moving-wheel fusion is not. Run this calibration with the active
+`EK3_SRCn_VELXY` set to a non-wheel source; source 7 would fuse the same wheel
+rate being calibrated and make estimator velocity a circular reference.
+Restore source 7 after installing the fitted `VESC_SPEED_K`.
 
 `motor_speed_ms` is the time derivative of the tachometer, and it is computed
 **in the VESC daemon, not here.** That placement is the point:
@@ -526,7 +538,7 @@ So the age you measure on arrival legitimately includes the estimator's own
 output latency; it is not all transport.
 
 Guaranteed never to be in the future — clamped to the board's own UTC before
-sending, and the PPS discipline in section 8 keeps that clock aligned to
+sending, and the PPS discipline in section 11 keeps that clock aligned to
 yours.
 
 ### solution_status
@@ -576,7 +588,7 @@ state = {
     "quaternion": f[4:8],          # w x y z
     "velocity": f[8:11],           # BODY frame
     "angular_velocity": f[11:14],  # body
-    "side_slip_rad": f[14],        # NaN until estimated
+    "side_slip_rad": f[14],        # zero below 0.3 m/s
     "accel": f[15:18],             # body, gravity removed
     "wheel_torque_nm": f[18],
     "steering_angle": f[19],
@@ -685,7 +697,7 @@ command on the wire still becomes 20 A at the motor.
 ### The timestamp is required
 
 Unlike `EXTERNAL_POSE`, a zero timestamp is **not** accepted, and neither is
-any timestamp before the clocks have been related (section 10). A pose with no
+any timestamp before the clocks have been related (section 11). A pose with no
 usable stamp costs accuracy; a command with no usable stamp cannot be aged,
 and an actuator command of unknown age is the one thing this link must not act
 on. Both cases are counted in `rx_direct_stale`.
@@ -739,7 +751,45 @@ design.
              last age 3.2 ms of 100 ms budget (AUTO_CMD_TO_MS)
 ```
 
-## 10. Clock synchronisation
+## 10. DATUM_RESET (id 8, 4 bytes)
+
+Requests that the next valid `EXTERNAL_POSE` become the EKF's external datum.
+Its payload is one little-endian `uint32 request_counter`:
+
+```c
+struct comp_datum_reset_s
+{
+  uint32_t request_counter;
+};
+```
+
+Increment the counter for every intentional request. Retransmitting the same
+counter is idempotent and cannot cause a second position jump. Invalid poses
+do not consume the request; it remains pending until a valid pose is received.
+
+The selected external states are set directly from that pose at its delayed
+fusion timestamp:
+
+- `POSXY=6` sets EKF X/Y and resets only their covariance;
+- `YAW=6` sets absolute yaw while preserving roll and pitch;
+- if both are selected, they change atomically from the same pose.
+
+This is deliberately not `ekf3 reset`. Velocity, inertial propagation, IMU
+biases, barometer datum, height, roll/pitch and the completed alignment are
+preserved. A previously condemned external source is returned to healthy
+state, and the outgoing `VEHICLE_STATE.reset_counter` increments so consumers
+can treat the position/yaw change as a discontinuity rather than velocity.
+
+```python
+request_generation += 1
+link.send(comp_link.encode_datum_reset(request_generation))
+```
+
+`companion status` reports whether a valid pose was tagged or the request is
+still `WAITING FOR VALID POSE`. Actual EKF application is visible in
+`ekf3 status`'s `redatum` count and the outbound estimator reset generation.
+
+## 11. Clock synchronisation
 
 Timestamps are only meaningful once the clocks are related. Two mechanisms
 work together.
@@ -801,7 +851,7 @@ A timesync burst, or the RTC, must establish the absolute time first —
 
 `pps status` shows lock state, period and edge counts.
 
-## 11. Minimal sender
+## 12. Minimal sender
 
 ```python
 import struct, serial
@@ -830,13 +880,14 @@ port.write(external_pose(1.5, -2.25, 0.5, 1755000000000000, reset_counter=3))
 Check that against the test vector in section 6 before trusting it against
 the board.
 
-## 12. Diagnostics
+## 13. Diagnostics
 
 `companion status` on the NSH console reports, among others:
 
 | Field | Meaning |
 |---|---|
 | `rx_pose` | `EXTERNAL_POSE` frames routed and published |
+| `redatum requests/pose-tagged/duplicate` | datum command lifecycle and retry deduplication |
 | `crc_errors` | framing or wiring problem |
 | `bad_length` | a known id at the wrong size — a format disagreement |
 | `unknown_id` | benign; a companion newer than the firmware |
@@ -852,7 +903,7 @@ the board.
 | `extnav_bad_time` | refused on the timestamp window |
 | `extnav_untimed` | arrival-stamped; the source sent zero |
 | `accept` / `reject` | per-pose gate outcomes, and the current reject run |
-| `redatum` | times a datum was granted — only ever after silence |
+| `redatum` | times a datum was granted initially, after recovery, or by an explicit source/companion reset |
 | `health` | `OK`, or `UNHEALTHY - NOT FUSED` |
 | `test_ratio` | the low-passed innovation ratio against the IMU |
 | `faults` | times the source has been condemned |
@@ -861,9 +912,10 @@ the board.
 **Reading a bad run.** `test_ratio` climbing above 1 while `reject` grows
 means your poses and the IMU disagree. If `accel-bias` shows `FROZEN` the
 guard has engaged and the filter is protecting itself; if `health` then goes
-`UNHEALTHY`, the source has been dropped and `POSITION_HORIZ` is gone. A
-`redatum` count that is *not* increasing during all of this is the design
-working — a disagreeing source is never adopted.
+`UNHEALTHY`, the source has been dropped and `POSITION_HORIZ` is gone. Unless
+the companion explicitly sends `DATUM_RESET`, a `redatum` count that is not
+increasing during disagreement is the design working: an uncommanded bad
+source is never adopted.
 
 ## Related
 

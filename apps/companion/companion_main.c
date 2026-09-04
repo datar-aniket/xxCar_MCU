@@ -93,6 +93,17 @@ static void print_status(void)
          s.parser.crc_errors, s.parser.unknown_id, s.parser.bad_length,
          s.rx_publish_errors);
 
+  if (s.rx_datum_reset > 0 || s.rx_datum_duplicate > 0 ||
+      s.datum_reset_pending)
+    {
+      printf("  redatum    requests %" PRIu32 "  pose-tagged %" PRIu32
+             "  duplicate %" PRIu32 "%s  last generation %" PRIu32 "\n",
+             s.rx_datum_reset, s.datum_reset_dispatched,
+             s.rx_datum_duplicate,
+             s.datum_reset_pending ? "  WAITING FOR VALID POSE" : "",
+             s.last_datum_request);
+    }
+
   /* Silence on the companion's screen has two very different causes, and
    * without these there is no way to tell them apart: either the estimator
    * is not producing (est 0) or it is and the port will not take the bytes

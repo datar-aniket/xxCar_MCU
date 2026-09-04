@@ -71,7 +71,7 @@ static uint64_t g_tx_last_sample;
 
 static float g_torque_k = 1.0f;
 static float g_steer_k = 1.0f;
-static float g_speed_k = 1.0f;
+static float g_state_speed_k = 1.0f;
 static uint8_t g_steer_source;
 static uint8_t g_rc_steering_index;
 static uint8_t g_rc_throttle_index;
@@ -373,6 +373,7 @@ static void comp_route(int id, FAR const struct comp_parser_s *parser,
     {
       struct comp_external_pose_s wire;
       struct external_pose_s out;
+      bool apply_datum_reset;
 
       memcpy(&wire, parser->payload, sizeof(wire));
       memset(&out, 0, sizeof(out));
@@ -408,8 +409,23 @@ static void comp_route(int id, FAR const struct comp_parser_s *parser,
       out.y = wire.y;
       out.yaw = wire.yaw;
       memcpy(out.cov, wire.cov, sizeof(out.cov));
-      out.flags = wire.flags;
+      out.flags = wire.flags & COMP_POSE_FLAG_VALID;
       out.reset_counter = wire.reset_counter;
+
+      /* DATUM_RESET is separate from the pose so retransmissions can be
+       * idempotent, but the operation itself must be atomic with a pose.
+       * Mark exactly the next VALID pose; invalid localisation output cannot
+       * become a datum, and a publish failure leaves the request armed for
+       * the next attempt.
+       */
+
+      apply_datum_reset = s->datum_reset_pending &&
+        (out.flags & EXTERNAL_POSE_VALID) != 0;
+
+      if (apply_datum_reset)
+        {
+          out.flags |= EXTERNAL_POSE_RESET_DATUM;
+        }
 
       if (external_pose_publish(pose_pub, &out) < 0)
         {
@@ -417,8 +433,41 @@ static void comp_route(int id, FAR const struct comp_parser_s *parser,
           return;
         }
 
+      if (apply_datum_reset)
+        {
+          s->datum_reset_pending = false;
+          s->datum_reset_dispatched++;
+        }
+
       s->rx_pose++;
       s->last_rx_us = out.timestamp;
+    }
+
+  else if (id == COMP_MSG_DATUM_RESET)
+    {
+      struct comp_datum_reset_s wire;
+
+      memcpy(&wire, parser->payload, sizeof(wire));
+
+      /* The request counter is a transaction id. UART reconnects and host
+       * retry timers may deliver a frame twice; only a new counter is allowed
+       * to arm another discontinuous datum change.
+       */
+
+      if (!s->datum_reset_seen ||
+          wire.request_counter != s->last_datum_request)
+        {
+          s->datum_reset_seen = true;
+          s->last_datum_request = wire.request_counter;
+          s->datum_reset_pending = true;
+          s->rx_datum_reset++;
+        }
+      else
+        {
+          s->rx_datum_duplicate++;
+        }
+
+      s->last_rx_us = rx_us;
     }
 
   else if (id == COMP_MSG_CONTROL_TRAJ)
@@ -866,7 +915,7 @@ static void comp_transmit(int fd, int state_pub, int est_sub, int gyro_sub,
   memset(&in, 0, sizeof(in));
   in.torque_k = g_torque_k;
   in.steer_k = g_steer_k;
-  in.speed_k = g_speed_k;
+  in.state_speed_k = g_state_speed_k;
   memset(&router, 0, sizeof(router));
   control_router_status(&router);
   in.control_armed = router.armed;
@@ -1286,7 +1335,7 @@ static int companion_daemon(int argc, FAR char *argv[])
   status.tx_rate_hz = (uint32_t)param_i32("EXT_TX_RATE");
   g_torque_k = param_f32("VESC_TORQUE_K");
   g_steer_k = param_f32("VESC_STEER_K");
-  g_speed_k = param_f32("VESC_SPEED_K");
+  g_state_speed_k = param_f32("VESC_STATE_K");
   g_steer_source = (uint8_t)param_i32("STEER_FB_SRC");
   {
     int32_t steering_map = param_i32("RC_MAP_STEERING");

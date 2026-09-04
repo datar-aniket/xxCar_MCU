@@ -52,6 +52,23 @@ static void align_core(void)
   assert(g_core.initialized);
 }
 
+static void process_rest_sample(void)
+{
+  struct ekf_imu_sample_s s;
+  uint64_t t = g_core.last_timestamp_sample + TEST_DT_US;
+
+  memset(&s, 0, sizeof(s));
+  s.timestamp_sample = t;
+  s.timestamp_first = t - TEST_DT_US;
+  s.delta_angle_dt = TEST_DT;
+  s.delta_velocity_dt = TEST_DT;
+  s.delta_velocity[2] = TEST_G * TEST_DT;
+  s.samples = 5;
+  s.accel_calibrated = true;
+  s.gyro_calibrated = true;
+  assert(ekf_core_process(&g_core, &s) == EKF_PROCESS_PREDICTED);
+}
+
 static void test_height_at_reference_is_zero(void)
 {
   assert(CLOSE(ekf_baro_height(1013.25f, 1013.25f), 0.0f, 1.0e-3f));
@@ -207,9 +224,13 @@ static void test_reduces_vertical_velocity_variance(void)
   assert(g_core.covariance[EKF_P_INDEX(5, 5)] < before);
 }
 
-/* A height observation may correct only the vertical state family. Seed
- * covariance from height into every other state so this verifies the gain
- * mask rather than relying on naturally small cross-terms.
+/* A height observation may correct vertical position and velocity only.
+ * It must not learn accelerometer bias: barometer drift is indistinguishable
+ * from a vertical acceleration error through the position cross-covariance,
+ * and a tight ground-vehicle height clamp would turn that ambiguity into
+ * accel-bias windup. Seed covariance from height into every other state so
+ * this verifies the gain mask rather than relying on naturally small
+ * cross-terms.
  */
 
 static void test_height_masks_attitude_and_horizontal_gain(void)
@@ -251,14 +272,47 @@ static void test_height_masks_attitude_and_horizontal_gain(void)
     {
       assert(CLOSE(g_core.velocity[axis], before.velocity[axis], 1.0e-7f));
       assert(CLOSE(g_core.position[axis], before.position[axis], 1.0e-7f));
-      assert(CLOSE(g_core.accel_bias[axis], before.accel_bias[axis],
-                   1.0e-7f));
     }
 
   for (axis = 0; axis < 3; axis++)
     {
       assert(CLOSE(g_core.gyro_bias[axis], before.gyro_bias[axis], 1.0e-7f));
+      assert(CLOSE(g_core.accel_bias[axis], before.accel_bias[axis],
+                   1.0e-7f));
     }
+}
+
+/* Reproduce the hardware failure mode rather than testing only one update:
+ * a car is stationary, its permitted vertical excursion is 0.1 m, and a
+ * slowly shifted pressure signal repeatedly asks for about 0.4 m. The bound
+ * will operate, but it must not leave behind an invented acceleration bias.
+ */
+
+static void test_tight_height_bound_cannot_wind_accel_z_bias(void)
+{
+  float bias_before;
+  int update;
+  int sample;
+
+  align_core();
+  ekf_core_set_height_limit(&g_core, 0.1f);
+  ekf_core_set_bias_limits(&g_core, 0.1f, 0.1f);
+  assert(ekf_core_fuse_baro(&g_core, 1013.25f, 2.0f, 5.0f) == -2);
+  bias_before = g_core.accel_bias[2];
+
+  for (update = 0; update < 1000; update++)
+    {
+      for (sample = 0; sample < 8; sample++)
+        {
+          process_rest_sample();
+        }
+
+      assert(ekf_core_fuse_baro(&g_core, 1013.20f, 2.0f, 5.0f) == 1);
+    }
+
+  assert(g_core.height_clamp_count > 0);
+  assert(fabsf(g_core.position[2]) <= 0.1f + 1.0e-6f);
+  assert(CLOSE(g_core.accel_bias[2], bias_before, 1.0e-5f));
 }
 
 /* The reference is tied to the alignment point, so losing alignment must
@@ -360,6 +414,7 @@ int main(void)
   test_accept_clears_run();
   test_reduces_vertical_velocity_variance();
   test_height_masks_attitude_and_horizontal_gain();
+  test_tight_height_bound_cannot_wind_accel_z_bias();
   test_realignment_discards_reference();
   test_uninitialised_refuses();
   test_solution_status_vertical();

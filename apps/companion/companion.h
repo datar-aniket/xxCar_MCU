@@ -37,6 +37,12 @@ struct companion_status_s
 
   uint32_t rx_pose;           /* EXTERNAL_POSE routed and published */
   uint32_t rx_publish_errors;
+  uint32_t rx_datum_reset;    /* unique DATUM_RESET requests */
+  uint32_t rx_datum_duplicate; /* retransmitted request counters */
+  uint32_t datum_reset_dispatched; /* valid poses marked as new datum */
+  uint32_t last_datum_request;
+  bool     datum_reset_seen;
+  bool     datum_reset_pending;
 
   /* DIRECT_CONTROL, counted by outcome rather than in one total.
    *

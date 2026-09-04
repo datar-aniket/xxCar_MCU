@@ -202,12 +202,13 @@ struct external_pose_s
   float    y;                     /* 20 */
   float    yaw;                   /* 24: rad, map frame */
   float    cov[6];                /* 28: xx xy xyaw yy yyaw yawyaw */
-  uint8_t  flags;                 /* 52: bit 0 = pose valid */
+  uint8_t  flags;                 /* 52: EXTERNAL_POSE_* */
   uint8_t  reset_counter;         /* 53: source's frame-reset generation */
   uint8_t  pad[2];                /* 54 */
 };
 
 #define EXTERNAL_POSE_VALID (1u << 0)
+#define EXTERNAL_POSE_RESET_DATUM (1u << 1) /* one-shot, use this pose */
 
 /* Exact VEHICLE_STATE downlink values, mirrored at the point where the
  * companion has successfully written the frame.  `timestamp` is kept in the
@@ -231,11 +232,11 @@ struct vehicle_state_tx_s
   float    quaternion[4];         /*  44: body FLU to local ENU */
   float    velocity[3];           /*  60: body FLU, m/s */
   float    angular_velocity[3];   /*  72: body FLU, rad/s */
-  float    side_slip_rad;         /*  84: left-positive, NaN below threshold */
+  float    side_slip_rad;         /*  84: left-positive, 0 below threshold */
   float    accel[3];              /*  88: body FLU, gravity removed, m/s^2 */
   float    wheel_torque_nm;       /* 100 */
   float    steering_angle;        /* 104 */
-  float    motor_speed_ms;        /* 108 */
+  float    motor_speed_ms;        /* 108: rate x VESC_STATE_K */
   uint32_t rc_status;             /* 112: exact packed wire value */
   uint8_t  solution_status;       /* 116 */
   uint8_t  reset_counter;         /* 117 */

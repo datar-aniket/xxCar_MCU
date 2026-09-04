@@ -587,7 +587,7 @@ class App(tk.Tk):
         self.drive_lbl.configure(
             text=(f"torque {pose['wheel_torque_nm']:+7.3f} Nm    "
                   f"steer {pose['steering_angle']:+7.3f}    "
-                  f"speed {pose['motor_speed_ms']:+7.3f} m/s"))
+                  f"motor rate {pose['motor_speed_ms']:+10.3f} state-units"))
 
         # The solution's own timestamp, and how stale it is by the time it
         # got here. Age needs the offset - it is the difference between two

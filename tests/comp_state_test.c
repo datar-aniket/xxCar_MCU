@@ -211,9 +211,11 @@ static void test_gravity_leaves_real_accel(void)
   assert(CLOSE(out[2], 0.0f));
 }
 
-/* side_slip is NaN and not zero, because zero is a real slip angle. */
+/* Missing estimator input leaves a finite zero. Availability is carried by
+ * source_valid rather than encoded as a NaN in an otherwise numeric packet.
+ */
 
-static void test_build_side_slip_is_nan(void)
+static void test_build_side_slip_is_zero_without_estimator(void)
 {
   struct comp_state_inputs_s in;
   struct comp_vehicle_state_s out;
@@ -221,11 +223,12 @@ static void test_build_side_slip_is_nan(void)
   memset(&in, 0, sizeof(in));
   comp_state_build(&in, 123, &out);
 
-  assert(isnan(out.side_slip_rad));
+  assert(CLOSE(out.side_slip_rad, 0.0f));
+  assert((out.source_valid & COMP_SRC_ESTIMATOR) == 0);
 }
 
-/* Travelling straight ahead is ZERO slip - and that is exactly why the
- * absent case has to be NaN, since the two are otherwise identical.
+/* Travelling straight ahead is zero slip. Estimator availability is carried
+ * independently by COMP_SRC_ESTIMATOR.
  */
 
 static void test_side_slip_straight_ahead(void)
@@ -240,7 +243,6 @@ static void test_side_slip_straight_ahead(void)
 
   comp_state_build(&in, 0, &out);
 
-  assert(!isnan(out.side_slip_rad));
   assert(CLOSE(out.side_slip_rad, 0.0f));
 }
 
@@ -297,11 +299,11 @@ static void test_side_slip_is_heading_invariant(void)
     }
 }
 
-/* At rest the direction of travel is noise, so slip must stay NaN rather
- * than reporting whatever atan2 makes of two tiny numbers.
+/* At rest the direction of travel is noise, so slip must stay at a finite
+ * zero rather than reporting whatever atan2 makes of two tiny numbers.
  */
 
-static void test_side_slip_nan_at_rest(void)
+static void test_side_slip_zero_at_low_speed(void)
 {
   struct comp_state_inputs_s in;
   struct comp_vehicle_state_s out;
@@ -313,14 +315,23 @@ static void test_side_slip_nan_at_rest(void)
   in.velocity_enu[1] = 0.01f;
 
   comp_state_build(&in, 0, &out);
-  assert(isnan(out.side_slip_rad));
+  assert(CLOSE(out.side_slip_rad, 0.0f));
 
   /* Vertical motion alone is not side slip either. */
 
   memset(&in.velocity_enu, 0, sizeof(in.velocity_enu));
   in.velocity_enu[2] = 5.0f;
   comp_state_build(&in, 0, &out);
-  assert(isnan(out.side_slip_rad));
+  assert(CLOSE(out.side_slip_rad, 0.0f));
+
+  /* Just below the explicit horizontal-speed threshold remains zero even
+   * with a large apparent direction angle.
+   */
+
+  in.velocity_enu[0] = 0.20f;
+  in.velocity_enu[1] = 0.20f;
+  comp_state_build(&in, 0, &out);
+  assert(CLOSE(out.side_slip_rad, 0.0f));
 }
 
 /* Every source absent must be visible as absent, not as a plausible zero. */
@@ -408,7 +419,7 @@ static void test_build_scalars(void)
   in.steering_feedback = 1.65f;
   in.torque_k = 2.0f;
   in.steer_k = 10.0f;
-  in.speed_k = 0.001f;
+  in.state_speed_k = 0.001f;
 
   comp_state_build(&in, 0, &out);
 
@@ -506,11 +517,11 @@ int main(void)
   test_gravity_is_yaw_invariant();
   test_gravity_rolled();
   test_gravity_leaves_real_accel();
-  test_build_side_slip_is_nan();
+  test_build_side_slip_is_zero_without_estimator();
   test_side_slip_straight_ahead();
   test_side_slip_sign_is_left_positive();
   test_side_slip_is_heading_invariant();
-  test_side_slip_nan_at_rest();
+  test_side_slip_zero_at_low_speed();
   test_build_reports_missing_sources();
   test_build_accel_needs_attitude();
   test_build_accel_removes_ekf_bias();

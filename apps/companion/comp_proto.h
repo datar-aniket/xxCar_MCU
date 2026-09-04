@@ -46,6 +46,7 @@
 #define COMP_MSG_TIMESYNC_START  5
 #define COMP_MSG_TIMESYNC_END    6
 #define COMP_MSG_DIRECT_CONTROL  7
+#define COMP_MSG_DATUM_RESET     8
 
 /* Outbound: board -> companion. */
 
@@ -81,6 +82,18 @@ struct comp_external_pose_s
 };
 
 #define COMP_POSE_FLAG_VALID (1u << 0)
+
+/* Request that the NEXT valid EXTERNAL_POSE become the EKF's external
+ * position/yaw datum. This is deliberately not an EKF reset: propagation,
+ * velocity, attitude tilt, IMU biases, barometer state and alignment all
+ * survive. request_counter makes a retransmitted UART frame idempotent; the
+ * companion increments it for each intentional request.
+ */
+
+struct comp_datum_reset_s
+{
+  uint32_t request_counter;
+};
 
 /* Mirrors ACTUATOR_MODE_* in uorb_msgs.h. Duplicated rather than included
  * because that header needs uORB. companion.c carries a static_assert that
@@ -190,12 +203,9 @@ struct comp_vehicle_state_s
   float    velocity[3];       /* 36: m/s, BODY frame */
   float    angular_velocity[3]; /* 48: rad/s, body - the filtered gyro */
 
-  /* Angle between the velocity vector and the vehicle's heading.
-   *
-   * NaN until the estimator carries it as a state. NOT zero: zero is a
-   * perfectly good slip angle meaning "travelling straight ahead", and a
-   * consumer cannot tell that apart from "not computed". NaN can only mean
-   * the latter. Check it with isnan() before use.
+  /* Angle between horizontal body velocity and the vehicle's heading.
+   * Zero below COMP_SLIP_MIN_SPEED; source_valid says whether estimator
+   * velocity was available.
    */
 
   float    side_slip_rad;     /* 60 */
@@ -210,7 +220,7 @@ struct comp_vehicle_state_s
 
   float    wheel_torque_nm;   /* 76: VESC current x VESC_TORQUE_K */
   float    steering_angle;    /* 80: VESC ADC x K, or mapped sent command */
-  float    motor_speed_ms;    /* 84: tachometer rate x VESC_SPEED_K */
+  float    motor_speed_ms;    /* 84: tachometer rate x VESC_STATE_K */
 
   uint8_t  solution_status;   /* 88: ESTIMATOR_* validity bits */
   uint8_t  reset_counter;     /* 89: estimator reset generation */

@@ -1720,6 +1720,45 @@ static void test_height_limit_zero_disables(void)
   assert(ekf.height_limit == 0.0f);
 }
 
+/* The published state is replayed from the delayed fusion horizon. The same
+ * height contract must apply to that replay, not only to the hidden horizon
+ * state, or a positive vertical velocity can publish beyond EK3_HGT_LIM for
+ * the entire configured delay.
+ */
+
+static void test_height_limit_applies_to_output_replay(void)
+{
+  struct ekf_core_s ekf;
+  struct ekf_imu_sample_s sample;
+  struct ekf_output_s output;
+  FAR const struct ekf_imu_sample_s *samples[1];
+  const float zero_gyro[3] = {0.0f, 0.0f, 0.0f};
+  const float rest[3] = {0.0f, 0.0f, TEST_GRAVITY};
+  uint64_t timestamp;
+
+  ekf_core_init(&ekf);
+  initialize_tilted(&ekf, &timestamp, 0.0f, 0.0f, zero_gyro);
+  ekf_core_set_height_limit(&ekf, 0.1f);
+  ekf.position[2] = 0.1f;
+  ekf.velocity[2] = 1.0f;
+
+  timestamp += TEST_DT_US;
+  make_sample(&sample, timestamp, rest, zero_gyro);
+  samples[0] = &sample;
+  ekf_core_output_predict(&ekf, samples, 1, &output);
+
+  assert(output.valid);
+  assert(output.samples_replayed == 1);
+  assert_near(output.position[2], 0.1f, 1.0e-6f);
+  assert_near(output.velocity[2], 0.0f, 1.0e-6f);
+
+  /* Replaying an output must never modify the filter state or diagnostics. */
+
+  assert_near(ekf.position[2], 0.1f, 1.0e-6f);
+  assert_near(ekf.velocity[2], 1.0f, 1.0e-6f);
+  assert(ekf.height_clamp_count == 0);
+}
+
 /* With no fix, position is bounded rather than integrated.
  *
  * Free dead reckoning on an IMU leaves quadratically and never returns, so
@@ -2560,18 +2599,100 @@ static void test_extnav_source_reset_forces_a_redatum(void)
 {
   struct ekf_core_s ekf;
   uint64_t timestamp;
+  uint16_t reset_before;
   struct ekf_extnav_sample_s s = extnav_at(0.0f, 0.0f, 0.0f);
 
   extnav_align(&ekf, &timestamp);
   assert(ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f,
                               true, false) == -2);
 
+  reset_before = ekf.reset_counter;
   s.reset_counter = 1;
   s.x = 77.0f;
   assert(ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f,
                               true, false) == -2);
   assert_near(ekf.position[0], 77.0f, 1.0e-3f);
   assert(ekf.extnav_datum_count == 2);
+  assert(ekf.reset_counter == (uint16_t)(reset_before + 1));
+}
+
+/* A companion datum command uses the pose carrying the one-shot flag, even
+ * when the ordinary innovation gate has already condemned the source. It is
+ * a position/yaw discontinuity only: no inertial state, bias, height datum or
+ * alignment is discarded.
+ */
+
+static void test_companion_datum_reset_preserves_inertial_state(void)
+{
+  struct ekf_core_s ekf;
+  struct ekf_extnav_sample_s s = extnav_at(0.0f, 0.0f, 0.2f);
+  float velocity_before[3];
+  float gyro_bias_before[3];
+  float accel_bias_before[3];
+  float euler[3];
+  uint64_t timestamp;
+  uint16_t reset_before;
+  int axis;
+
+  extnav_align(&ekf, &timestamp);
+  assert(ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f,
+                              true, true) == -2);
+
+  ekf.velocity[0] = 2.0f;
+  ekf.velocity[1] = -0.5f;
+  ekf.velocity[2] = 0.1f;
+  ekf.position[2] = 0.07f;
+  ekf.gyro_bias[0] = 0.004f;
+  ekf.gyro_bias[1] = -0.003f;
+  ekf.gyro_bias[2] = 0.002f;
+  ekf.accel_bias[0] = 0.03f;
+  ekf.accel_bias[1] = -0.02f;
+  ekf.accel_bias[2] = 0.06f;
+  ekf.baro_have_reference = true;
+  ekf.baro_reference_hpa = 1003.25f;
+  ekf.extnav_healthy = false;
+  ekf.extnav_test_ratio = 3.0f;
+  ekf.extnav_fault_since = timestamp;
+  ekf.extnav_bias_inhibited = true;
+  ekf.position_holding = true;
+  ekf.inhibit_mask = EKF_INHIBIT_ACCEL_BIAS;
+
+  memcpy(velocity_before, ekf.velocity, sizeof(velocity_before));
+  memcpy(gyro_bias_before, ekf.gyro_bias, sizeof(gyro_bias_before));
+  memcpy(accel_bias_before, ekf.accel_bias, sizeof(accel_bias_before));
+  reset_before = ekf.reset_counter;
+
+  s.x = 25.0f;
+  s.y = -12.0f;
+  s.yaw = 1.1f;
+  s.reset_datum = true;
+
+  assert(ekf_core_fuse_extnav(&ekf, &s, 0.1f, 5.0f, 0.05f, 5.0f,
+                              true, true) == -2);
+  assert(ekf.initialized);
+  assert_near(ekf.position[0], 25.0f, 1.0e-6f);
+  assert_near(ekf.position[1], -12.0f, 1.0e-6f);
+  assert_near(ekf.position[2], 0.07f, 1.0e-6f);
+  ekf_core_euler(&ekf, euler);
+  assert_near(euler[0], 0.0f, 1.0e-5f);
+  assert_near(euler[1], 0.0f, 1.0e-5f);
+  assert_near(euler[2], 1.1f, 1.0e-5f);
+
+  for (axis = 0; axis < 3; axis++)
+    {
+      assert_near(ekf.velocity[axis], velocity_before[axis], 1.0e-9f);
+      assert_near(ekf.gyro_bias[axis], gyro_bias_before[axis], 1.0e-9f);
+      assert_near(ekf.accel_bias[axis], accel_bias_before[axis], 1.0e-9f);
+    }
+
+  assert(ekf.baro_have_reference);
+  assert_near(ekf.baro_reference_hpa, 1003.25f, 1.0e-6f);
+  assert(ekf.extnav_healthy);
+  assert_near(ekf.extnav_test_ratio, 0.0f, 1.0e-9f);
+  assert(!ekf.extnav_bias_inhibited);
+  assert(!ekf.position_holding);
+  assert(ekf.inhibit_mask == 0);
+  assert(ekf.reset_counter == (uint16_t)(reset_before + 1));
 }
 
 /* Silence withdraws horizontal validity.
@@ -2705,8 +2826,10 @@ int main(void)
   test_height_limit_is_symmetric();
   test_height_limit_allows_recovery();
   test_height_limit_zero_disables();
+  test_height_limit_applies_to_output_replay();
   test_accel_bias_limit_is_tight();
   test_extnav_source_reset_forces_a_redatum();
+  test_companion_datum_reset_preserves_inertial_state();
   test_extnav_timeout_drops_horizontal_validity();
   test_extnav_datum_clears_on_restart();
   puts("ekf core tests: PASS");

@@ -27,7 +27,7 @@
 #define COMP_STATE_GRAVITY   9.80665f
 
 /* Below this the direction of travel is noise, so side slip is reported as
- * NaN rather than whatever atan2 makes of two near-zero numbers.
+ * zero rather than whatever atan2 makes of two near-zero numbers.
  */
 
 #define COMP_SLIP_MIN_SPEED  0.3f
@@ -66,7 +66,7 @@ struct comp_state_inputs_s
 
   float    torque_k;
   float    steer_k;
-  float    speed_k;
+  float    state_speed_k;     /* VEHICLE_STATE only; EKF uses VESC_SPEED_K */
 };
 
 /* cutoff_hz of zero disables the filter and passes the raw rate through. */

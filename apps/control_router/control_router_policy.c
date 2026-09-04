@@ -308,6 +308,14 @@ void router_policy_step(const struct router_config_s *config,
   if (state->source_auto)
     {
       selected_valid = auto_usable;
+
+      /* AUTO motor commands are already expressed in the VESC command's
+       * native units: normalized duty (-1..1) or current in amperes.  The
+       * configured maximum is therefore a ceiling, not a scale factor.
+       * For example, with duty_max=0.30, 0.10 remains 0.10 while 0.50 is
+       * clipped to 0.30.
+       */
+
       selected_motor = clampf(input->auto_motor,
                               selected_mode == ROUTER_MODE_CURRENT ?
                                 -config->current_max : -config->duty_max,
@@ -326,6 +334,12 @@ void router_policy_step(const struct router_config_s *config,
   else
     {
       selected_valid = true;
+
+      /* RC throttle is a dimensionless stick position.  Full stick maps to
+       * the configured vehicle limit, unlike an AUTO command which is only
+       * limited above.
+       */
+
       selected_motor = output->rc_throttle *
                        (selected_mode == ROUTER_MODE_CURRENT ?
                           config->current_max : config->duty_max);

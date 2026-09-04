@@ -617,6 +617,8 @@ static void drain_extnav(int sub, FAR struct ekf3_status_s *status)
       sample.time_sigma = (float)status->ext_jitter_us * 1.0e-6f;
       sample.reset_counter = message.reset_counter;
       sample.valid = (message.flags & EXTERNAL_POSE_VALID) != 0;
+      sample.reset_datum =
+        (message.flags & EXTERNAL_POSE_RESET_DATUM) != 0;
 
       ekf_delay_push_extnav(&g_delay, &sample);
       status->extnav_in++;
