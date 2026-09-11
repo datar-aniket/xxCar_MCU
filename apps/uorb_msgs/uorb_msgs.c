@@ -264,7 +264,9 @@ static_assert(offsetof(struct estimator_health_s, input_count)            ==  96
 static_assert(offsetof(struct estimator_health_s, output_replay_samples)  == 128, "layout");
 static_assert(offsetof(struct estimator_health_s, flags)                  == 132, "layout");
 static_assert(offsetof(struct estimator_health_s, solution_status)        == 134, "layout");
-static_assert(sizeof(struct estimator_health_s)                           == 136, "layout");
+static_assert(offsetof(struct estimator_health_s, body_constraint_nis)    == 136, "layout");
+static_assert(offsetof(struct estimator_health_s, vehicle_type)           == 164, "layout");
+static_assert(sizeof(struct estimator_health_s)                           == 168, "layout");
 
 /****************************************************************************
  * Private Data
@@ -461,7 +463,10 @@ static const char estimator_health_format[] =
   ",imu_overflow_count:%" PRIu32 ",aiding_overflow_count:%" PRIu32
   ",extnav_reject_run:%" PRIu32 ",publish_error_count:%" PRIu32
   ",output_replay_samples:%hu,reset_counter:%hu,flags:%hu"
-  ",solution_status:%hhu,instance:%hhu";
+  ",solution_status:%hhu,instance:%hhu,body_constraint_nis:%hf"
+  ",warmup_left_rad:%hf,warmup_right_rad:%hf,warmup_distance_m:%hf"
+  ",body_constraint_accept:%" PRIu32 ",body_constraint_reject:%" PRIu32
+  ",body_constraint_block:%" PRIu32 ",vehicle_type:%hhu";
 #endif
 
 /****************************************************************************

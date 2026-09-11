@@ -551,6 +551,8 @@ struct estimator_diag_s
 #define EST_HEALTH_IMU_OVERFLOW      (1u << 11)
 #define EST_HEALTH_AIDING_OVERFLOW   (1u << 12)
 #define EST_HEALTH_PUBLISH_ERROR     (1u << 13)
+#define EST_HEALTH_STATIC_WARMED     (1u << 14)
+#define EST_HEALTH_MOTION_EXCITED    (1u << 15)
 
 struct estimator_health_s
 {
@@ -586,6 +588,14 @@ struct estimator_health_s
   uint16_t flags;                     /* 132: EST_HEALTH_* */
   uint8_t  solution_status;           /* 134 */
   uint8_t  instance;                  /* 135 */
+  float    body_constraint_nis;       /* 136: car body-Z constraint */
+  float    warmup_left_rad;           /* 140: post-alignment excitation */
+  float    warmup_right_rad;          /* 144 */
+  float    warmup_distance_m;         /* 148 */
+  uint32_t body_constraint_accept;    /* 152 */
+  uint32_t body_constraint_reject;    /* 156 */
+  uint32_t body_constraint_block;     /* 160: contact/slip gate */
+  uint8_t  vehicle_type;              /* 164: EK3_VEH_TYPE */
 };
 
 /****************************************************************************

@@ -383,6 +383,14 @@ static int32_t health_age_us(uint64_t newer, uint64_t older)
   return (int32_t)age;
 }
 
+static void update_motion_readiness(FAR struct ekf3_status_s *status)
+{
+  status->warmup_motion_ready = status->core.initialized &&
+    status->warmup_left_rad >= status->warmup_yaw_required_rad &&
+    status->warmup_right_rad >= status->warmup_yaw_required_rad &&
+    status->warmup_distance_m >= status->warmup_distance_required_m;
+}
+
 static void publish_health(int publisher, FAR struct ekf3_status_s *status,
                            uint64_t now, uint64_t newest_sample_time)
 {
@@ -488,6 +496,14 @@ static void publish_health(int publisher, FAR struct ekf3_status_s *status,
   message.output_replay_samples = status->output_replay;
   message.reset_counter = core->reset_counter;
   message.solution_status = ekf_core_solution_status(core);
+  message.body_constraint_nis = core->last_body_constraint_nis;
+  message.warmup_left_rad = status->warmup_left_rad;
+  message.warmup_right_rad = status->warmup_right_rad;
+  message.warmup_distance_m = status->warmup_distance_m;
+  message.body_constraint_accept = core->body_constraint_accept_count;
+  message.body_constraint_reject = core->body_constraint_reject_count;
+  message.body_constraint_block = status->car_constraint_block_count;
+  message.vehicle_type = status->vehicle_type;
 
   if (core->initialized)
     {
@@ -558,6 +574,16 @@ static void publish_health(int publisher, FAR struct ekf3_status_s *status,
   if (status->publish_errors != 0)
     {
       message.flags |= EST_HEALTH_PUBLISH_ERROR;
+    }
+
+  if (core->initialized)
+    {
+      message.flags |= EST_HEALTH_STATIC_WARMED;
+    }
+
+  if (status->warmup_motion_ready)
+    {
+      message.flags |= EST_HEALTH_MOTION_EXCITED;
     }
 
   if (estimator_health_publish(publisher, &message) < 0)
@@ -1249,6 +1275,13 @@ static int ekf3_daemon(int argc, FAR char *argv[])
   status.wheel_fusion_rate_hz = (uint32_t)param_i32("EK3_WHL_RATE");
   status.wheel_position[0] = param_f32("EK3_WHL_POS_X");
   status.wheel_position[1] = param_f32("EK3_WHL_POS_Y");
+  status.wheel_position[2] = param_f32("EK3_WHL_POS_Z");
+  status.vehicle_type = (uint8_t)param_i32("EK3_VEH_TYPE");
+  status.car_vertical_noise = param_f32("EK3_CAR_VZ_NSE");
+  status.car_vertical_accel_limit = param_f32("EK3_CAR_ZACC");
+  status.warmup_yaw_required_rad =
+    param_f32("EK3_WARM_YAW") * 0.017453292519943295f;
+  status.warmup_distance_required_m = param_f32("EK3_WARM_DIST");
   {
     float delay_us = param_f32("EK3_WHL_DLY_MS") * 1000.0f;
     status.wheel_delay_us = (uint32_t)(delay_us + 0.5f);
@@ -1412,6 +1445,11 @@ static int ekf3_daemon(int argc, FAR char *argv[])
           status.imu_accel_filtered = 0.0f;
           status.wheel_slipping = false;
           status.wheel_diag_timestamp = 0;
+          status.warmup_left_rad = 0.0f;
+          status.warmup_right_rad = 0.0f;
+          status.warmup_distance_m = 0.0f;
+          status.warmup_wheel_timestamp = 0;
+          status.warmup_motion_ready = false;
           status.reset_requests++;
           g_should_reset = false;
           status_publish(&status);
@@ -1489,6 +1527,32 @@ static int ekf3_daemon(int argc, FAR char *argv[])
 
           process_result = ekf_core_process(&status.core, &sample);
 
+          if (process_result == EKF_PROCESS_PREDICTED &&
+              status.core.initialized)
+            {
+              bool excitation_moving = status.wheel_fresh &&
+                fabsf(status.wheel_speed_mps) >
+                  fmaxf(0.05f, fabsf(status.wheel_speed_k) *
+                         status.zupt_threshold_cps);
+
+              if (excitation_moving)
+                {
+                  float yaw_delta = sample.delta_angle[2] -
+                    status.core.gyro_bias[2] * sample.delta_angle_dt;
+
+                  if (yaw_delta >= 0.0f)
+                    {
+                      status.warmup_left_rad += yaw_delta;
+                    }
+                  else
+                    {
+                      status.warmup_right_rad -= yaw_delta;
+                    }
+                }
+
+              update_motion_readiness(&status);
+            }
+
           if (process_result == EKF_PROCESS_REJECTED)
             {
               publish_diagnostics(diag_publisher, &status, &sample,
@@ -1533,6 +1597,8 @@ static int ekf3_daemon(int argc, FAR char *argv[])
               {
                 float stop_mps = fabsf(status.wheel_speed_k) *
                                  status.zupt_threshold_cps;
+                float body_rate[3] = {0.0f, 0.0f, 0.0f};
+                int wheel_result;
                 bool wheel_stopped = fabsf(wheel_sample.speed_mps) <=
                                      stop_mps;
 
@@ -1543,14 +1609,39 @@ static int ekf3_daemon(int argc, FAR char *argv[])
                 status.wheel_diag_imu_accel_mps2 =
                   status.imu_accel_filtered;
 
+                if (status.core.initialized &&
+                    status.warmup_wheel_timestamp != 0 &&
+                    wheel_sample.timestamp_sample >
+                      status.warmup_wheel_timestamp &&
+                    wheel_sample.timestamp_sample -
+                      status.warmup_wheel_timestamp <= 500000ull)
+                  {
+                    float dt = (float)(wheel_sample.timestamp_sample -
+                                       status.warmup_wheel_timestamp) * 1.0e-6f;
+                    status.warmup_distance_m +=
+                      fabsf(wheel_sample.speed_mps) * dt;
+                  }
+
+                status.warmup_wheel_timestamp = status.core.initialized ?
+                  wheel_sample.timestamp_sample : 0;
+                update_motion_readiness(&status);
+
                 status.wheel_slipping = ekf_wheel_slipping(
                   wheel_sample.accel_mps2, status.imu_accel_filtered,
                   status.wheel_slip_margin);
                 if (sample.delta_angle_dt > 0.0f)
                   {
-                    status.wheel_yaw_rate =
-                      sample.delta_angle[2] / sample.delta_angle_dt -
-                      status.core.gyro_bias[2];
+                    int rate_axis;
+
+                    for (rate_axis = 0; rate_axis < 3; rate_axis++)
+                      {
+                        body_rate[rate_axis] =
+                          sample.delta_angle[rate_axis] /
+                            sample.delta_angle_dt -
+                          status.core.gyro_bias[rate_axis];
+                      }
+
+                    status.wheel_yaw_rate = body_rate[2];
                   }
                 else
                   {
@@ -1568,11 +1659,51 @@ static int ekf3_daemon(int argc, FAR char *argv[])
                     continue;
                   }
 
-                ekf_core_fuse_wheel_velocity(
+                wheel_result = ekf_core_fuse_wheel_velocity(
                   &status.core, wheel_sample.speed_mps,
-                  status.wheel_yaw_rate, status.wheel_position,
+                  body_rate, status.wheel_position,
                   status.wheel_noise, status.wheel_lateral_noise,
                   status.wheel_gate);
+
+                /* A grounded car has no independent velocity through its
+                 * body Z axis. This is not zero ENU climb: on a slope the
+                 * body-Z observation couples all three navigation velocity
+                 * states through attitude and permits the correct height
+                 * change. Near-freefall, impacts and wheel slip disable it.
+                 */
+
+                if (status.vehicle_type == 1 && wheel_result > 0)
+                  {
+                    float accel_norm = sqrtf(
+                      status.core.last_corrected_force[0] *
+                        status.core.last_corrected_force[0] +
+                      status.core.last_corrected_force[1] *
+                        status.core.last_corrected_force[1] +
+                      status.core.last_corrected_force[2] *
+                        status.core.last_corrected_force[2]);
+                    bool grounded = accel_norm > 0.5f * 9.80665f &&
+                                    accel_norm < 1.5f * 9.80665f &&
+                                    fabsf(status.core.
+                                      last_residual_accel_body[2]) <=
+                                    status.car_vertical_accel_limit &&
+                                    sample.clipping == 0;
+
+                    if (grounded)
+                      {
+                        float vertical_at_imu =
+                          body_rate[0] * status.wheel_position[1] -
+                          body_rate[1] * status.wheel_position[0];
+
+                        ekf_core_fuse_body_velocity_constraint(
+                          &status.core, 2, vertical_at_imu,
+                          status.car_vertical_noise, status.wheel_gate,
+                          &status.core.last_body_constraint_nis);
+                      }
+                    else
+                      {
+                        status.car_constraint_block_count++;
+                      }
+                  }
               }
           }
 

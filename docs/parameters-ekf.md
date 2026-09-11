@@ -71,8 +71,8 @@ Each available observation also has an explicit Kalman-gain mask:
 
 - external x/y position can correct horizontal position and velocity only;
   attitude, vertical states and all biases have zero gain;
-- wheel odometry can correct horizontal velocity only; attitude, vertical,
-  position and bias states have zero gain;
+- wheel odometry corrects the 3-D navigation-velocity combination represented
+  by body forward/left speed; attitude, position and bias states have zero gain;
 - barometer height can correct vertical position and velocity only; every
   attitude and bias row has zero gain;
 - heading corrects rotation and gyro bias only, projected onto the physical
@@ -135,7 +135,12 @@ working barometer.
 | `EK3_WHL_SLIP` | 1.0 | 0.1-10.0 | Wheel acceleration allowed above IMU longitudinal acceleration before fusion is blocked, m/s2. |
 | `EK3_WHL_RATE` | 50 | 5-100 | Wheel-velocity fusion rate, Hz. |
 | `EK3_WHL_DLY_MS` | 4.5 | 0-100 | VESC speed-path delay subtracted before delayed-horizon recall, ms. |
-| `EK3_WHL_POS_X/Y` | 0.0 | -5-5 | Wheel reference point to IMU vector in body forward/left axes, m. |
+| `EK3_WHL_POS_X/Y/Z` | 0.0 | -5-5 | Wheel reference point to IMU vector in body FLU axes, m. |
+| `EK3_VEH_TYPE` | 1 | 0-3 | 0 generic, 1 car, 2 fixed-wing, 3 multirotor. Only the car constraint is active today. |
+| `EK3_CAR_VZ_NSE` | 0.30 | 0.02-5.0 | Soft car body-Z velocity-constraint noise, m/s. |
+| `EK3_CAR_ZACC` | 4.0 | 0.2-20 | Body-Z residual acceleration that blocks the ground constraint, m/s2. |
+| `EK3_WARM_YAW` | 45 | 0-720 | Post-alignment turn excitation requested in each direction, degrees. |
+| `EK3_WARM_DIST` | 5 | 0-1000 | Post-alignment driven distance requested for readiness, m. |
 | `EK3_HGT_LIM` | 50.0 | 0-1000 | Symmetric vertical safety bound about the alignment point, m; zero disables it. |
 | `EK3_ABIAS_LIM` | 0.4 | 0.05-1.0 | Accelerometer-bias bound, m/s2; the core never permits more than 0.4. |
 | `EXT_TX_RATE` | 50 | 1-400 | Estimator pose transmit rate to the companion, Hz. |
@@ -212,10 +217,16 @@ second, not metres per second, and would make the observation invalid.
 fusion.
 
 At the delayed fusion horizon the VESC speed constrains body-forward velocity.
-The body-Z gyro rate and `EK3_WHL_POS_X/Y` translate velocity from the wheel
-reference point to the IMU, while vehicle attitude rotates forward/left into
-navigation X/Y. No wheel observation directly corrects roll, pitch, Z,
-position or IMU biases.
+All three body gyro rates and `EK3_WHL_POS_X/Y/Z` translate velocity from the
+wheel reference point to the IMU using `omega x r`, while vehicle attitude
+rotates forward/left into navigation XYZ. This is required on uneven terrain:
+body-forward velocity has a legitimate navigation-Z component on a slope.
+No wheel observation directly corrects attitude, position, or IMU biases.
+
+For `EK3_VEH_TYPE=1`, an additional soft zero body-Z velocity observation
+completes the non-holonomic car model only while traction and ground-contact
+gates pass. It does not set world height to zero. See
+[`calibration-and-vehicle-models.md`](calibration-and-vehicle-models.md).
 
 The slip detector differentiates VESC speed and low-pass filters that result
 and the gravity-removed body-X IMU acceleration with the same

@@ -107,7 +107,7 @@ struct ekf3_status_s
   float    wheel_gate;
   float    wheel_accel_tau;
   float    wheel_slip_margin;
-  float    wheel_position[2];       /* wheel reference -> IMU, body XY */
+  float    wheel_position[3];       /* wheel reference -> IMU, body FLU */
   uint32_t wheel_fusion_rate_hz;
   uint32_t wheel_delay_us;
   uint32_t wheel_in;
@@ -122,6 +122,23 @@ struct ekf3_status_s
   float    imu_accel_filtered;
   float    wheel_yaw_rate;
   bool     wheel_slipping;
+
+  /* Vehicle-class constraints and post-alignment excitation readiness. The
+   * readiness result is diagnostic: it never commands actuators and never
+   * withholds a valid attitude solution.
+   */
+
+  uint8_t  vehicle_type;          /* 0 generic, 1 car, 2 FW, 3 multirotor */
+  float    car_vertical_noise;
+  float    car_vertical_accel_limit;
+  uint32_t car_constraint_block_count;
+  float    warmup_yaw_required_rad;
+  float    warmup_distance_required_m;
+  float    warmup_left_rad;
+  float    warmup_right_rad;
+  float    warmup_distance_m;
+  uint64_t warmup_wheel_timestamp;
+  bool     warmup_motion_ready;
 
   /* Exact delayed sample attempted on the most recent filter step. These
    * feed estimator_diag; the live fields above feed `ekf3 status`.

@@ -38,6 +38,10 @@ make flash BOARD=matekh743
 See [docs/boards.md](docs/boards.md) before moving a harness between boards; their peripheral
 pins and sensor population differ.
 
+Estimator calibration, frame visualization, guided warm-up, and vehicle-class
+constraints are documented in
+[docs/calibration-and-vehicle-models.md](docs/calibration-and-vehicle-models.md).
+
 ## Hardware
 - **MCU:** STM32H743VIH6 (2 MB flash, 1 MB RAM), with the application at `0x08020000`.
 - **Pixhawk 6C:** ICM-42688-P + Bosch secondary IMU, MS5611, IST8310, PX4IO; package board ID 56.

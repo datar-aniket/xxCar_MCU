@@ -2350,7 +2350,8 @@ static void test_wheel_velocity_constrains_planar_motion(void)
   struct ekf_core_s ekf;
   uint64_t timestamp;
   const float zero_gyro[3] = {0.0f, 0.0f, 0.0f};
-  const float wheel_to_imu[2] = {0.0f, 0.0f};
+  const float body_rate[3] = {0.0f, 0.0f, 0.0f};
+  const float wheel_to_imu[3] = {0.0f, 0.0f, 0.0f};
   unsigned i;
 
   ekf_core_init(&ekf);
@@ -2360,7 +2361,7 @@ static void test_wheel_velocity_constrains_planar_motion(void)
   for (i = 0; i < 20; i++)
     {
       assert(ekf_core_fuse_wheel_velocity(
-        &ekf, 2.0f, 0.0f, wheel_to_imu, 0.2f, 0.3f, 5.0f) >= 0);
+        &ekf, 2.0f, body_rate, wheel_to_imu, 0.2f, 0.3f, 5.0f) >= 0);
     }
 
   assert(ekf.velocity[0] > 1.8f);
@@ -2376,7 +2377,8 @@ static void test_wheel_yaw_rate_compensates_imu_lever_arm(void)
   struct ekf_core_s ekf;
   uint64_t timestamp;
   const float zero_gyro[3] = {0.0f, 0.0f, 0.0f};
-  const float wheel_to_imu[2] = {0.5f, 0.0f};
+  const float body_rate[3] = {0.0f, 0.0f, 2.0f};
+  const float wheel_to_imu[3] = {0.5f, 0.0f, 0.0f};
   unsigned i;
 
   ekf_core_init(&ekf);
@@ -2384,7 +2386,7 @@ static void test_wheel_yaw_rate_compensates_imu_lever_arm(void)
 
   for (i = 0; i < 20; i++)
     {
-      ekf_core_fuse_wheel_velocity(&ekf, 2.0f, 2.0f, wheel_to_imu,
+      ekf_core_fuse_wheel_velocity(&ekf, 2.0f, body_rate, wheel_to_imu,
                                    0.2f, 0.2f, 5.0f);
     }
 
@@ -2394,12 +2396,37 @@ static void test_wheel_yaw_rate_compensates_imu_lever_arm(void)
   assert(ekf.velocity[1] > 0.8f);
 }
 
+static void test_wheel_full_body_rate_compensates_vertical_lever_arm(void)
+{
+  struct ekf_core_s ekf;
+  uint64_t timestamp;
+  const float zero_gyro[3] = {0.0f, 0.0f, 0.0f};
+  const float body_rate[3] = {1.0f, 1.0f, 0.0f};
+  const float wheel_to_imu[3] = {0.0f, 0.0f, 0.5f};
+  unsigned i;
+
+  ekf_core_init(&ekf);
+  initialize_tilted(&ekf, &timestamp, 0.0f, 0.0f, zero_gyro);
+
+  for (i = 0; i < 20; i++)
+    {
+      ekf_core_fuse_wheel_velocity(&ekf, 2.0f, body_rate, wheel_to_imu,
+                                   0.2f, 0.2f, 5.0f);
+    }
+
+  /* omega x r = (+0.5, -0.5, 0) m/s at the elevated IMU. */
+
+  assert(ekf.velocity[0] > 2.3f);
+  assert(ekf.velocity[1] < -0.3f);
+}
+
 static void test_wheel_velocity_rotates_into_navigation_xy(void)
 {
   struct ekf_core_s ekf;
   uint64_t timestamp;
   const float zero_gyro[3] = {0.0f, 0.0f, 0.0f};
-  const float wheel_to_imu[2] = {0.0f, 0.0f};
+  const float body_rate[3] = {0.0f, 0.0f, 0.0f};
+  const float wheel_to_imu[3] = {0.0f, 0.0f, 0.0f};
   unsigned i;
 
   ekf_core_init(&ekf);
@@ -2414,7 +2441,7 @@ static void test_wheel_velocity_rotates_into_navigation_xy(void)
 
   for (i = 0; i < 20; i++)
     {
-      ekf_core_fuse_wheel_velocity(&ekf, 2.0f, 0.0f, wheel_to_imu,
+      ekf_core_fuse_wheel_velocity(&ekf, 2.0f, body_rate, wheel_to_imu,
                                    0.2f, 0.2f, 5.0f);
     }
 
@@ -2422,12 +2449,13 @@ static void test_wheel_velocity_rotates_into_navigation_xy(void)
   assert(ekf.velocity[1] > 1.8f);
 }
 
-static void test_wheel_velocity_masks_unmeasured_states(void)
+static void test_wheel_velocity_masks_nonvelocity_states(void)
 {
   struct ekf_core_s ekf;
   uint64_t timestamp;
   const float zero_gyro[3] = {0.0f, 0.0f, 0.0f};
-  const float wheel_to_imu[2] = {0.0f, 0.0f};
+  const float body_rate[3] = {0.0f, 0.0f, 0.0f};
+  const float wheel_to_imu[3] = {0.0f, 0.0f, 0.0f};
   float quaternion[4];
   float position[3];
   float biases[6];
@@ -2453,12 +2481,55 @@ static void test_wheel_velocity_masks_unmeasured_states(void)
   memcpy(&biases[3], ekf.accel_bias, sizeof(ekf.accel_bias));
 
   assert(ekf_core_fuse_wheel_velocity(
-    &ekf, 1.5f, 0.0f, wheel_to_imu, 0.2f, 0.3f, 5.0f) == 1);
+    &ekf, 1.5f, body_rate, wheel_to_imu, 0.2f, 0.3f, 5.0f) == 1);
   assert(memcmp(quaternion, ekf.quaternion, sizeof(quaternion)) == 0);
   assert(memcmp(position, ekf.position, sizeof(position)) == 0);
-  assert_near(ekf.velocity[2], 0.7f, 1.0e-9f);
+  /* Pitch makes body-forward contain a real navigation-Z component. */
+
+  assert(fabsf(ekf.velocity[2] - 0.7f) > 1.0e-6f);
   assert(memcmp(biases, ekf.gyro_bias, sizeof(ekf.gyro_bias)) == 0);
   assert(memcmp(&biases[3], ekf.accel_bias, sizeof(ekf.accel_bias)) == 0);
+}
+
+static void test_body_vertical_constraint_allows_hill_climb(void)
+{
+  struct ekf_core_s ekf;
+  uint64_t timestamp = 0;
+  const float zero_gyro[3] = {0.0f, 0.0f, 0.0f};
+  const float pitch = 0.30f;
+  float quaternion[4];
+  float position[3];
+  float body_z_velocity;
+  unsigned i;
+
+  ekf_core_init(&ekf);
+  initialize_tilted(&ekf, &timestamp, 0.0f, pitch, zero_gyro);
+
+  /* Two metres per second along the slope plus an erroneous 0.8 m/s through
+   * the chassis floor. The valid slope motion has a real ENU-Z component.
+   */
+
+  ekf.velocity[0] = 2.0f * cosf(pitch) + 0.8f * sinf(pitch);
+  ekf.velocity[1] = 0.0f;
+  ekf.velocity[2] = -2.0f * sinf(pitch) + 0.8f * cosf(pitch);
+  memcpy(quaternion, ekf.quaternion, sizeof(quaternion));
+  memcpy(position, ekf.position, sizeof(position));
+
+  for (i = 0; i < 20; i++)
+    {
+      assert(ekf_core_fuse_body_velocity_constraint(
+        &ekf, 2, 0.0f, 0.2f, 5.0f,
+        &ekf.last_body_constraint_nis) >= 0);
+    }
+
+  body_z_velocity = sinf(pitch) * ekf.velocity[0] +
+                    cosf(pitch) * ekf.velocity[2];
+  assert(fabsf(body_z_velocity) < 0.05f);
+  assert(fabsf(ekf.velocity[2]) > 0.4f);
+  assert(memcmp(quaternion, ekf.quaternion, sizeof(quaternion)) == 0);
+  assert(memcmp(position, ekf.position, sizeof(position)) == 0);
+  assert(ekf.body_constraint_accept_count > 0);
+  assert_covariance_positive_definite(&ekf);
 }
 
 /* A moving vehicle must keep a tilt reference.
@@ -2815,8 +2886,10 @@ int main(void)
   test_zero_velocity_raises_observability();
   test_wheel_velocity_constrains_planar_motion();
   test_wheel_yaw_rate_compensates_imu_lever_arm();
+  test_wheel_full_body_rate_compensates_vertical_lever_arm();
   test_wheel_velocity_rotates_into_navigation_xy();
-  test_wheel_velocity_masks_unmeasured_states();
+  test_wheel_velocity_masks_nonvelocity_states();
+  test_body_vertical_constraint_allows_hill_climb();
   test_tilt_reference_while_moving();
   test_observability_tiers_nest();
   test_unaided_states_still_propagate();

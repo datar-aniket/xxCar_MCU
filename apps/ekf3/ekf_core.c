@@ -83,6 +83,8 @@
 #define EKF_GAIN_ATTITUDE           ((uint16_t)0x0007u)
 #define EKF_GAIN_VELOCITY_XY        ((uint16_t)0x0018u)
 #define EKF_GAIN_VELOCITY_Z         EKF_GAIN_BIT(5)
+#define EKF_GAIN_VELOCITY_ALL       (EKF_GAIN_VELOCITY_XY | \
+                                     EKF_GAIN_VELOCITY_Z)
 #define EKF_GAIN_POSITION_XY        ((uint16_t)0x00c0u)
 #define EKF_GAIN_POSITION_Z         EKF_GAIN_BIT(8)
 #define EKF_GAIN_GYRO_BIAS          ((uint16_t)0x0e00u)
@@ -3022,23 +3024,21 @@ void ekf_core_set_wheel_config(FAR struct ekf_core_s *ekf,
 }
 
 int ekf_core_fuse_wheel_velocity(FAR struct ekf_core_s *ekf,
-                                 float speed_mps, float yaw_rate,
-                                 FAR const float wheel_pos_xy[2],
+                                 float speed_mps,
+                                 FAR const float body_rate[3],
+                                 FAR const float wheel_pos[3],
                                  float forward_noise, float lateral_noise,
                                  float gate)
 {
   float rotation[3][3];
-  float forward[2];
-  float left[2];
   float measurement[2];
   float noise[2];
-  float norm;
   int accepted = 0;
   int axis;
 
-  if (ekf == NULL || !ekf->initialized || wheel_pos_xy == NULL ||
-      !isfinite(speed_mps) || !isfinite(yaw_rate) ||
-      !isfinite(wheel_pos_xy[0]) || !isfinite(wheel_pos_xy[1]) ||
+  if (ekf == NULL || !ekf->initialized || body_rate == NULL ||
+      wheel_pos == NULL || !isfinite(speed_mps) ||
+      !vector_finite(body_rate) || !vector_finite(wheel_pos) ||
       !(forward_noise > 0.0f) || !isfinite(forward_noise) ||
       !(lateral_noise > 0.0f) || !isfinite(lateral_noise) ||
       !(gate > 0.0f) || !isfinite(gate))
@@ -3047,51 +3047,50 @@ int ekf_core_fuse_wheel_velocity(FAR struct ekf_core_s *ekf,
     }
 
   quaternion_to_rotation(ekf->quaternion, rotation);
-  forward[0] = rotation[0][0];
-  forward[1] = rotation[1][0];
-  norm = sqrtf(forward[0] * forward[0] + forward[1] * forward[1]);
 
-  if (!isfinite(norm) || norm < 0.1f)
-    {
-      return -1;
-    }
+  /* wheel_pos is wheel/reference point -> IMU in body FLU axes. The wheel
+   * observation is made at the vehicle reference point, while the EKF
+   * velocity is at the IMU. Therefore v_imu = v_reference + omega x r.
+   * Keeping all three components matters off road: pitch/roll motion and a
+   * vertical IMU lever arm otherwise masquerade as longitudinal sideslip.
+   */
 
-  forward[0] /= norm;
-  forward[1] /= norm;
-  left[0] = -forward[1];
-  left[1] = forward[0];
-
-  /* wheel_pos_xy is wheel/reference point -> IMU in body axes. */
-
-  measurement[0] = speed_mps - yaw_rate * wheel_pos_xy[1];
-  measurement[1] = yaw_rate * wheel_pos_xy[0];
+  measurement[0] = speed_mps + body_rate[1] * wheel_pos[2] -
+                    body_rate[2] * wheel_pos[1];
+  measurement[1] = body_rate[2] * wheel_pos[0] -
+                    body_rate[0] * wheel_pos[2];
   noise[0] = forward_noise;
   noise[1] = lateral_noise;
 
   for (axis = 0; axis < 2; axis++)
     {
       float h[EKF_STATE_DIM];
-      FAR const float *direction = axis == 0 ? forward : left;
       float predicted;
       float residual;
       int result;
+      int nav_axis;
 
       memset(h, 0, sizeof(h));
-      h[3] = direction[0];
-      h[4] = direction[1];
-      predicted = h[3] * ekf->velocity[0] + h[4] * ekf->velocity[1];
+      predicted = 0.0f;
+      for (nav_axis = 0; nav_axis < 3; nav_axis++)
+        {
+          h[3 + nav_axis] = rotation[nav_axis][axis];
+          predicted += h[3 + nav_axis] * ekf->velocity[nav_axis];
+        }
+
       residual = measurement[axis] - predicted;
       ekf->last_wheel_innov[axis] = residual;
 
-      /* Wheel odometry supplies planar velocity only. In particular, zero
-       * every attitude, vertical, position and bias gain row rather than
-       * allowing covariance cross-terms to invent information it lacks.
+      /* A body-axis velocity genuinely observes a linear combination of all
+       * three navigation velocity states when the vehicle is pitched or
+       * rolled. It still supplies no attitude, position or bias observation,
+       * so those gain rows remain explicitly zero.
        */
 
       result = measurement_update_1d(ekf, h, residual,
                                      noise[axis] * noise[axis], gate,
                                      &ekf->last_wheel_nis[axis],
-                                     EKF_GAIN_VELOCITY_XY, NULL);
+                                     EKF_GAIN_VELOCITY_ALL, NULL);
 
       if (result < 0)
         {
@@ -3112,6 +3111,52 @@ int ekf_core_fuse_wheel_velocity(FAR struct ekf_core_s *ekf,
   ekf->observability = ekf_core_observability(ekf);
   constrain_position(ekf);
   return 1;
+}
+
+int ekf_core_fuse_body_velocity_constraint(FAR struct ekf_core_s *ekf,
+                                           uint8_t body_axis,
+                                           float measurement,
+                                           float noise, float gate,
+                                           FAR float *nis)
+{
+  float rotation[3][3];
+  float h[EKF_STATE_DIM];
+  float predicted = 0.0f;
+  int nav_axis;
+  int result;
+
+  if (ekf == NULL || !ekf->initialized || body_axis > 2 ||
+      !isfinite(measurement) || !(noise > 0.0f) || !isfinite(noise) ||
+      !(gate > 0.0f) || !isfinite(gate))
+    {
+      return -1;
+    }
+
+  quaternion_to_rotation(ekf->quaternion, rotation);
+  memset(h, 0, sizeof(h));
+  for (nav_axis = 0; nav_axis < 3; nav_axis++)
+    {
+      /* R maps body to navigation. A body-axis component is the matching
+       * column of R dotted with navigation velocity.
+       */
+
+      h[3 + nav_axis] = rotation[nav_axis][body_axis];
+      predicted += h[3 + nav_axis] * ekf->velocity[nav_axis];
+    }
+
+  result = measurement_update_1d(ekf, h, measurement - predicted,
+                                 noise * noise, gate, nis,
+                                 EKF_GAIN_VELOCITY_ALL, NULL);
+  if (result > 0)
+    {
+      ekf->body_constraint_accept_count++;
+    }
+  else if (result == 0)
+    {
+      ekf->body_constraint_reject_count++;
+    }
+
+  return result;
 }
 
 int ekf_core_fuse_baro(FAR struct ekf_core_s *ekf, float pressure_hpa,

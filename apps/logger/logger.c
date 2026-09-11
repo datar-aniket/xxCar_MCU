@@ -259,7 +259,10 @@ g_formats[] =
     "uint32_t imu_overflow_count;uint32_t aiding_overflow_count;"
     "uint32_t extnav_reject_run;uint32_t publish_error_count;"
     "uint16_t output_replay_samples;uint16_t reset_counter;uint16_t flags;"
-    "uint8_t solution_status;uint8_t instance;" },
+    "uint8_t solution_status;uint8_t instance;float body_constraint_nis;"
+    "float warmup_left_rad;float warmup_right_rad;float warmup_distance_m;"
+    "uint32_t body_constraint_accept;uint32_t body_constraint_reject;"
+    "uint32_t body_constraint_block;uint8_t vehicle_type;" },
 };
 
 #define NFORMATS ((int)(sizeof(g_formats) / sizeof(g_formats[0])))
@@ -296,7 +299,7 @@ static const struct log_topic_s g_topics[] =
   { NULL,            ORB_ID(vesc_status),        0, "vesc_status",     0, 38, "LOG_EKF"  },
   { NULL,            ORB_ID(vehicle_state_tx),   0, "vehicle_state_tx",0, 119,"LOG_EKF"  },
   { NULL,            ORB_ID(estimator_diag),     0, "estimator_diag",  0, 285,"LOG_EKF"  },
-  { NULL,            ORB_ID(estimator_health),   0, "estimator_health",0, 136,"LOG_EKF"  },
+  { NULL,            ORB_ID(estimator_health),   0, "estimator_health",0, 165,"LOG_EKF"  },
 };
 
 #define NTOPICS ((int)(sizeof(g_topics) / sizeof(g_topics[0])))

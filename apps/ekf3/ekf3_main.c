@@ -54,6 +54,21 @@ static bool source_yaw_is_compass(FAR const struct ekf3_status_s *status)
          EKF_SOURCE_BARO_OR_COMPASS;
 }
 
+static FAR const char *vehicle_type_name(uint8_t type)
+{
+  switch (type)
+    {
+      case 1:
+        return "car";
+      case 2:
+        return "fixed-wing";
+      case 3:
+        return "multirotor";
+      default:
+        return "generic";
+    }
+}
+
 static void print_status(void)
 {
   struct ekf3_status_s status;
@@ -117,6 +132,31 @@ static void print_status(void)
            "10s raw mean" : "10s calibrated residual");
   printf("  resets commanded %" PRIu32 "\n",
          core->commanded_reset_count);
+  printf("  readiness static %s  motion %s  distance %.1f/%.1f m"
+         " turns L %.0f/%.0f R %.0f/%.0f deg\n",
+         core->initialized ? "READY" : "WAIT",
+         status.warmup_motion_ready ? "READY" : "EXCITE",
+         (double)status.warmup_distance_m,
+         (double)status.warmup_distance_required_m,
+         (double)(status.warmup_left_rad * rad_to_deg),
+         (double)(status.warmup_yaw_required_rad * rad_to_deg),
+         (double)(status.warmup_right_rad * rad_to_deg),
+         (double)(status.warmup_yaw_required_rad * rad_to_deg));
+  printf("  vehicle model %s (%u)", vehicle_type_name(status.vehicle_type),
+         status.vehicle_type);
+  if (status.vehicle_type == 1)
+    {
+      printf("  body-Z constraint NIS %.3f accept %" PRIu32
+             " reject %" PRIu32 " blocked %" PRIu32 "\n",
+             (double)core->last_body_constraint_nis,
+             core->body_constraint_accept_count,
+             core->body_constraint_reject_count,
+             status.car_constraint_block_count);
+    }
+  else
+    {
+      printf("  no class pseudo-measurement\n");
+    }
   {
     FAR const struct ekf_source_set_s *source =
       &status.sources.set[status.sources.active_set];
@@ -404,11 +444,12 @@ static void print_status(void)
              (double)status.wheel_gate,
              status.wheel_fusion_rate_hz,
              (double)status.wheel_delay_us / 1000.0);
-      printf("             wheel->IMU XY %+.3f %+.3f m"
+      printf("             wheel->IMU FLU %+.3f %+.3f %+.3f m"
              "  slip blocked %" PRIu32 " bad %" PRIu32
              " decimated %" PRIu32 " overflow %" PRIu32 "\n",
              (double)status.wheel_position[0],
              (double)status.wheel_position[1],
+             (double)status.wheel_position[2],
              status.wheel_slip_block_count, status.wheel_bad,
              status.wheel_decimated, status.wheel_overflow);
     }

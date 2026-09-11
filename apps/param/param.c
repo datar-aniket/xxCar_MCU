@@ -722,9 +722,31 @@ static const struct param_def_s g_params[] =
     "Wheel reference to IMU X offset, body forward (m)" },
   { "EK3_WHL_POS_Y", PARAM_TYPE_FLOAT, F32(0.0f), F32(-5.0f), F32(5.0f),
     "Wheel reference to IMU Y offset, body left (m)" },
+  { "EK3_WHL_POS_Z", PARAM_TYPE_FLOAT, F32(0.0f), F32(-5.0f), F32(5.0f),
+    "Wheel reference to IMU Z offset, body up (m)" },
 
   { "EK3_TILT_MOVE", PARAM_TYPE_INT32, I32(1), I32(0), I32(1),
     "Fuse gravity as a tilt reference while moving" },
+
+  /* Vehicle-class pseudo measurements. These are soft, gated observations,
+   * never hard state clamps. A car constrains body vertical velocity only
+   * while fresh, non-slipping wheels and near-1g acceleration say it remains
+   * in ground contact. This still permits arbitrary ENU height change on a
+   * slope. Fixed-wing and multirotor modes reserve distinct policies; no
+   * aircraft constraint is applied until its required air-data source exists.
+   */
+
+  { "EK3_VEH_TYPE", PARAM_TYPE_INT32, I32(1), I32(0), I32(3),
+    "Vehicle type: 0 generic, 1 car, 2 fixed-wing, 3 multirotor",
+    PARAM_RANGE_ENUM },
+  { "EK3_CAR_VZ_NSE", PARAM_TYPE_FLOAT, F32(0.30f), F32(0.02f), F32(5.0f),
+    "Car body-Z velocity constraint noise (m/s)" },
+  { "EK3_CAR_ZACC", PARAM_TYPE_FLOAT, F32(4.0f), F32(0.2f), F32(20.0f),
+    "Car body-Z acceleration disabling constraint (m/s2)" },
+  { "EK3_WARM_YAW", PARAM_TYPE_FLOAT, F32(45.0f), F32(0.0f), F32(720.0f),
+    "Readiness turn excitation required each direction (deg)" },
+  { "EK3_WARM_DIST", PARAM_TYPE_FLOAT, F32(5.0f), F32(0.0f), F32(1000.0f),
+    "Readiness driven distance excitation required (m)" },
 
   { "EK3_HGT_LIM", PARAM_TYPE_FLOAT, F32(50.0f), F32(0.0f), F32(1000.0f),
     "Height safety bound about alignment (m, 0=off; not aiding)" },

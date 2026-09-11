@@ -223,8 +223,9 @@ struct ekf_core_s
   uint64_t last_zupt_timestamp;
   float    last_zupt_nis[3];
 
-  /* Moving wheel odometry. The observation constrains horizontal velocity
-   * only; it cannot directly move attitude, vertical velocity or position.
+  /* Moving wheel odometry. Body forward/lateral observations constrain the
+   * corresponding 3-D navigation-velocity combinations; they cannot
+   * directly move attitude, position or bias.
    */
 
   uint32_t wheel_accept_count;
@@ -233,6 +234,9 @@ struct ekf_core_s
   uint32_t wheel_timeout_us;
   float    last_wheel_innov[2];   /* forward and lateral body velocity */
   float    last_wheel_nis[2];
+  uint32_t body_constraint_accept_count;
+  uint32_t body_constraint_reject_count;
+  float    last_body_constraint_nis;
 
   uint8_t  inhibit_mask;
 
@@ -603,16 +607,28 @@ int ekf_core_fuse_zero_velocity(FAR struct ekf_core_s *ekf, float noise,
                                 float gate);
 
 /* Fuse longitudinal wheel speed plus the non-holonomic lateral constraint.
- * yaw_rate and wheel_pos_xy translate the wheel/reference-point velocity to
- * the IMU origin: v_imu = v_wheel + omega x r, where r is wheel->IMU.
+ * body_rate and wheel_pos translate the wheel/reference-point velocity to
+ * the IMU origin: v_imu = v_wheel + omega x r. Both use body FLU axes.
  * Returns 1 accepted, 0 gated, -1 unusable.
  */
 
 int ekf_core_fuse_wheel_velocity(FAR struct ekf_core_s *ekf,
-                                 float speed_mps, float yaw_rate,
-                                 FAR const float wheel_pos_xy[2],
+                                 float speed_mps,
+                                 FAR const float body_rate[3],
+                                 FAR const float wheel_pos[3],
                                  float forward_noise, float lateral_noise,
                                  float gate);
+
+/* Soft non-holonomic velocity measurement along one BODY axis. This never
+ * clamps a navigation-frame coordinate: body Z may remain zero while a car
+ * climbs a hill and therefore has real ENU vertical velocity.
+ */
+
+int ekf_core_fuse_body_velocity_constraint(FAR struct ekf_core_s *ekf,
+                                           uint8_t body_axis,
+                                           float measurement,
+                                           float noise, float gate,
+                                           FAR float *nis);
 
 void ekf_core_set_wheel_config(FAR struct ekf_core_s *ekf,
                                uint32_t timeout_us);
