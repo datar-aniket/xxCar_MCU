@@ -1,7 +1,8 @@
-# Thin wrapper over the NuttX build for xxCar_MCU (FMUv6C).
-.PHONY: all build flash menuconfig clean distclean submodules
+# Thin wrapper over the NuttX build for xxCar_MCU.
+.PHONY: all build flash menuconfig reconfigure clean distclean submodules
 
 NUTTX := deps/nuttx
+BOARD ?= pixhawk6c
 
 all: build
 
@@ -9,10 +10,10 @@ submodules:
 	git submodule update --init --recursive
 
 build:
-	tools/build.sh
+	tools/build.sh $(BOARD)
 
 flash:
-	tools/flash.sh
+	tools/flash.sh $(BOARD)
 
 # Interactive Kconfig editor against the current NuttX config.
 menuconfig:
@@ -20,7 +21,7 @@ menuconfig:
 
 # Re-run configure.sh from scratch next build.
 reconfigure:
-	RECONFIGURE=1 tools/build.sh
+	RECONFIGURE=1 tools/build.sh $(BOARD)
 
 clean:
 	-$(MAKE) -C $(NUTTX) clean

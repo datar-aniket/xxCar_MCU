@@ -75,13 +75,19 @@ endif
 
 ifeq ($(CONFIG_SENSORS),y)
 CSRCS += fmuv6c_sensors.c
-CSRCS += ms5611.c ms5611_comp.c
 CSRCS += ist8310.c
+ifeq ($(CONFIG_XXCAR_BOARD_MATEKH743),y)
+CSRCS += dps368.c
+else
+CSRCS += ms5611.c ms5611_comp.c
+endif
 ifeq ($(CONFIG_SPI),y)
 CSRCS += fmuv6c_imu_time.c
 CSRCS += icm42688.c
+ifneq ($(CONFIG_XXCAR_BOARD_MATEKH743),y)
 CSRCS += bmi055.c
 CSRCS += bmi055_timing.c
+endif
 endif
 endif
 
@@ -115,10 +121,6 @@ endif
 
 ifeq ($(CONFIG_BOARDCTL),y)
 CSRCS += stm32_appinitialize.c
-endif
-
-ifeq ($(CONFIG_STM32H7_PROGMEM),y)
-CSRCS += stm32_progmem.c
 endif
 
 ifeq ($(CONFIG_WL_NRF24L01),y)

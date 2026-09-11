@@ -5,9 +5,8 @@
  *
  * cal - sensor calibration session for the host GUI.
  *
- * Run this from the shell on TELEM1/DEBUG. It takes over the USB CDC port,
- * which is where the GUI is listening, so running it from a shell on USB would
- * mean the shell and the session both reading the same bytes.
+ * Run this from a shell on a port other than the USB CDC port reserved for
+ * CAL. The default is NSH on USB0 and calibration on USB1.
  ****************************************************************************/
 
 #include <nuttx/config.h>
@@ -26,8 +25,9 @@ int main(int argc, FAR char *argv[])
     }
 
   printf("Usage: cal session\n"
-         "  Opens %s and waits for the calibration GUI.\n"
-         "  Needs SER_USB_FUNC=%d and a reboot, so no shell holds the port.\n",
-         CAL_DEVPATH, SER_FUNC_CAL);
+         "  Opens the USB port assigned to CAL and waits for the GUI.\n"
+         "  Default: USB1 (/dev/ttyACM1), SER_USB2_FUNC=%d.\n"
+         "  Reboot after changing the assignment so no shell holds it.\n",
+         SER_FUNC_CAL);
   return 1;
 }

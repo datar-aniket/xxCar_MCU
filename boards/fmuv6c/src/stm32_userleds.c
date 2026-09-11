@@ -97,6 +97,9 @@ void board_userled(int led, bool ledon)
 {
   if ((unsigned)led < nitems(g_ledcfg))
     {
+#ifdef XXCAR_LED_ACTIVE_LOW
+      ledon = !ledon;
+#endif
       stm32_gpiowrite(g_ledcfg[led], ledon);
     }
 }
@@ -120,7 +123,11 @@ void board_userled_all(uint32_t ledset)
 
   for (i = 0; i < nitems(g_ledcfg); i++)
     {
-      stm32_gpiowrite(g_ledcfg[i], (ledset & (1 << i)) != 0);
+      bool ledon = (ledset & (1 << i)) != 0;
+#ifdef XXCAR_LED_ACTIVE_LOW
+      ledon = !ledon;
+#endif
+      stm32_gpiowrite(g_ledcfg[i], ledon);
     }
 }
 

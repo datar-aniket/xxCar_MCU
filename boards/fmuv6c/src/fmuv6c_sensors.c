@@ -24,8 +24,10 @@
 
 #include "stm32_i2c.h"
 #include "stm32_spi.h"
+#include "stm32_gpio.h"
 #include "fmuv6c.h"
 #include "ms5611.h"
+#include "dps368.h"
 #include "ist8310.h"
 #include "icm42688.h"
 #include "bmi055.h"
@@ -64,20 +66,35 @@ int fmuv6c_sensors_initialize(
       }
     else
       {
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+        ret = dps368_register(i2c, 0, DPS368_I2C_ADDR);
+#else
         ret = ms5611_register(i2c, 0, MS5611_I2C_ADDR);
+#endif
         if (ret < 0)
           {
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+            syslog(LOG_ERR, "[sensors] dps368_register failed: %d\n", ret);
+#else
             syslog(LOG_ERR, "[sensors] ms5611_register failed: %d\n", ret);
+#endif
             first_error = ret;
             failures++;
           }
         else
           {
             registered++;
-            syslog(LOG_INFO,
-                   "[sensors] MS5611 baro on uorb -> /dev/uorb/sensor_baro0\n");
+            syslog(LOG_INFO, "[sensors] %s baro on uorb -> "
+                             "/dev/uorb/sensor_baro0\n",
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+                   "DPS368"
+#else
+                   "MS5611"
+#endif
+                   );
           }
 
+#ifndef CONFIG_XXCAR_BOARD_MATEKH743
         /* IST8310 magnetometer on the same internal I2C bus @0x0c ->
          * sensor_mag0. Reuse the already-initialized bus handle.
          */
@@ -99,8 +116,32 @@ int fmuv6c_sensors_initialize(
             syslog(LOG_INFO,
                    "[sensors] IST8310 mag on uorb -> /dev/uorb/sensor_mag0\n");
           }
+#endif
       }
   }
+
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+  /* This board has no onboard compass.  If an IST8310 is connected to the
+   * external I2C pads, expose it as sensor_mag0; absence is expected.
+   */
+
+  {
+    FAR struct i2c_master_s *i2c;
+
+    i2c = stm32_i2cbus_initialize(FMUV6C_I2C_EXTERNAL);
+    if (i2c != NULL && ist8310_register(i2c, 0, IST8310_I2C_ADDR) == OK)
+      {
+        registered++;
+        syslog(LOG_INFO,
+               "[sensors] external IST8310 -> /dev/uorb/sensor_mag0\n");
+      }
+    else
+      {
+        syslog(LOG_INFO,
+               "[sensors] no onboard mag; external I2C1 compass not found\n");
+      }
+  }
+#endif
 
   /* ICM-42688-P primary IMU on SPI1 -> sensor_accel0 + sensor_gyro0.
    * Polled bring-up driver (FIFO/DRDY 2 kHz streaming is a later stage).
@@ -123,7 +164,9 @@ int fmuv6c_sensors_initialize(
       }
     else
       {
-        ret = icm42688_register(spi, 0);
+        ret = icm42688_register(spi, 0,
+                                SPIDEV_IMU(FMUV6C_SPIDEV_ICM42688),
+                                GPIO_DRDY_ICM42688);
         if (ret < 0)
           {
             syslog(LOG_ERR, "[sensors] icm42688_register failed: %d\n", ret);
@@ -141,6 +184,41 @@ int fmuv6c_sensors_initialize(
                              "sensor_accel0 + sensor_gyro0\n");
           }
 
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+        /* Secondary ICM-42688-P on SPI4 has no usable DRDY connection on
+         * H743-SLIM-V4, so use fixed 250 Hz FIFO-drain deadlines.
+         */
+
+        spi = stm32_spibus_initialize(4);
+        if (spi == NULL)
+          {
+            ret = -ENODEV;
+          }
+        else
+          {
+            ret = icm42688_register(
+              spi, 1, SPIDEV_IMU(MATEKH743_SPIDEV_ICM42688_2),
+              GPIO_DRDY_ICM42688_2);
+          }
+
+        if (ret < 0)
+          {
+            syslog(LOG_ERR,
+                   "[sensors] SPI4 ICM-42688 register failed: %d\n", ret);
+            if (first_error == OK)
+              {
+                first_error = ret;
+              }
+
+            failures++;
+          }
+        else
+          {
+            registered++;
+            syslog(LOG_INFO, "[sensors] SPI4 ICM-42688-P -> "
+                             "sensor_accel1 + sensor_gyro1\n");
+          }
+#else
         /* BMI055 secondary IMU on the same SPI1 bus (accel CS PC15, gyro
          * CS PC14) -> sensor_accel1 + sensor_gyro1. Also 2 kHz FIFO+INT.
          */
@@ -185,8 +263,9 @@ int fmuv6c_sensors_initialize(
                 registered++;
                 syslog(LOG_INFO, "[sensors] BMI055 2nd IMU on uorb -> "
                                  "sensor_accel1 + sensor_gyro1\n");
-              }
+            }
           }
+#endif
       }
   }
 

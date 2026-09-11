@@ -52,8 +52,15 @@
 
 #define FDCAN_BITRATE_SUPPORTED   1000000u
 #define FDCAN_NBRP_1M             0u
-#define FDCAN_NTSEG1_1M           12u
-#define FDCAN_NTSEG2_1M           1u
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+/* 8 MHz / (1 * 8 tq) = 1 Mbit/s, sample at 87.5%. */
+#  define FDCAN_NTSEG1_1M         5u
+#  define FDCAN_NTSEG2_1M         0u
+#else
+/* 16 MHz / (1 * 16 tq) = 1 Mbit/s, sample at 87.5%. */
+#  define FDCAN_NTSEG1_1M         12u
+#  define FDCAN_NTSEG2_1M         1u
+#endif
 #define FDCAN_NSJW_1M             0u
 
 #define FDCAN_RAM_WORD(n)         (STM32_CANRAM_BASE + ((n) * 4u))
@@ -270,6 +277,9 @@ int fdcan_init(uint32_t bitrate)
 
   stm32_configgpio(GPIO_CAN1_RX);
   stm32_configgpio(GPIO_CAN1_TX);
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+  stm32_configgpio(GPIO_CAN1_SILENT);
+#endif
 
   ret = fdcan_enter_config();
   if (ret < 0)

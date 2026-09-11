@@ -47,11 +47,27 @@
 #define COMP_MSG_TIMESYNC_END    6
 #define COMP_MSG_DIRECT_CONTROL  7
 #define COMP_MSG_DATUM_RESET     8
+#define COMP_MSG_LINK_TEST_REQ   9
 
 /* Outbound: board -> companion. */
 
 #define COMP_MSG_TIMESYNC_REP    4
 #define COMP_MSG_VEHICLE_STATE  16
+#define COMP_MSG_LINK_TEST_REP  17
+
+/* Diagnostic echo used by the companion GUI's latency and bandwidth tests.
+ *
+ * The board does not interpret the header; it validates the frame and echoes
+ * the complete payload under the outbound reply ID. Keeping the host's
+ * monotonic transmit time and sequence in the payload lets the GUI match an
+ * out-of-order reply without requiring clock synchronisation. Bytes after
+ * this header carry a deterministic pattern, so the bandwidth result counts
+ * only replies whose contents were verified end to end.
+ */
+
+#define COMP_LINK_TEST_HEADER_SIZE 16u
+#define COMP_LINK_TEST_LATENCY      0u
+#define COMP_LINK_TEST_BANDWIDTH    1u
 
 /* Absolute pose in the companion's map frame. Only x, y and yaw are fused;
  * height stays with the barometer.

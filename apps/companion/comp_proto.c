@@ -363,6 +363,19 @@ int comp_parser_byte(FAR struct comp_parser_s *p, uint8_t b)
               return p->id;
             }
 
+          if (p->id == COMP_MSG_LINK_TEST_REQ ||
+              p->id == COMP_MSG_LINK_TEST_REP)
+            {
+              if (p->len < COMP_LINK_TEST_HEADER_SIZE)
+                {
+                  p->bad_length++;
+                  return 0;
+                }
+
+              p->frames++;
+              return p->id;
+            }
+
           if (expect == 0)
             {
               /* A companion newer than this firmware. Benign. */

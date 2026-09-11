@@ -383,7 +383,7 @@ static void test_companion_parameters(void)
     static const char *const ports[] =
     {
       "SER_TEL1_FUNC", "SER_TEL2_FUNC", "SER_TEL3_FUNC", "SER_GPS1_FUNC",
-      "SER_GPS2_FUNC", "SER_DBG_FUNC",  "SER_USB_FUNC"
+      "SER_GPS2_FUNC", "SER_DBG_FUNC",  "SER_USB_FUNC", "SER_USB2_FUNC"
     };
     size_t i;
 

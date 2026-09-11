@@ -5,11 +5,10 @@
  *
  * Hardware PPS capture for the Jetson companion link.
  *
- * TELEM2 CTS is PC9, alternate function TIM3_CH4.  TIM3 is a free-running
- * 16-bit 1 MHz timer.  The input edge is latched in CCR4 by hardware, so ISR
- * scheduling latency does not become timestamp jitter.  The ISR subtracts
- * the modulo-16-bit CCR-to-CNT delay from the shared TIM5 monotonic timestamp;
- * this is unambiguous provided the ISR runs within 65.536 ms.
+ * On FMUv6C, TELEM2 CTS/PC9 is captured by a separate 1 MHz TIM3 channel.
+ * On Matek H743-SLIM-V4, S1/PA0 is captured directly by channel 1 of the
+ * shared 1 MHz TIM5 IMU clock.  Hardware capture keeps ISR scheduling latency
+ * out of the PPS timestamp on both boards.
  *
  * This module observes PPS only.  It never steps, slews, or otherwise changes
  * CLOCK_MONOTONIC, TIM5, CLOCK_REALTIME, or the companion UTC offset.
@@ -41,7 +40,7 @@
 #  error "PPS capture requires the shared FMUv6C TIM5 timebase"
 #endif
 
-#ifdef CONFIG_STM32H7_TIM3
+#if !defined(CONFIG_XXCAR_BOARD_MATEKH743) && defined(CONFIG_STM32H7_TIM3)
 #  error "TIM3 is reserved by the FMUv6C PPS input capture"
 #endif
 
@@ -53,15 +52,41 @@
 #define PPS_HOLDOVER_US          1500000u
 #define PPS_LOCK_INTERVALS             3u
 
-#define PPS_GPIO (GPIO_TIM3_CH4IN_2 | GPIO_PULLDOWN)
-#define PPS_SR_FLAGS (GTIM_SR_CC4IF | GTIM_SR_CC4OF)
-
-#if (STM32_APB1_TIM3_CLKIN % PPS_TIMER_HZ) != 0
-#  error "TIM3 input clock must be an integer multiple of 1 MHz"
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+/* S1/PA0 is TIM5_CH1.  Capturing in the existing 1 MHz IMU timer gives PPS
+ * exactly the same clock domain without consuming UART6 RX or an SDMMC pin.
+ */
+#  define PPS_GPIO       (GPIO_TIM5_CH1IN_1 | GPIO_PULLDOWN)
+#  define PPS_TIMER_BASE STM32_TIM5_BASE
+#  define PPS_TIMER_IRQ  STM32_IRQ_TIM5
+#  define PPS_CCR_OFFSET STM32_GTIM_CCR1_OFFSET
+#  define PPS_SR_FLAGS   (GTIM_SR_CC1IF | GTIM_SR_CC1OF)
+#  define PPS_OVERFLOW   GTIM_SR_CC1OF
+#  define PPS_CCER_EN    GTIM_CCER_CC1E
+#  define PPS_DIER_IE    GTIM_DIER_CC1IE
+#else
+#  define PPS_GPIO       (GPIO_TIM3_CH4IN_2 | GPIO_PULLDOWN)
+#  define PPS_TIMER_BASE STM32_TIM3_BASE
+#  define PPS_TIMER_IRQ  STM32_IRQ_TIM3
+#  define PPS_CCR_OFFSET STM32_GTIM_CCR4_OFFSET
+#  define PPS_SR_FLAGS   (GTIM_SR_CC4IF | GTIM_SR_CC4OF)
+#  define PPS_OVERFLOW   GTIM_SR_CC4OF
+#  define PPS_CCER_EN    GTIM_CCER_CC4E
+#  define PPS_DIER_IE    GTIM_DIER_CC4IE
 #endif
 
-#if (STM32_APB1_TIM3_CLKIN / PPS_TIMER_HZ) > 65536
-#  error "TIM3 PPS prescaler does not fit in PSC"
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+#  define PPS_TIMER_CLKIN STM32_APB1_TIM5_CLKIN
+#else
+#  define PPS_TIMER_CLKIN STM32_APB1_TIM3_CLKIN
+#endif
+
+#if (PPS_TIMER_CLKIN % PPS_TIMER_HZ) != 0
+#  error "PPS timer input clock must be an integer multiple of 1 MHz"
+#endif
+
+#if (PPS_TIMER_CLKIN / PPS_TIMER_HZ) > 65536
+#  error "PPS timer 1 MHz prescaler does not fit in PSC"
 #endif
 
 static struct fmuv6c_pps_status_s g_pps;
@@ -141,13 +166,19 @@ static void pps_process_edge(uint64_t edge_us)
 
 static int pps_isr(int irq, FAR void *context, FAR void *arg)
 {
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+  uint32_t captured;
+  uint32_t counter;
+  uint32_t delay_us;
+#else
   uint16_t captured;
   uint16_t counter;
   uint16_t delay_us;
+#endif
   uint16_t status;
   uint64_t now_us;
 
-  status = getreg16(STM32_TIM3_BASE + STM32_GTIM_SR_OFFSET);
+  status = getreg16(PPS_TIMER_BASE + STM32_GTIM_SR_OFFSET);
   if ((status & PPS_SR_FLAGS) == 0)
     {
       return OK;
@@ -157,17 +188,22 @@ static int pps_isr(int irq, FAR void *context, FAR void *arg)
    * or multiple 16-bit wrap because unsigned subtraction is modulo 65536.
    */
 
-  captured = getreg16(STM32_TIM3_BASE + STM32_GTIM_CCR4_OFFSET);
-  counter = getreg16(STM32_TIM3_BASE + STM32_GTIM_CNT_OFFSET);
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+  captured = getreg32(PPS_TIMER_BASE + PPS_CCR_OFFSET);
+  counter = getreg32(PPS_TIMER_BASE + STM32_GTIM_CNT_OFFSET);
+#else
+  captured = getreg16(PPS_TIMER_BASE + PPS_CCR_OFFSET);
+  counter = getreg16(PPS_TIMER_BASE + STM32_GTIM_CNT_OFFSET);
+#endif
   now_us = fmuv6c_imu_time_now();
-  delay_us = (uint16_t)(counter - captured);
+  delay_us = counter - captured;
 
   /* STM32 timer flags clear when zero is written to the selected bits. */
 
   putreg16((uint16_t)~PPS_SR_FLAGS,
-           STM32_TIM3_BASE + STM32_GTIM_SR_OFFSET);
+           PPS_TIMER_BASE + STM32_GTIM_SR_OFFSET);
 
-  if ((status & GTIM_SR_CC4OF) != 0)
+  if ((status & PPS_OVERFLOW) != 0)
     {
       g_pps.overcaptures++;
     }
@@ -179,7 +215,9 @@ static int pps_isr(int irq, FAR void *context, FAR void *arg)
 int fmuv6c_pps_initialize(void)
 {
   irqstate_t flags;
+#ifndef CONFIG_XXCAR_BOARD_MATEKH743
   uint32_t divider;
+#endif
   int ret;
 
   flags = enter_critical_section();
@@ -192,7 +230,7 @@ int fmuv6c_pps_initialize(void)
   memset(&g_pps, 0, sizeof(g_pps));
   leave_critical_section(flags);
 
-  ret = irq_attach(STM32_IRQ_TIM3, pps_isr, NULL);
+  ret = irq_attach(PPS_TIMER_IRQ, pps_isr, NULL);
   if (ret < 0)
     {
       return ret;
@@ -201,42 +239,54 @@ int fmuv6c_pps_initialize(void)
   ret = stm32_configgpio(PPS_GPIO);
   if (ret < 0)
     {
-      irq_detach(STM32_IRQ_TIM3);
+      irq_detach(PPS_TIMER_IRQ);
       return ret;
     }
 
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+  /* TIM5 was initialized by fmuv6c_imu_time_initialize(). Only claim CH1. */
+
+  putreg16(0, PPS_TIMER_BASE + STM32_GTIM_CCMR1_OFFSET);
+  modifyreg16(PPS_TIMER_BASE + STM32_GTIM_CCMR1_OFFSET, 0,
+              GTIM_CCMR_CCS_CCIN1 << GTIM_CCMR1_CC1S_SHIFT);
+  putreg16((uint16_t)~PPS_SR_FLAGS,
+           PPS_TIMER_BASE + STM32_GTIM_SR_OFFSET);
+  modifyreg16(PPS_TIMER_BASE + STM32_GTIM_CCER_OFFSET, 0, PPS_CCER_EN);
+  modifyreg16(PPS_TIMER_BASE + STM32_GTIM_DIER_OFFSET, 0, PPS_DIER_IE);
+#else
   modifyreg32(STM32_RCC_APB1LENR, 0, RCC_APB1LENR_TIM3EN);
 
-  putreg16(0, STM32_TIM3_BASE + STM32_GTIM_CR1_OFFSET);
-  putreg16(0, STM32_TIM3_BASE + STM32_GTIM_DIER_OFFSET);
-  putreg16(0, STM32_TIM3_BASE + STM32_GTIM_CCER_OFFSET);
-  putreg16(0, STM32_TIM3_BASE + STM32_GTIM_SMCR_OFFSET);
-  putreg16(0, STM32_TIM3_BASE + STM32_GTIM_CCMR1_OFFSET);
+  putreg16(0, PPS_TIMER_BASE + STM32_GTIM_CR1_OFFSET);
+  putreg16(0, PPS_TIMER_BASE + STM32_GTIM_DIER_OFFSET);
+  putreg16(0, PPS_TIMER_BASE + STM32_GTIM_CCER_OFFSET);
+  putreg16(0, PPS_TIMER_BASE + STM32_GTIM_SMCR_OFFSET);
+  putreg16(0, PPS_TIMER_BASE + STM32_GTIM_CCMR1_OFFSET);
   putreg16(GTIM_CCMR_CCS_CCIN1 << GTIM_CCMR2_CC4S_SHIFT,
-           STM32_TIM3_BASE + STM32_GTIM_CCMR2_OFFSET);
+           PPS_TIMER_BASE + STM32_GTIM_CCMR2_OFFSET);
 
-  divider = STM32_APB1_TIM3_CLKIN / PPS_TIMER_HZ;
+  divider = PPS_TIMER_CLKIN / PPS_TIMER_HZ;
   putreg16((uint16_t)(divider - 1u),
-           STM32_TIM3_BASE + STM32_GTIM_PSC_OFFSET);
-  putreg16(UINT16_MAX, STM32_TIM3_BASE + STM32_GTIM_ARR_OFFSET);
-  putreg16(0, STM32_TIM3_BASE + STM32_GTIM_CNT_OFFSET);
-  putreg16(GTIM_EGR_UG, STM32_TIM3_BASE + STM32_GTIM_EGR_OFFSET);
-  putreg16(0, STM32_TIM3_BASE + STM32_GTIM_SR_OFFSET);
+           PPS_TIMER_BASE + STM32_GTIM_PSC_OFFSET);
+  putreg16(UINT16_MAX, PPS_TIMER_BASE + STM32_GTIM_ARR_OFFSET);
+  putreg16(0, PPS_TIMER_BASE + STM32_GTIM_CNT_OFFSET);
+  putreg16(GTIM_EGR_UG, PPS_TIMER_BASE + STM32_GTIM_EGR_OFFSET);
+  putreg16(0, PPS_TIMER_BASE + STM32_GTIM_SR_OFFSET);
 
   /* CC4P/CC4NP remain clear: rising edges only.  The Jetson's 100 ms high
    * pulse therefore produces exactly one capture.
    */
 
-  putreg16(GTIM_CCER_CC4E, STM32_TIM3_BASE + STM32_GTIM_CCER_OFFSET);
-  putreg16(GTIM_DIER_CC4IE, STM32_TIM3_BASE + STM32_GTIM_DIER_OFFSET);
-  putreg16(GTIM_CR1_CEN, STM32_TIM3_BASE + STM32_GTIM_CR1_OFFSET);
+  putreg16(PPS_CCER_EN, PPS_TIMER_BASE + STM32_GTIM_CCER_OFFSET);
+  putreg16(PPS_DIER_IE, PPS_TIMER_BASE + STM32_GTIM_DIER_OFFSET);
+  putreg16(GTIM_CR1_CEN, PPS_TIMER_BASE + STM32_GTIM_CR1_OFFSET);
+#endif
 
   flags = enter_critical_section();
   g_pps.running = true;
   g_pps.state = FMUV6C_PPS_NO_SIGNAL;
   leave_critical_section(flags);
 
-  up_enable_irq(STM32_IRQ_TIM3);
+  up_enable_irq(PPS_TIMER_IRQ);
   return OK;
 }
 
@@ -244,13 +294,22 @@ int fmuv6c_pps_uninitialize(void)
 {
   irqstate_t flags;
 
-  up_disable_irq(STM32_IRQ_TIM3);
-  putreg16(0, STM32_TIM3_BASE + STM32_GTIM_DIER_OFFSET);
-  putreg16(0, STM32_TIM3_BASE + STM32_GTIM_CCER_OFFSET);
-  putreg16(0, STM32_TIM3_BASE + STM32_GTIM_CR1_OFFSET);
-  irq_detach(STM32_IRQ_TIM3);
+  up_disable_irq(PPS_TIMER_IRQ);
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+  modifyreg16(PPS_TIMER_BASE + STM32_GTIM_DIER_OFFSET, PPS_DIER_IE, 0);
+  modifyreg16(PPS_TIMER_BASE + STM32_GTIM_CCER_OFFSET, PPS_CCER_EN, 0);
+  putreg16((uint16_t)~PPS_SR_FLAGS,
+           PPS_TIMER_BASE + STM32_GTIM_SR_OFFSET);
+#else
+  putreg16(0, PPS_TIMER_BASE + STM32_GTIM_DIER_OFFSET);
+  putreg16(0, PPS_TIMER_BASE + STM32_GTIM_CCER_OFFSET);
+  putreg16(0, PPS_TIMER_BASE + STM32_GTIM_CR1_OFFSET);
+#endif
+  irq_detach(PPS_TIMER_IRQ);
   stm32_unconfiggpio(PPS_GPIO);
+#ifndef CONFIG_XXCAR_BOARD_MATEKH743
   modifyreg32(STM32_RCC_APB1LENR, RCC_APB1LENR_TIM3EN, 0);
+#endif
 
   flags = enter_critical_section();
   g_pps.running = false;

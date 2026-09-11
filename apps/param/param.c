@@ -5,9 +5,10 @@
  *
  * xxCar parameter system - see param.h.
  *
- * Values live in RAM (g_values) alongside a static table of definitions
- * (g_params). Persistence is a plain-text "NAME VALUE" file on the microSD so
- * it can be edited from a Linux host over USB mass storage.
+ * Values live in RAM (g_values) alongside a static table of definitions.
+ * FMUv6C persistence is a plain-text "NAME VALUE" file on microSD. MatekH743
+ * persistence is an atomic, CRC-checked journal in the final two internal
+ * flash sectors, which are reserved from the application image.
  *
  * Only parameters that DIFFER from their default are written, and unknown
  * names in the file are ignored with a warning. That means a params.txt from
@@ -24,6 +25,10 @@
 #include <inttypes.h>
 #include <math.h>
 #include <syslog.h>
+
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+#  include <nuttx/progmem.h>
+#endif
 
 #include "param.h"
 
@@ -44,10 +49,8 @@ static const struct param_def_s g_params[] =
    * and it can be moved. TELEM1 has it by default only because that is where
    * the boot console lives.
    *
-   * Every connector below is an FMU UART. The RC IN connector is deliberately
-   * absent: on the 6C it is wired to the PX4IO co-processor, not to the FMU, so
-   * it is not a port you can assign a function to - see PX4IO_* below.
-   * USART6 is likewise absent; it IS the link to PX4IO.
+   * On FMUv6C, RC IN and USART6 belong to PX4IO. On Matek, USART6 is exposed
+   * directly as R6/T6 and is represented by SER_RC_* below.
    */
 
   { "SER_TEL1_FUNC", PARAM_TYPE_INT32, I32(SER_FUNC_NSH),      I32(0), I32(6),
@@ -75,13 +78,26 @@ static const struct param_def_s g_params[] =
   { "SER_DBG_BAUD",  PARAM_TYPE_INT32, I32(115200), I32(1200), I32(3000000),
     "FMU DEBUG baud rate" },
 
-  /* The USB CDC/ACM port. No baud: the host owns the line coding on a USB
+  { "SER_RC_FUNC", PARAM_TYPE_INT32,
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+    I32(SER_FUNC_RC_IN),
+#else
+    I32(SER_FUNC_DISABLED),
+#endif
+    I32(0), I32(6), "Dedicated RC UART function", PARAM_RANGE_ENUM },
+  { "SER_RC_BAUD", PARAM_TYPE_INT32, I32(420000), I32(1200), I32(3000000),
+    "Dedicated RC UART baud rate" },
+
+  /* The two USB CDC/ACM ports. No baud: the host owns the line coding on a USB
    * serial port and the device ignores it, so there is nothing to configure.
-   * NSH by default - plug a cable in and you get a shell.
+   * Keep USB0 as the backward-compatible shell and reserve USB1 for CAL.
    */
 
   { "SER_USB_FUNC",  PARAM_TYPE_INT32, I32(SER_FUNC_NSH), I32(0), I32(6),
     "USB (/dev/ttyACM0) function - no baud, the host sets it",
+    PARAM_RANGE_ENUM },
+  { "SER_USB2_FUNC", PARAM_TYPE_INT32, I32(SER_FUNC_CAL), I32(0), I32(6),
+    "USB1 (/dev/ttyACM1) function - no baud, the host sets it",
     PARAM_RANGE_ENUM },
 
   /* ---- RC input ---------------------------------------------------------
@@ -142,12 +158,18 @@ static const struct param_def_s g_params[] =
   { "RC_ARM_MAX", PARAM_TYPE_FLOAT, F32(0.05f), F32(0.0f), F32(0.25f),
     "Maximum normalized motor demand when arming" },
 
-  /* ---- PX4IO co-processor ------------------------------------------------
+  /* ---- PX4IO co-processor (FMUv6C only) ----------------------------------
    * Owns the RC IN connector and the 8 PWM servo rails. Not all FMUv6C boards
    * are fitted with the chip, so this is allowed to fail harmlessly.
    */
 
-  { "PX4IO_EN",   PARAM_TYPE_INT32, I32(1), I32(0), I32(1),
+  { "PX4IO_EN",   PARAM_TYPE_INT32,
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+    I32(0),
+#else
+    I32(1),
+#endif
+    I32(0), I32(1),
     "Start the PX4IO client at boot (RC in + PWM out)" },
   { "PX4IO_RATE", PARAM_TYPE_INT32, I32(50), I32(5), I32(400),
     "PX4IO setpoint refresh rate (Hz)" },
@@ -224,10 +246,22 @@ static const struct param_def_s g_params[] =
   { "SENS_BOARD_ROT", PARAM_TYPE_INT32, I32(0), I32(0), I32(37),
     "Board mounting rotation (PX4 enum Rotation; 45s unsupported)",
     PARAM_RANGE_ENUM },
-  { "SENS_IMU0_ROT",  PARAM_TYPE_INT32, I32(0), I32(0), I32(37),
+  { "SENS_IMU0_ROT",  PARAM_TYPE_INT32,
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+    I32(12), /* ROTATION_PITCH_180 */
+#else
+    I32(0),
+#endif
+    I32(0), I32(37),
     "IMU0 (ICM-42688) rotation relative to the board", PARAM_RANGE_ENUM },
-  { "SENS_IMU1_ROT",  PARAM_TYPE_INT32, I32(2), I32(0), I32(37),
-    "IMU1 (BMI055) rotation relative to the board (2 = yaw 90, measured)",
+  { "SENS_IMU1_ROT",  PARAM_TYPE_INT32,
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+    I32(26), /* ROTATION_PITCH_180_YAW_90 */
+#else
+    I32(2),
+#endif
+    I32(0), I32(37),
+    "IMU1 rotation relative to the board",
     PARAM_RANGE_ENUM },
   /* NONE, matching PX4 and ArduPilot, which both declare the 6C's internal
    * IST8310 as ROTATION_NONE. The part IS mounted square with the board.
@@ -1173,7 +1207,7 @@ int param_init(void)
   return OK;
 }
 
-int param_load(void)
+static int param_file_load(void)
 {
   FAR FILE *fp;
   char line[96];
@@ -1365,7 +1399,7 @@ static int param_write_body(FAR FILE *fp, FAR size_t *bytes)
  * file by construction: it is only ever renamed after fsync() succeeded.
  */
 
-int param_save(void)
+static int param_file_save(void)
 {
   FAR FILE *fp;
   size_t bytes = 0;
@@ -1445,6 +1479,528 @@ int param_save(void)
   syslog(LOG_INFO, "[param] saved %d changed (%zu bytes) to %s\n",
          written, bytes, PARAM_FILE);
   return written;
+}
+
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+
+/* The STM32H743 has sixteen 128 KiB flash sectors.  The ArduPilot MatekH743
+ * hardware definition starts parameter storage at sector 14 and reserves the
+ * final two sectors; using the same boundary means its bootloader preserves
+ * this journal during an ordinary firmware upload.
+ *
+ * A slot is committed in three steps: header, payload, then a separate commit
+ * flash-word.  The H743 programs 256-bit (32-byte) flash words.  Keeping the
+ * commit marker in its own word avoids attempting to program one ECC-protected
+ * flash word twice.  An interrupted slot is skipped and the prior committed
+ * generation remains valid.
+ */
+
+#define PARAM_FLASH_BASE          ((uintptr_t)0x081c0000u)
+#define PARAM_FLASH_SECTOR_SIZE   (128u * 1024u)
+#define PARAM_FLASH_SECTOR_FIRST  14u
+#define PARAM_FLASH_SECTOR_COUNT  2u
+#define PARAM_FLASH_SLOT_SIZE     (8u * 1024u)
+#define PARAM_FLASH_WORD_SIZE     32u
+#define PARAM_FLASH_MAGIC         0x5858504au /* "XXPJ" */
+#define PARAM_FLASH_COMMIT_MAGIC  0x5858434du /* "XXCM" */
+#define PARAM_FLASH_VERSION       1u
+
+struct param_flash_header_s
+{
+  uint32_t magic;
+  uint16_t version;
+  uint16_t header_size;
+  uint32_t generation;
+  uint32_t payload_len;
+  uint16_t record_count;
+  uint16_t record_size;
+  uint32_t payload_crc;
+  uint32_t header_crc;
+  uint32_t reserved;
+};
+
+struct param_flash_record_s
+{
+  char     name[PARAM_NAME_MAX + 1];
+  uint8_t  type;
+  uint8_t  reserved[2];
+  uint32_t raw_value;
+};
+
+struct param_flash_commit_s
+{
+  uint32_t magic;
+  uint32_t generation;
+  uint32_t header_crc;
+  uint32_t payload_crc;
+  uint32_t reserved[4];
+};
+
+struct param_flash_scan_s
+{
+  uintptr_t latest_addr;
+  uintptr_t first_empty_addr;
+  uint32_t  latest_generation;
+  bool      have_latest;
+};
+
+_Static_assert(sizeof(struct param_flash_header_s) == PARAM_FLASH_WORD_SIZE,
+               "parameter journal header must occupy one flash word");
+_Static_assert(sizeof(struct param_flash_record_s) == 24,
+               "parameter journal record format changed");
+_Static_assert(sizeof(struct param_flash_commit_s) == PARAM_FLASH_WORD_SIZE,
+               "parameter journal commit must occupy one flash word");
+_Static_assert(sizeof(struct param_flash_header_s) +
+               PARAM_COUNT * sizeof(struct param_flash_record_s) +
+               sizeof(struct param_flash_commit_s) <= PARAM_FLASH_SLOT_SIZE,
+               "parameter table no longer fits a journal slot");
+
+static uint32_t param_flash_crc32(FAR const void *data, size_t len)
+{
+  FAR const uint8_t *p = data;
+  uint32_t crc = UINT32_MAX;
+  size_t i;
+  unsigned int bit;
+
+  for (i = 0; i < len; i++)
+    {
+      crc ^= p[i];
+
+      for (bit = 0; bit < 8; bit++)
+        {
+          uint32_t mask = (uint32_t)-(int32_t)(crc & 1u);
+          crc = (crc >> 1) ^ (0xedb88320u & mask);
+        }
+    }
+
+  return ~crc;
+}
+
+static bool param_flash_generation_newer(uint32_t candidate,
+                                         uint32_t reference)
+{
+  return (int32_t)(candidate - reference) > 0;
+}
+
+static bool param_flash_slot_erased(uintptr_t addr)
+{
+  FAR const uint8_t *p = (FAR const uint8_t *)addr;
+  size_t i;
+
+  for (i = 0; i < PARAM_FLASH_SLOT_SIZE; i++)
+    {
+      if (p[i] != UINT8_MAX)
+        {
+          return false;
+        }
+    }
+
+  return true;
+}
+
+static bool param_flash_slot_valid(
+  uintptr_t addr, FAR struct param_flash_header_s *result)
+{
+  struct param_flash_header_s header;
+  struct param_flash_header_s checked;
+  struct param_flash_commit_s commit;
+  FAR const void *payload;
+
+  memcpy(&header, (FAR const void *)addr, sizeof(header));
+
+  if (header.magic != PARAM_FLASH_MAGIC ||
+      header.version != PARAM_FLASH_VERSION ||
+      header.header_size != sizeof(header) ||
+      header.record_size != sizeof(struct param_flash_record_s) ||
+      header.payload_len !=
+        header.record_count * sizeof(struct param_flash_record_s) ||
+      header.payload_len > PARAM_FLASH_SLOT_SIZE -
+                           2 * PARAM_FLASH_WORD_SIZE)
+    {
+      return false;
+    }
+
+  checked = header;
+  checked.header_crc = 0;
+  if (header.header_crc != param_flash_crc32(&checked, sizeof(checked)))
+    {
+      return false;
+    }
+
+  memcpy(&commit,
+         (FAR const void *)(addr + PARAM_FLASH_SLOT_SIZE -
+                            sizeof(commit)),
+         sizeof(commit));
+
+  if (commit.magic != PARAM_FLASH_COMMIT_MAGIC ||
+      commit.generation != header.generation ||
+      commit.header_crc != header.header_crc ||
+      commit.payload_crc != header.payload_crc)
+    {
+      return false;
+    }
+
+  payload = (FAR const void *)(addr + sizeof(header));
+  if (header.payload_crc != param_flash_crc32(payload, header.payload_len))
+    {
+      return false;
+    }
+
+  *result = header;
+  return true;
+}
+
+static void param_flash_scan(FAR struct param_flash_scan_s *scan)
+{
+  const size_t slot_count =
+    PARAM_FLASH_SECTOR_COUNT * PARAM_FLASH_SECTOR_SIZE /
+    PARAM_FLASH_SLOT_SIZE;
+  size_t slot;
+
+  memset(scan, 0, sizeof(*scan));
+
+  for (slot = 0; slot < slot_count; slot++)
+    {
+      uintptr_t addr = PARAM_FLASH_BASE + slot * PARAM_FLASH_SLOT_SIZE;
+      struct param_flash_header_s header;
+
+      if (scan->first_empty_addr == 0 && param_flash_slot_erased(addr))
+        {
+          scan->first_empty_addr = addr;
+          continue;
+        }
+
+      if (param_flash_slot_valid(addr, &header) &&
+          (!scan->have_latest ||
+           param_flash_generation_newer(header.generation,
+                                        scan->latest_generation)))
+        {
+          scan->latest_addr = addr;
+          scan->latest_generation = header.generation;
+          scan->have_latest = true;
+        }
+    }
+}
+
+static bool param_flash_value_modified(int index)
+{
+  if (g_params[index].type == PARAM_TYPE_INT32)
+    {
+      return g_values[index].i != g_params[index].def.i;
+    }
+
+  return g_values[index].f != g_params[index].def.f;
+}
+
+static int param_flash_load(void)
+{
+  struct param_flash_scan_s scan;
+  struct param_flash_header_s header;
+  FAR const struct param_flash_record_s *records;
+  int loaded = 0;
+  int unknown = 0;
+  int i;
+
+  param_flash_scan(&scan);
+  if (!scan.have_latest)
+    {
+      return -ENOENT;
+    }
+
+  if (!param_flash_slot_valid(scan.latest_addr, &header))
+    {
+      return -EBADMSG;
+    }
+
+  records = (FAR const struct param_flash_record_s *)
+            (scan.latest_addr + sizeof(header));
+
+  for (i = 0; i < header.record_count; i++)
+    {
+      union param_value_u value;
+      int index;
+
+      if (memchr(records[i].name, '\0', sizeof(records[i].name)) == NULL)
+        {
+          unknown++;
+          continue;
+        }
+
+      index = param_find(records[i].name);
+      if (index < 0 || records[i].type != g_params[index].type)
+        {
+          unknown++;
+          continue;
+        }
+
+      if (g_params[index].type == PARAM_TYPE_INT32)
+        {
+          memcpy(&value.i, &records[i].raw_value, sizeof(value.i));
+        }
+      else
+        {
+          memcpy(&value.f, &records[i].raw_value, sizeof(value.f));
+        }
+
+      switch (param_clamp(index, &value))
+        {
+          case PARAM_FIX_CLAMPED:
+            syslog(LOG_WARNING, "[param] %s from flash was clamped\n",
+                   records[i].name);
+            break;
+
+          case PARAM_FIX_REJECTED:
+            value = g_params[index].def;
+            syslog(LOG_ERR,
+                   "[param] %s from flash is invalid, using default\n",
+                   records[i].name);
+            break;
+
+          default:
+            break;
+        }
+
+      g_values[index] = value;
+      loaded++;
+    }
+
+  syslog(LOG_INFO,
+         "[param] loaded %d from internal flash generation %" PRIu32
+         " (%d unknown)\n",
+         loaded, header.generation, unknown);
+  return loaded;
+}
+
+static int param_flash_program(uintptr_t addr, FAR const void *data,
+                               size_t len)
+{
+  ssize_t ret;
+
+  if ((addr & (PARAM_FLASH_WORD_SIZE - 1)) != 0 ||
+      (len & (PARAM_FLASH_WORD_SIZE - 1)) != 0)
+    {
+      return -EINVAL;
+    }
+
+  ret = up_progmem_write(addr, data, len);
+  return ret == (ssize_t)len ? OK : (ret < 0 ? (int)ret : -EIO);
+}
+
+static int param_flash_save(void)
+{
+  struct param_flash_scan_s before;
+  struct param_flash_scan_s after;
+  struct param_flash_header_s *header;
+  struct param_flash_record_s *records;
+  struct param_flash_commit_s *commit;
+  FAR uint8_t *slot_data;
+  uintptr_t target;
+  uint32_t generation;
+  size_t payload_program_len;
+  int record_count = 0;
+  int ret;
+  int i;
+
+  param_flash_scan(&before);
+  generation = before.have_latest ? before.latest_generation + 1u : 1u;
+  target = before.first_empty_addr;
+
+  if (target == 0)
+    {
+      unsigned int erase_sector = PARAM_FLASH_SECTOR_FIRST;
+
+      /* Always erase the sector which does not contain the newest committed
+       * copy. Thus a reset at any point during erase or rewrite leaves the
+       * previous generation recoverable in the other sector.
+       */
+
+      if (before.have_latest &&
+          before.latest_addr < PARAM_FLASH_BASE + PARAM_FLASH_SECTOR_SIZE)
+        {
+          erase_sector++;
+        }
+
+      ret = up_progmem_eraseblock(erase_sector);
+      if (ret < 0)
+        {
+          syslog(LOG_ERR, "[param] flash sector %u erase failed: %d\n",
+                 erase_sector, ret);
+          return ret;
+        }
+
+      target = PARAM_FLASH_BASE +
+               (erase_sector - PARAM_FLASH_SECTOR_FIRST) *
+               PARAM_FLASH_SECTOR_SIZE;
+    }
+
+  slot_data = malloc(PARAM_FLASH_SLOT_SIZE);
+  if (slot_data == NULL)
+    {
+      return -ENOMEM;
+    }
+
+  memset(slot_data, UINT8_MAX, PARAM_FLASH_SLOT_SIZE);
+  header = (FAR struct param_flash_header_s *)slot_data;
+  records = (FAR struct param_flash_record_s *)(slot_data + sizeof(*header));
+
+  for (i = 0; i < PARAM_COUNT; i++)
+    {
+      FAR struct param_flash_record_s *record;
+
+      if (!param_flash_value_modified(i))
+        {
+          continue;
+        }
+
+      record = &records[record_count++];
+      memset(record, 0, sizeof(*record));
+      strncpy(record->name, g_params[i].name, PARAM_NAME_MAX);
+      record->type = g_params[i].type;
+
+      if (g_params[i].type == PARAM_TYPE_INT32)
+        {
+          memcpy(&record->raw_value, &g_values[i].i,
+                 sizeof(record->raw_value));
+        }
+      else
+        {
+          memcpy(&record->raw_value, &g_values[i].f,
+                 sizeof(record->raw_value));
+        }
+    }
+
+  header->magic = PARAM_FLASH_MAGIC;
+  header->version = PARAM_FLASH_VERSION;
+  header->header_size = sizeof(*header);
+  header->generation = generation;
+  header->payload_len = record_count * sizeof(*records);
+  header->record_count = record_count;
+  header->record_size = sizeof(*records);
+  header->payload_crc = param_flash_crc32(records, header->payload_len);
+  header->header_crc = 0;
+  header->reserved = UINT32_MAX;
+  header->header_crc = param_flash_crc32(header, sizeof(*header));
+
+  commit = (FAR struct param_flash_commit_s *)
+           (slot_data + PARAM_FLASH_SLOT_SIZE - sizeof(*commit));
+  memset(commit, 0, sizeof(*commit));
+  commit->magic = PARAM_FLASH_COMMIT_MAGIC;
+  commit->generation = generation;
+  commit->header_crc = header->header_crc;
+  commit->payload_crc = header->payload_crc;
+
+  /* Header first lets the scanner skip a declared but incomplete slot.
+   * Commit last is the only operation which makes the generation visible.
+   */
+
+  ret = param_flash_program(target, header, sizeof(*header));
+  payload_program_len =
+    (header->payload_len + PARAM_FLASH_WORD_SIZE - 1u) &
+    ~(PARAM_FLASH_WORD_SIZE - 1u);
+
+  if (ret == OK && payload_program_len > 0)
+    {
+      ret = param_flash_program(target + sizeof(*header), records,
+                                payload_program_len);
+    }
+
+  if (ret == OK)
+    {
+      ret = param_flash_program(target + PARAM_FLASH_SLOT_SIZE -
+                                sizeof(*commit), commit, sizeof(*commit));
+    }
+
+  free(slot_data);
+
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "[param] internal flash save failed: %d\n", ret);
+      return ret;
+    }
+
+  param_flash_scan(&after);
+  if (!after.have_latest || after.latest_generation != generation)
+    {
+      syslog(LOG_ERR, "[param] internal flash verification failed\n");
+      return -EIO;
+    }
+
+  syslog(LOG_INFO,
+         "[param] saved %d changed to internal flash generation %" PRIu32
+         "\n", record_count, generation);
+  return record_count;
+}
+
+#endif /* CONFIG_XXCAR_BOARD_MATEKH743 */
+
+int param_load(void)
+{
+  /* A stored snapshot contains only values different from their compiled
+   * defaults. Reapply defaults first so `param load` also discards unsaved
+   * RAM-only changes whose names are absent from the snapshot.
+   */
+
+  param_apply_defaults();
+  g_initialised = true;
+
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+  int ret = param_flash_load();
+
+  if (ret >= 0)
+    {
+      return ret;
+    }
+
+  /* Import an existing SD params.txt only when the internal journal has no
+   * valid generation yet. This makes migration automatic but never lets a
+   * stale/removable card override an established onboard configuration.
+   */
+
+  ret = param_file_load();
+  if (ret >= 0)
+    {
+      int save_ret = param_flash_save();
+
+      if (save_ret < 0)
+        {
+          syslog(LOG_WARNING,
+                 "[param] SD parameters loaded but flash migration failed: "
+                 "%d\n", save_ret);
+        }
+      else
+        {
+          syslog(LOG_INFO, "[param] migrated %s to internal flash\n",
+                 PARAM_FILE);
+        }
+    }
+
+  return ret;
+#else
+  return param_file_load();
+#endif
+}
+
+int param_save(void)
+{
+  param_ensure_init();
+
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+  int ret = param_flash_save();
+
+  if (ret >= 0)
+    {
+      /* Preserve the convenient human-readable SD copy when a card is
+       * mounted, but it is only a mirror: its absence or failure must not
+       * turn a successful onboard save into an error.
+       */
+
+      (void)param_file_save();
+    }
+
+  return ret;
+#else
+  return param_file_save();
+#endif
 }
 
 int param_reset(void)

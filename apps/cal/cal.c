@@ -821,6 +821,10 @@ int cal_session(void)
   bool done = false;
   int ret;
   int fd;
+  FAR const struct serial_port_s *ports = serial_ports();
+  FAR const struct serial_port_s *cal_port = NULL;
+  int port_count = serial_port_count();
+  int port_index;
 
   /* Streaming state. One sensor at a time: the GUI plots one at a time, and a
    * single subscription keeps the frame free of any "which sensor is this"
@@ -862,22 +866,37 @@ int cal_session(void)
   memset(&mag_stage, 0, sizeof(mag_stage));
   cal_load_apply(-1, false, &apply);
 
-  if (param_i32("SER_USB_FUNC") != SER_FUNC_CAL)
+  /* Calibration remains a USB protocol, but it is no longer tied to ACM0.
+   * Pick the USB CDC instance explicitly reserved for CAL. Restricting this
+   * to removable ports avoids silently opening a UART assigned the same
+   * function.
+   */
+
+  for (port_index = 0; port_index < port_count; port_index++)
+    {
+      if (ports[port_index].removable &&
+          param_i32(ports[port_index].func_param) == SER_FUNC_CAL)
+        {
+          cal_port = &ports[port_index];
+          break;
+        }
+    }
+
+  if (cal_port == NULL)
     {
       fprintf(stderr,
-              "cal: %s is not reserved for calibration.\n"
-              "  param set SER_USB_FUNC %d\n"
+              "cal: no USB port is reserved for calibration.\n"
+              "  param set SER_USB2_FUNC %d\n"
               "  param save\n"
-              "  reboot          <- required: the shell on this port was\n"
-              "                     started at boot and outlives the change\n",
-              CAL_DEVPATH, SER_FUNC_CAL);
+              "  reboot          <- required so no shell owns that port\n",
+              SER_FUNC_CAL);
       return -EBUSY;
     }
 
-  fd = open(CAL_DEVPATH, O_RDWR | O_NOCTTY | O_NONBLOCK);
+  fd = open(cal_port->devpath, O_RDWR | O_NOCTTY | O_NONBLOCK);
   if (fd < 0)
     {
-      fprintf(stderr, "cal: cannot open %s: %d%s\n", CAL_DEVPATH, errno,
+      fprintf(stderr, "cal: cannot open %s: %d%s\n", cal_port->devpath, errno,
               errno == ENOTCONN ? " (no USB host attached)" : "");
       return -errno;
     }
@@ -889,7 +908,8 @@ int cal_session(void)
       return ret;
     }
 
-  printf("cal: session open on %s - drive it from the GUI\n", CAL_DEVPATH);
+  printf("cal: session open on %s (%s) - drive it from the GUI\n",
+         cal_port->name, cal_port->devpath);
   ret = OK;
 
   while (!done)

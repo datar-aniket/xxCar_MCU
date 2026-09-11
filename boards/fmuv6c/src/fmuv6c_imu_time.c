@@ -6,9 +6,10 @@
  * Shared high-resolution clock for the FMUv6C onboard IMUs.
  *
  * TIM5 is a 32-bit APB1 timer and is otherwise unused by this board. It runs
- * freely at 1 MHz without channels, DMA, or interrupts. Every IMU DRDY ISR
- * reads the same counter, avoiding the 1 ms quantization of the NuttX system
- * tick without changing the system tick rate.
+ * freely at 1 MHz. Every IMU DRDY ISR reads the same counter, avoiding the
+ * 1 ms quantization of the NuttX system tick without changing the system tick
+ * rate. Matek optionally adds PPS input capture on TIM5_CH1 after this base
+ * clock is initialized.
  ****************************************************************************/
 
 #include <nuttx/config.h>
@@ -113,7 +114,12 @@ int fmuv6c_imu_time_initialize(void)
 
   syslog(LOG_INFO,
          "[sensors] TIM5 reserved as shared 1 MHz IMU timebase"
-         " (no IRQ/DMA/GPIO)\n");
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+         " (CH1 available for S1 PPS capture)\n"
+#else
+         " (no IRQ/DMA/GPIO)\n"
+#endif
+         );
   return OK;
 }
 

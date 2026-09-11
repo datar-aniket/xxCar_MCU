@@ -9,11 +9,12 @@
  *   ser start             apply the SER_* parameters now
  *   ser nsh <port|dev>    open a shell right now (does not persist). Takes a
  *                         port name or a device path:
- *                           ser nsh USB
+ *                           ser nsh USB0
+ *                           ser nsh USB1
  *                           ser nsh /dev/ttyACM0
  *                           ser nsh TELEM2
  *
- * The USB port only exists while a host is attached, so a shell on it waits for
+ * USB ports only exist while a host is attached, so a shell on one waits for
  * the cable and re-arms when it is pulled.
  *
  * TELEM1 always keeps a shell whatever the parameters say - NSH is the init
@@ -53,6 +54,8 @@ static FAR const char *serial_funcname(int32_t func)
       case SER_FUNC_MAVLINK:  return "MAVLink";
       case SER_FUNC_GPS:      return "GPS";
       case SER_FUNC_RC_IN:    return "RC";
+      case SER_FUNC_CAL:      return "CAL";
+      case SER_FUNC_COMPANION:return "Comp";
       default:                return "?";
     }
 }
@@ -63,7 +66,7 @@ static void serial_usage(void)
          "  status           show what each connector is set to\n"
          "  start            apply the SER_* parameters now\n"
          "  nsh <port|dev>   open a shell now, not persistent. Takes a port\n"
-         "                   name or a device: 'ser nsh USB', 'ser nsh TELEM2',\n"
+         "                   name or a device: 'ser nsh USB0', 'ser nsh TELEM2',\n"
          "                   'ser nsh /dev/ttyACM0'\n"
          "\n"
          "To move the shell permanently:\n"
@@ -145,21 +148,21 @@ int main(int argc, FAR char *argv[])
     {
       int ret;
 
-      /* Accept either a connector name ("USB", "telem2") or a raw device path
+      /* Accept either a connector name ("USB0", "telem2") or a raw device path
        * ("/dev/ttyACM0"), because both are natural things to type.
        */
 
       FAR const struct serial_port_s *ports = serial_ports();
-      int port = -1;
+      int port = serial_find(argv[2]);
       int i;
 
-      /* Resolve a connector name ("USB", "telem2") OR a device path
+      /* Resolve a connector name ("USB0", "telem2") OR a device path
        * ("/dev/ttyACM0") to the same port, so that either spelling goes through
        * the one-shell-per-port guard. Two shells on one tty split the input
        * between them and the port stops responding.
        */
 
-      for (i = 0; i < serial_port_count(); i++)
+      for (i = 0; port < 0 && i < serial_port_count(); i++)
         {
           if (strcasecmp(ports[i].name, argv[2]) == 0 ||
               strcmp(ports[i].devpath, argv[2]) == 0)

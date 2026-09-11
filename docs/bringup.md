@@ -1,14 +1,15 @@
 # Bring-up guide (Stage 1)
 
-Barebone NuttX on the Holybro Pixhawk 6C (FMUv6C): **NSH shell on TELEM1**, plus a
-**USB CDC-ACM raw data port** (`/dev/ttyACM0`) for the future ROS 2 / DDS link.
+Barebone NuttX on the Holybro Pixhawk 6C (FMUv6C): **NSH shell on TELEM1**, plus
+two independent **USB CDC-ACM ports**.
 
 ## Status — ✅ Stage 1 achieved on hardware
 - Builds/links at `0x08020000` (above the intact PX4 bootloader), packaged to `build/xxcar.px4` (board_id 56).
 - Flashes through the factory bootloader with `px4_uploader.py`; bootloader kept intact.
 - Boots to an interactive **`nsh>` on TELEM1 (UART7) @115200**.
-- **USB enumerates** as `/dev/ttyACM0` (VID `0x3162`/PID `0x0053` → `/dev/pixhawk_6c`), auto-connected at
-  boot by `stm32_bringup.c`. It is a raw serial data port (no shell), reserved for the Jetson link.
+- **USB enumerates** one composite device (VID `0x3162`/PID `0x0053`) with CDC
+  interfaces `00` and `02`. Firmware names them USB0 (`/dev/ttyACM0`, NSH by
+  default) and USB1 (`/dev/ttyACM1`, CAL by default).
 
 ### Known gotchas resolved during bring-up (keep these)
 - **USB clock:** sourced from **HSI48**, not PLL3 — NuttX waits for PLL3 lock in an unbounded loop, so a
@@ -70,15 +71,16 @@ TELEM1 (6-pin JST-GH) ↔ USB-TTL adapter. **VCC left unconnected.**
 ```bash
 picocom -b 115200 /dev/ttyUSB0        # TELEM1 console → nsh>
 ```
-1. `nsh> ?` lists builtins; `uname -a`, `free`, `ps`, `ls /dev` show `console`, `ttyS*`, `ttyACM0`.
-2. Host: `lsusb | grep 3162` and `ls /dev/ttyACM* /dev/pixhawk_6c` → the USB data port is present.
+1. `nsh> ?` lists builtins; `uname -a`, `free`, `ps`, `ls /dev` show `console`, `ttyS*`, `ttyACM0`, and `ttyACM1`.
+2. Host: `lsusb | grep 3162` and `ls /dev/ttyACM*` → both USB ports are present.
 3. Data-port loopback: `nsh> echo hello > /dev/ttyACM0`, and on the host read `/dev/ttyACM0` → "hello".
 4. Power-cycle without an app present: the bootloader port still enumerates (bootloader intact).
 
 ## udev (dev host)
 ```
-# running app  → /dev/pixhawk_6c  (VID 3162 / PID 0053)
-ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyACM*", ENV{ID_VENDOR_ID}=="3162", ENV{ID_MODEL_ID}=="0053", ENV{ID_USB_INTERFACE_NUM}=="00", SYMLINK+="pixhawk_6c", MODE="0666", GROUP="dialout"
+# running app: stable aliases for the two CDC interfaces
+ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyACM*", ENV{ID_VENDOR_ID}=="3162", ENV{ID_MODEL_ID}=="0053", ENV{ID_USB_INTERFACE_NUM}=="00", SYMLINK+="pixhawk_6c pixhawk_6c_usb0", MODE="0666", GROUP="dialout"
+ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyACM*", ENV{ID_VENDOR_ID}=="3162", ENV{ID_MODEL_ID}=="0053", ENV{ID_USB_INTERFACE_NUM}=="02", SYMLINK+="pixhawk_6c_usb1", MODE="0666", GROUP="dialout"
 # bootloader   → also aliased to /dev/pixhawk_6c  (VID 3185 / PID 0038)
 ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyACM*", ENV{ID_VENDOR_ID}=="3185", ENV{ID_MODEL_ID}=="0038", ENV{ID_USB_INTERFACE_NUM}=="00", SYMLINK+="pixhawk_6c", MODE="0666", GROUP="dialout"
 ```

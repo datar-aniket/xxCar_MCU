@@ -78,6 +78,8 @@ struct companion_status_s
   bool     utc_from_rtc;        /* offset came from the RTC, not a sync */
   bool     wall_clock_set;      /* CLOCK_REALTIME set from companion UTC */
   uint32_t rx_unsynced_stamp;   /* UTC arrived before a sync could use it */
+  uint32_t rx_link_test;        /* diagnostic echo requests received */
+  uint32_t tx_link_test;        /* diagnostic echo replies delivered */
   uint32_t est_seen;          /* estimator states actually read */
   uint32_t tx_no_state;       /* nothing new to send */
 

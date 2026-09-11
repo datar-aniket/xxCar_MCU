@@ -170,6 +170,9 @@ static int aux_daemon(int argc, FAR char *argv[])
   int baro_sub = -1;
   int mag_pub = -1;
   int baro_pub = -1;
+  int mag_fd = -1;
+  int baro_fd = -1;
+  int nfds = 0;
   int result = EXIT_FAILURE;
 
   memset(&status, 0, sizeof(status));
@@ -189,54 +192,65 @@ static int aux_daemon(int argc, FAR char *argv[])
   mag_meta = orb_get_meta("sensor_mag0");
   baro_meta = orb_get_meta("sensor_baro0");
 
-  if (mag_meta == NULL || baro_meta == NULL)
+  if (mag_meta != NULL)
     {
-      syslog(LOG_ERR, "[aux] no metadata for %s%s%s; is the driver up?\n",
-             mag_meta == NULL ? "sensor_mag0" : "",
-             mag_meta == NULL && baro_meta == NULL ? " and " : "",
-             baro_meta == NULL ? "sensor_baro0" : "");
-      goto out;
+      mag_sub = orb_subscribe_multi(mag_meta, 0);
     }
 
-  mag_sub = orb_subscribe_multi(mag_meta, 0);
-  baro_sub = orb_subscribe_multi(baro_meta, 0);
-
-  if (mag_sub < 0 || baro_sub < 0)
+  if (baro_meta != NULL)
     {
-      syslog(LOG_ERR, "[aux] cannot subscribe %s%s%s (errno %d)\n",
-             mag_sub < 0 ? "sensor_mag0" : "",
-             mag_sub < 0 && baro_sub < 0 ? " and " : "",
-             baro_sub < 0 ? "sensor_baro0" : "", errno);
+      baro_sub = orb_subscribe_multi(baro_meta, 0);
+    }
+
+  if (mag_sub < 0 && baro_sub < 0)
+    {
+      syslog(LOG_ERR, "[aux] neither magnetometer nor barometer is present\n");
       goto out;
     }
 
   /* The first code in the tree to honour these two parameters. */
 
-  orb_set_interval(mag_sub,
-                   rate_to_interval_us((int32_t)status.mag_rate_hz));
-  orb_set_interval(baro_sub,
-                   rate_to_interval_us((int32_t)status.baro_rate_hz));
+  if (mag_sub >= 0)
+    {
+      orb_set_interval(mag_sub,
+                       rate_to_interval_us((int32_t)status.mag_rate_hz));
+      mag_pub = vehicle_mag_advertise();
+    }
 
-  mag_pub = vehicle_mag_advertise();
-  baro_pub = vehicle_baro_advertise();
+  if (baro_sub >= 0)
+    {
+      orb_set_interval(baro_sub,
+                       rate_to_interval_us((int32_t)status.baro_rate_hz));
+      baro_pub = vehicle_baro_advertise();
+    }
 
   /* Name the topic that failed. uorb_msgs.c records that an unnamed "cannot
    * advertise" cost a flash cycle to diagnose.
    */
 
-  if (mag_pub < 0 || baro_pub < 0)
+  if ((mag_sub >= 0 && mag_pub < 0) || (baro_sub >= 0 && baro_pub < 0))
     {
       syslog(LOG_ERR, "[aux] cannot advertise %s%s%s (errno %d)\n",
-             mag_pub < 0 ? "vehicle_mag" : "",
-             mag_pub < 0 && baro_pub < 0 ? " and " : "",
-             baro_pub < 0 ? "vehicle_baro" : "", errno);
+             mag_sub >= 0 && mag_pub < 0 ? "vehicle_mag" : "",
+             mag_sub >= 0 && mag_pub < 0 &&
+             baro_sub >= 0 && baro_pub < 0 ? " and " : "",
+             baro_sub >= 0 && baro_pub < 0 ? "vehicle_baro" : "", errno);
       goto out;
     }
 
-  fds[0].fd = mag_sub;
-  fds[0].events = POLLIN;
-  fds[1].fd = baro_sub;
-  fds[1].events = POLLIN;
+  if (mag_sub >= 0)
+    {
+      mag_fd = nfds;
+      fds[nfds].fd = mag_sub;
+      fds[nfds++].events = POLLIN;
+    }
+
+  if (baro_sub >= 0)
+    {
+      baro_fd = nfds;
+      fds[nfds].fd = baro_sub;
+      fds[nfds++].events = POLLIN;
+    }
 
   g_running = true;
   status.running = true;
@@ -249,19 +263,19 @@ static int aux_daemon(int argc, FAR char *argv[])
 
   while (!g_should_stop)
     {
-      int ready = poll(fds, 2, AUX_POLL_MS);
+      int ready = poll(fds, nfds, AUX_POLL_MS);
 
       if (ready < 0 && errno != EINTR)
         {
           break;
         }
 
-      if ((fds[0].revents & POLLIN) != 0)
+      if (mag_fd >= 0 && (fds[mag_fd].revents & POLLIN) != 0)
         {
           handle_mag(mag_meta, mag_sub, mag_pub, &frame, &status);
         }
 
-      if ((fds[1].revents & POLLIN) != 0)
+      if (baro_fd >= 0 && (fds[baro_fd].revents & POLLIN) != 0)
         {
           handle_baro(baro_meta, baro_sub, baro_pub, &status);
         }

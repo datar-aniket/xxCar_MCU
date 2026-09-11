@@ -14,7 +14,21 @@ set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO"
 
-PX4="build/xxcar.px4"
+BOARD_ARG="${BOARD:-pixhawk6c}"
+case "${BOARD_ARG,,}" in
+  pixhawk6c|pixhawk-6c|fmuv6c)
+    BOARD_NAME="pixhawk6c"
+    ;;
+  matek|matekh743|matekh743-slim-v4|h743-slim-v4)
+    BOARD_NAME="matekh743"
+    ;;
+  *)
+    echo "error: unknown BOARD '$BOARD_ARG' (use pixhawk6c or matekh743)" >&2
+    exit 2
+    ;;
+esac
+
+PX4="build/$BOARD_NAME/xxcar_$BOARD_NAME.px4"
 LOG="$(mktemp)"
 trap 'rm -f "$LOG"' EXIT
 fail=0
@@ -34,8 +48,8 @@ echo "=== firmware build ==="
 # stamp first, so "newer than this" proves the artifact was rebuilt
 STAMP="$(mktemp)"; sleep 1
 
-if ./tools/build.sh >"$LOG" 2>&1; then
-  echo "  build.sh exited 0"
+if ./tools/build.sh "$BOARD_NAME" >"$LOG" 2>&1; then
+  echo "  build.sh $BOARD_NAME exited 0"
 else
   echo "  build.sh FAILED (exit $?) — last lines:"
   grep -iE 'error|undefined reference|No rule|cannot find' "$LOG" | tail -12 \

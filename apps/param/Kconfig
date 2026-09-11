@@ -7,9 +7,9 @@ config XXCAR_PARAM
 	tristate "param: configuration parameter system"
 	default n
 	---help---
-		Typed, bounded, named parameters with defaults, persisted to the
-		microSD as human-readable text (/fs/microsd/params.txt) so they can
-		be edited from a Linux host over USB mass storage.
+		Typed, bounded, named parameters with defaults. FMUv6C persists them
+		to microSD as human-readable text. MatekH743 uses the final two
+		internal-flash sectors and optionally mirrors them to the SD card.
 
 		Backs the serial port functions (incl. which port runs NSH), RC
 		protocol, sensor rates, MAVLink IDs, logging selection and sensor

@@ -59,11 +59,22 @@ direction fails to route rather than half-working.
 | 6 | `TIMESYNC_END` | companion → board | 16 |
 | 7 | `DIRECT_CONTROL` | companion → board | 24 |
 | 8 | `DATUM_RESET` | companion → board | 4 |
+| 9 | `LINK_TEST_REQ` | companion → board | 16..244 |
 | 16 | `VEHICLE_STATE` | board → companion | 96 |
+| 17 | `LINK_TEST_REP` | board → companion | same as request |
 
 An unknown id is counted and ignored — that is a companion newer than the
 firmware, which is benign. A **known** id with the wrong length is counted
 separately and is not benign: it means the two ends disagree about a format.
+
+`LINK_TEST_REQ` is the GUI diagnostic channel. The board echoes its payload
+unchanged as `LINK_TEST_REP`; it does not interpret or timestamp it. The first
+16 bytes are `<uint64 host_monotonic_us, uint32 sequence, uint8 kind, uint8
+version, uint16 reserved>` in little endian. Kind 0 uses a header-only packet
+for round-trip latency; kind 1 fills a 244-byte payload with a deterministic
+pattern for verified bandwidth. RTT therefore uses one host monotonic clock
+and neither depends on timesync nor moves when NTP corrects UTC. The bandwidth
+result counts only byte-for-byte verified echoes, proving both link directions.
 
 ## 4. Byte order
 

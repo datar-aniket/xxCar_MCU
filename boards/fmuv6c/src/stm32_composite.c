@@ -5,12 +5,13 @@
  *
  * USB device with two selectable function sets:
  *
- *   configid 0 (default) : CDC/ACM only          - board owns the microSD,
- *                                                  mounted at /fs/microsd
- *   configid 1           : CDC/ACM + Mass Storage - host owns the microSD
+ *   configid 0 (default) : 2 x CDC/ACM             - board owns the microSD,
+ *                                                    mounted at /fs/microsd
+ *   configid 1           : 2 x CDC/ACM + Mass Storage - host owns the microSD
  *
- * The CDC/ACM serial data port exists in BOTH, so the host always has the
- * serial port. sdmsc on/off swaps the function set, which re-enumerates USB.
+ * Both CDC/ACM serial data ports exist in BOTH configurations, so the host
+ * always has two independent serial pipes. sdmsc on/off swaps the function
+ * set, which re-enumerates USB.
  *
  * Why not simply keep MSC enumerated all the time and just bind/unbind the LUN
  * (which would avoid re-enumeration)? Because NuttX's SCSI layer mishandles an
@@ -52,7 +53,8 @@
 #define FMUV6C_CONFIGID_CDC     0   /* CDC/ACM only            */
 #define FMUV6C_CONFIGID_CDC_MSC 1   /* CDC/ACM + mass storage  */
 
-#define COMPOSITE_MAXDEV        2   /* CDC + MSC */
+#define COMPOSITE_NCDC          2
+#define COMPOSITE_MAXDEV        3   /* CDC0 + CDC1 + MSC */
 
 /****************************************************************************
  * Private Data
@@ -135,27 +137,33 @@ static FAR void *board_composite_build(int configid)
   int dev_idx  = 0;
   int epin     = 1;
   int epout    = 1;
+  int cdc_minor;
 
 #ifdef CONFIG_CDCACM_COMPOSITE
-  /* CDC/ACM: present in every configuration, so the serial port never goes
-   * away.
+  /* Two CDC/ACM functions are present in every configuration. Each function
+   * consumes two interfaces, two IN endpoints and one OUT endpoint. The H743
+   * OTG-FS driver exposes EP0..EP6, leaving EP5 available for MSC when it is
+   * enabled.
    */
 
-  cdcacm_get_composite_devdesc(&dev[dev_idx]);
+  for (cdc_minor = 0; cdc_minor < COMPOSITE_NCDC; cdc_minor++)
+    {
+      cdcacm_get_composite_devdesc(&dev[dev_idx]);
 
-  dev[dev_idx].classobject      = cdcacm_classobject;
-  dev[dev_idx].uninitialize     = cdcacm_uninitialize;
-  dev[dev_idx].devinfo.ifnobase = ifnobase;
-  dev[dev_idx].minor            = 0;
-  dev[dev_idx].devinfo.strbase  = strbase;
+      dev[dev_idx].classobject      = cdcacm_classobject;
+      dev[dev_idx].uninitialize     = cdcacm_uninitialize;
+      dev[dev_idx].devinfo.ifnobase = ifnobase;
+      dev[dev_idx].minor            = cdc_minor;
+      dev[dev_idx].devinfo.strbase  = strbase;
 
-  dev[dev_idx].devinfo.epno[CDCACM_EP_INTIN_IDX]   = epin++;
-  dev[dev_idx].devinfo.epno[CDCACM_EP_BULKIN_IDX]  = epin++;
-  dev[dev_idx].devinfo.epno[CDCACM_EP_BULKOUT_IDX] = epout++;
+      dev[dev_idx].devinfo.epno[CDCACM_EP_INTIN_IDX]   = epin++;
+      dev[dev_idx].devinfo.epno[CDCACM_EP_BULKIN_IDX]  = epin++;
+      dev[dev_idx].devinfo.epno[CDCACM_EP_BULKOUT_IDX] = epout++;
 
-  ifnobase += dev[dev_idx].devinfo.ninterfaces;
-  strbase  += dev[dev_idx].devinfo.nstrings;
-  dev_idx  += 1;
+      ifnobase += dev[dev_idx].devinfo.ninterfaces;
+      strbase  += dev[dev_idx].devinfo.nstrings;
+      dev_idx  += 1;
+    }
 #endif
 
 #ifdef CONFIG_USBMSC_COMPOSITE

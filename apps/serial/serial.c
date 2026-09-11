@@ -55,17 +55,26 @@
  * Private Data
  ****************************************************************************/
 
-/* The FMUv6C connector map.
+/* Board UART maps.
  *
- * Cross-checked against PX4's boards/px4/fmu-v6c. The ttyS numbering is only
- * true because CONFIG_STM32H7_SERIAL_DISABLE_REORDERING=y - see board.h.
- *
- * USART6 is absent on purpose: it is the PX4IO link, not an assignable port.
- * The RC IN connector is absent for the same reason - it belongs to PX4IO.
+ * The ttyS numbering is stable because serial reordering is disabled. USART6
+ * belongs to PX4IO on FMUv6C, but is a direct RC UART on Matek.
  */
 
 static const struct serial_port_s g_ports[] =
 {
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+  /* Logical names preserve the existing SER_* parameter interface.  The UART
+   * names are also printed by `ser status`, making the Matek pad unambiguous.
+   */
+  { "GPS1",   "/dev/ttyS0", "USART1", "SER_GPS1_FUNC", "SER_GPS1_BAUD", false, false },
+  { "TELEM3", "/dev/ttyS1", "USART2", "SER_TEL3_FUNC", "SER_TEL3_BAUD", false, false },
+  { "DEBUG",  "/dev/ttyS2", "USART3", "SER_DBG_FUNC",  "SER_DBG_BAUD",  false, false },
+  { "TELEM2", "/dev/ttyS3", "UART4",  "SER_TEL2_FUNC", "SER_TEL2_BAUD", false, false },
+  { "RCIN",   "/dev/ttyS4", "USART6", "SER_RC_FUNC",   "SER_RC_BAUD",   false, false },
+  { "TELEM1", "/dev/ttyS5", "UART7",  "SER_TEL1_FUNC", "SER_TEL1_BAUD", true,  false },
+  { "GPS2",   "/dev/ttyS6", "UART8",  "SER_GPS2_FUNC", "SER_GPS2_BAUD", false, false },
+#else
   /* name      devpath        uart      func            baud             cons   rem */
   { "GPS1",   "/dev/ttyS0",  "USART1", "SER_GPS1_FUNC", "SER_GPS1_BAUD", false, false },
   { "TELEM3", "/dev/ttyS1",  "USART2", "SER_TEL3_FUNC", "SER_TEL3_BAUD", false, false },
@@ -73,15 +82,17 @@ static const struct serial_port_s g_ports[] =
   { "TELEM2", "/dev/ttyS3",  "UART5",  "SER_TEL2_FUNC", "SER_TEL2_BAUD", false, false },
   { "TELEM1", "/dev/ttyS5",  "UART7",  "SER_TEL1_FUNC", "SER_TEL1_BAUD", true,  false },
   { "GPS2",   "/dev/ttyS6",  "UART8",  "SER_GPS2_FUNC", "SER_GPS2_BAUD", false, false },
+#endif
 
-  /* The USB CDC/ACM port. Not a UART, so it differs on two counts:
+  /* The USB CDC/ACM ports. Not UARTs, so they differ on two counts:
    *
    *   - no baud rate. The host owns the line coding and the device ignores it,
    *     so there is no SER_USB_BAUD to set - hence NULL.
    *   - removable. It only exists while a host is attached.
    */
 
-  { "USB",    "/dev/ttyACM0", "OTG FS", "SER_USB_FUNC", NULL,            false, true  },
+  { "USB0",   "/dev/ttyACM0", "OTG FS if00", "SER_USB_FUNC",  NULL, false, true },
+  { "USB1",   "/dev/ttyACM1", "OTG FS if02", "SER_USB2_FUNC", NULL, false, true },
 };
 
 #define SERIAL_NPORTS ((int)(sizeof(g_ports) / sizeof(g_ports[0])))
@@ -320,6 +331,15 @@ int serial_find(FAR const char *name)
   if (name == NULL)
     {
       return -EINVAL;
+    }
+
+  /* Preserve the original `ser nsh USB` spelling after naming the two
+   * interfaces USB0 and USB1.
+   */
+
+  if (strcasecmp(name, "USB") == 0)
+    {
+      name = "USB0";
     }
 
   for (i = 0; i < SERIAL_NPORTS; i++)

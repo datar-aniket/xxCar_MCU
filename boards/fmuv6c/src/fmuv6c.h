@@ -121,18 +121,37 @@
  * following definitions assume the default Solder Bridges are installed.
  */
 
-#define GPIO_LD1       (GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_SPEED_50MHz | \
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+/* Matek LEDs are active-low; there is no red LED.  Red aliases blue for the
+ * NuttX panic indication so BOARD_NLEDS and the shared LED code stay stable.
+ */
+#  define GPIO_LD1     (GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_SPEED_50MHz | \
+                        GPIO_OUTPUT_SET | GPIO_PORTE | GPIO_PIN4)
+#  define GPIO_LD2     (GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_SPEED_50MHz | \
+                        GPIO_OUTPUT_SET | GPIO_PORTE | GPIO_PIN3)
+#  define GPIO_LD3     GPIO_LD2
+#  define XXCAR_LED_ACTIVE_LOW 1
+#else
+#  define GPIO_LD1     (GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_SPEED_50MHz | \
                         GPIO_OUTPUT_CLEAR | GPIO_PORTB | GPIO_PIN0)
-#define GPIO_LD2       (GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_SPEED_50MHz | \
+#  define GPIO_LD2     (GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_SPEED_50MHz | \
                         GPIO_OUTPUT_CLEAR | GPIO_PORTB | GPIO_PIN7)
-#define GPIO_LD3       (GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_SPEED_50MHz | \
+#  define GPIO_LD3     (GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_SPEED_50MHz | \
                         GPIO_OUTPUT_CLEAR | GPIO_PORTB | GPIO_PIN14)
+#endif
 
 #define GPIO_LED_GREEN GPIO_LD1
 #define GPIO_LED_BLUE  GPIO_LD2
 #define GPIO_LED_RED   GPIO_LD3
 
 #define LED_DRIVER_PATH "/dev/userleds"
+
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+/* Keep the onboard CAN transceiver out of silent mode. */
+#  define GPIO_CAN1_SILENT \
+    (GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_SPEED_2MHz | GPIO_OUTPUT_CLEAR | \
+     GPIO_PORTD | GPIO_PIN3)
+#endif
 
 /* BUTTONS
  *
@@ -149,16 +168,20 @@
 
 /* USB OTG FS
  *
- * PA9  OTG_FS_VBUS   VBUS sensing
- *
- * NOTE: The FMUv6C USB port is bus-powered device-only, so there is no external
- * VBUS power switch or over-current input. The PWRON/OVER pins below are unused
- * placeholders on a valid port (the 100-pin STM32H743VI has no Port F/G) purely
- * so the shared nucleo stm32_usb.c compiles. TODO(hw): confirm VBUS-sense pin.
+ * FMUv6C has a GPIO VBUS input.  Matek H743-SLIM does not: its USB device uses
+ * PA11/PA12 and NuttX's forced B-session-valid mode, while PE2 is EXT_CS2.
+ * The Matek definition below is retained only to satisfy interfaces which
+ * require the symbol; stm32_usbinitialize() deliberately does not configure
+ * or read it.  PWRON/OVER are unused device-mode placeholders.
  */
 
-#define GPIO_OTGFS_VBUS   (GPIO_INPUT|GPIO_FLOAT|GPIO_SPEED_100MHz| \
-                           GPIO_OPENDRAIN|GPIO_PORTA|GPIO_PIN9)
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+#  define GPIO_OTGFS_VBUS (GPIO_INPUT | GPIO_PULLDOWN | GPIO_SPEED_100MHz | \
+                           GPIO_PORTE | GPIO_PIN2)
+#else
+#  define GPIO_OTGFS_VBUS (GPIO_INPUT | GPIO_FLOAT | GPIO_SPEED_100MHz | \
+                           GPIO_OPENDRAIN | GPIO_PORTA | GPIO_PIN9)
+#endif
 
 #define GPIO_OTGFS_PWRON  (GPIO_OUTPUT|GPIO_FLOAT|GPIO_SPEED_100MHz|  \
                            GPIO_PUSHPULL|GPIO_PORTC|GPIO_PIN6)
@@ -190,12 +213,19 @@
  * defined for completeness and future monitoring, not driven.
  */
 
-#define GPIO_VDD_5V_PERIPH_nEN  (GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_SPEED_2MHz | \
-                                 GPIO_OUTPUT_CLEAR | GPIO_PORTE | GPIO_PIN2)
-#define GPIO_VDD_5V_PERIPH_nOC  (GPIO_INPUT | GPIO_FLOAT | GPIO_PORTE | GPIO_PIN3)
-#define GPIO_VDD_5V_HIPOWER_nEN (GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_SPEED_2MHz | \
-                                 GPIO_OUTPUT_CLEAR | GPIO_PORTC | GPIO_PIN10)
-#define GPIO_VDD_5V_HIPOWER_nOC (GPIO_INPUT | GPIO_FLOAT | GPIO_PORTC | GPIO_PIN11)
+#ifndef CONFIG_XXCAR_BOARD_MATEKH743
+#  define XXCAR_BOARD_HAS_SWITCHED_POWER 1
+#  define GPIO_VDD_5V_PERIPH_nEN \
+    (GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_SPEED_2MHz | GPIO_OUTPUT_CLEAR | \
+     GPIO_PORTE | GPIO_PIN2)
+#  define GPIO_VDD_5V_PERIPH_nOC \
+    (GPIO_INPUT | GPIO_FLOAT | GPIO_PORTE | GPIO_PIN3)
+#  define GPIO_VDD_5V_HIPOWER_nEN \
+    (GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_SPEED_2MHz | GPIO_OUTPUT_CLEAR | \
+     GPIO_PORTC | GPIO_PIN10)
+#  define GPIO_VDD_5V_HIPOWER_nOC \
+    (GPIO_INPUT | GPIO_FLOAT | GPIO_PORTC | GPIO_PIN11)
+#endif
 
 /* NRF24L01
  * CS  - PA4
@@ -236,24 +266,43 @@
 
 #define NUCLEOH743ZI_PWMTIMER 1
 
-/* SPI1 - internal IMU bus chip-selects (active-low) and DRDY inputs.
- * Verified against PX4 fmu-v6c and live on the board.
+/* Internal IMU chip-selects (active-low) and DRDY inputs.
+ * Verified against PX4 fmu-v6c and the Matek H743 target definitions.
  *
- *   ICM-42688-P  : CS PC13, DRDY PE6   (primary IMU)
- *   BMI088 accel : CS PC15, DRDY PE4
- *   BMI088 gyro  : CS PC14, DRDY PE5
+ *   FMUv6C ICM-42688-P : SPI1 CS PC13, DRDY PE6
+ *   FMUv6C BMI088 accel: SPI1 CS PC15, DRDY PE4
+ *   FMUv6C BMI088 gyro : SPI1 CS PC14, DRDY PE5
+ *   Matek primary      : SPI1 CS PC15, DRDY PB2
+ *   Matek secondary    : SPI4 CS PC13, no usable DRDY connection
  */
 
-#define GPIO_SPI1_CS_ICM42688     (GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_SPEED_50MHz | \
-                                   GPIO_OUTPUT_SET | GPIO_PORTC | GPIO_PIN13)
-#define GPIO_SPI1_CS_BMI088_ACCEL (GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_SPEED_50MHz | \
-                                   GPIO_OUTPUT_SET | GPIO_PORTC | GPIO_PIN15)
-#define GPIO_SPI1_CS_BMI088_GYRO  (GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_SPEED_50MHz | \
-                                   GPIO_OUTPUT_SET | GPIO_PORTC | GPIO_PIN14)
-
-#define GPIO_DRDY_ICM42688        (GPIO_INPUT | GPIO_FLOAT | GPIO_PORTE | GPIO_PIN6)
-#define GPIO_DRDY_BMI088_ACCEL    (GPIO_INPUT | GPIO_FLOAT | GPIO_PORTE | GPIO_PIN4)
-#define GPIO_DRDY_BMI088_GYRO     (GPIO_INPUT | GPIO_FLOAT | GPIO_PORTE | GPIO_PIN5)
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+#  define GPIO_SPI1_CS_ICM42688 \
+    (GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_SPEED_50MHz | GPIO_OUTPUT_SET | \
+     GPIO_PORTC | GPIO_PIN15)
+#  define GPIO_SPI4_CS_ICM42688 \
+    (GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_SPEED_50MHz | GPIO_OUTPUT_SET | \
+     GPIO_PORTC | GPIO_PIN13)
+#  define GPIO_DRDY_ICM42688 \
+    (GPIO_INPUT | GPIO_FLOAT | GPIO_PORTB | GPIO_PIN2)
+#  define GPIO_DRDY_ICM42688_2 0u
+#else
+#  define GPIO_SPI1_CS_ICM42688 \
+    (GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_SPEED_50MHz | GPIO_OUTPUT_SET | \
+     GPIO_PORTC | GPIO_PIN13)
+#  define GPIO_SPI1_CS_BMI088_ACCEL \
+    (GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_SPEED_50MHz | GPIO_OUTPUT_SET | \
+     GPIO_PORTC | GPIO_PIN15)
+#  define GPIO_SPI1_CS_BMI088_GYRO \
+    (GPIO_OUTPUT | GPIO_PUSHPULL | GPIO_SPEED_50MHz | GPIO_OUTPUT_SET | \
+     GPIO_PORTC | GPIO_PIN14)
+#  define GPIO_DRDY_ICM42688 \
+    (GPIO_INPUT | GPIO_FLOAT | GPIO_PORTE | GPIO_PIN6)
+#  define GPIO_DRDY_BMI088_ACCEL \
+    (GPIO_INPUT | GPIO_FLOAT | GPIO_PORTE | GPIO_PIN4)
+#  define GPIO_DRDY_BMI088_GYRO \
+    (GPIO_INPUT | GPIO_FLOAT | GPIO_PORTE | GPIO_PIN5)
+#endif
 
 /* TIM5 is reserved as the IMU timestamp timebase. It runs as a pinless,
  * interrupt-free 1 MHz 32-bit counter; do not enable a NuttX TIM5 lower-half,
@@ -269,13 +318,20 @@
 #define FMUV6C_SPIDEV_BMI088_ACCEL 0
 #define FMUV6C_SPIDEV_BMI088_GYRO  1
 #define FMUV6C_SPIDEV_ICM42688     0  /* SPIDEV_IMU(0) */
+#define MATEKH743_SPIDEV_ICM42688_2 0  /* SPI4 has a separate select hook */
 
 /* I2C bus numbers */
 
-#define FMUV6C_I2C_INTERNAL 4   /* MS5611 baro + IST8310 mag + EEPROM */
-#define FMUV6C_I2C_EXTERNAL 2   /* external I2C connector */
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+#  define FMUV6C_I2C_INTERNAL 2 /* onboard DPS368 */
+#  define FMUV6C_I2C_EXTERNAL 1 /* external compass/I2C pads */
+#else
+#  define FMUV6C_I2C_INTERNAL 4 /* MS5611 + IST8310 + EEPROM */
+#  define FMUV6C_I2C_EXTERNAL 2 /* external I2C connector */
+#endif
 
-/* microSD (SDMMC2). Single source of truth for the mountpoint: logs, params,
+/* microSD (SDMMC2 on FMUv6C, SDMMC1 on Matek). Single source of truth for the
+ * mountpoint: logs, params,
  * config and the USB mass-storage export all refer to this.
  */
 
@@ -293,6 +349,7 @@ enum fmuv6c_secondary_imu_e
   FMUV6C_SECONDARY_IMU_UNKNOWN = 0,
   FMUV6C_SECONDARY_IMU_BMI055,
   FMUV6C_SECONDARY_IMU_BMI088,
+  FMUV6C_SECONDARY_IMU_ICM42688,
 };
 
 struct fmuv6c_sensor_probe_s
@@ -301,6 +358,7 @@ struct fmuv6c_sensor_probe_s
   uint8_t                     icm42688_id;
   uint8_t                     secondary_accel_id;
   uint8_t                     secondary_gyro_id;
+  uint8_t                     baro_id;
   uint8_t                     failures;
 };
 

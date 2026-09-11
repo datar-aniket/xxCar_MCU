@@ -37,12 +37,18 @@
 void stm32_spidev_initialize(void)
 {
   stm32_configgpio(GPIO_SPI1_CS_ICM42688);
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+  stm32_configgpio(GPIO_SPI4_CS_ICM42688);
+#else
   stm32_configgpio(GPIO_SPI1_CS_BMI088_ACCEL);
   stm32_configgpio(GPIO_SPI1_CS_BMI088_GYRO);
+#endif
 
   stm32_configgpio(GPIO_DRDY_ICM42688);
+#ifndef CONFIG_XXCAR_BOARD_MATEKH743
   stm32_configgpio(GPIO_DRDY_BMI088_ACCEL);
   stm32_configgpio(GPIO_DRDY_BMI088_GYRO);
+#endif
 }
 
 /****************************************************************************
@@ -61,6 +67,7 @@ void stm32_spi1select(struct spi_dev_s *dev, uint32_t devid, bool selected)
         stm32_gpiowrite(GPIO_SPI1_CS_ICM42688, !selected);
         break;
 
+#ifndef CONFIG_XXCAR_BOARD_MATEKH743
       case SPIDEV_ACCELEROMETER(FMUV6C_SPIDEV_BMI088_ACCEL):
         stm32_gpiowrite(GPIO_SPI1_CS_BMI088_ACCEL, !selected);
         break;
@@ -68,6 +75,7 @@ void stm32_spi1select(struct spi_dev_s *dev, uint32_t devid, bool selected)
       case SPIDEV_ACCELEROMETER(FMUV6C_SPIDEV_BMI088_GYRO):
         stm32_gpiowrite(GPIO_SPI1_CS_BMI088_GYRO, !selected);
         break;
+#endif
 
       default:
         break;
@@ -80,3 +88,20 @@ uint8_t stm32_spi1status(struct spi_dev_s *dev, uint32_t devid)
 }
 
 #endif /* CONFIG_STM32H7_SPI1 */
+
+#if defined(CONFIG_STM32H7_SPI4)
+
+void stm32_spi4select(struct spi_dev_s *dev, uint32_t devid, bool selected)
+{
+  if (devid == SPIDEV_IMU(MATEKH743_SPIDEV_ICM42688_2))
+    {
+      stm32_gpiowrite(GPIO_SPI4_CS_ICM42688, !selected);
+    }
+}
+
+uint8_t stm32_spi4status(struct spi_dev_s *dev, uint32_t devid)
+{
+  return 0;
+}
+
+#endif /* CONFIG_STM32H7_SPI4 */

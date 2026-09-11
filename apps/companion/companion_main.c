@@ -93,6 +93,12 @@ static void print_status(void)
          s.parser.crc_errors, s.parser.unknown_id, s.parser.bad_length,
          s.rx_publish_errors);
 
+  if (s.rx_link_test > 0 || s.tx_link_test > 0)
+    {
+      printf("  link test  requests %" PRIu32 "  echoed %" PRIu32 "\n",
+             s.rx_link_test, s.tx_link_test);
+    }
+
   if (s.rx_datum_reset > 0 || s.rx_datum_duplicate > 0 ||
       s.datum_reset_pending)
     {

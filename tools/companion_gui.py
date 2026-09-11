@@ -3,7 +3,8 @@
 
 Sends an EXTERNAL_POSE with hand-entered x, y and yaw, sends DIRECT_CONTROL
 from a pair of sliders, and shows the estimator pose coming back as six
-numbers.
+numbers. The link-test panel measures end-to-end echo RTT and verified
+full-duplex bandwidth without relying on UTC or board clock synchronisation.
 
 For testing the link and the fusion, not for flying anything: the pose it
 sends is whatever you typed, which is exactly what makes it useful for
@@ -23,7 +24,9 @@ import datetime
 import math
 import pathlib
 import queue
+import statistics
 import sys
+import threading
 import time
 import tkinter as tk
 from tkinter import ttk
@@ -56,7 +59,7 @@ class App(tk.Tk):
         super().__init__()
         self.title("companion link")
         self.configure(bg=BG)
-        self.geometry("760x820")
+        self.geometry("800x960")
 
         self.q = queue.Queue()
         self.link = None
@@ -77,7 +80,24 @@ class App(tk.Tk):
         # that period spends half its life on the wrong side of the deadline.
         self._drive_job = None
 
+        # Link diagnostics are matched by sequence and verified byte for
+        # byte. The serial reader calls _observe_frame directly so a
+        # bandwidth sender can refill its bounded window without waiting for
+        # Tk's display timer.
+        self._diag_cv = threading.Condition()
+        self._diag_mode = None
+        self._diag_pending = {}
+        self._diag_corrupt = 0
+        self._diag_seq = 0
+        self._diag_generation = 0
+        self._lat_job = None
+        self._lat_samples = []
+        self._lat_sent = 0
+        self._lat_target = 0
+        self._bw_stop = threading.Event()
+
         self._build(port, baud)
+        self.protocol("WM_DELETE_WINDOW", self._close_window)
         self.after(50, self._drain)
 
     # ---- layout ---------------------------------------------------------
@@ -266,6 +286,45 @@ class App(tk.Tk):
         self.drive_lbl_tx = self._label(drow, "idle")
         self.drive_lbl_tx.pack(side="left", padx=6)
 
+        # ---- link diagnostics ------------------------------------------
+
+        diag = tk.LabelFrame(self, text=" link test ", bg=PANEL, fg=MUTED,
+                             relief="flat", padx=12, pady=8)
+        diag.pack(fill="x", padx=12, pady=6)
+
+        self.lat_count_var = tk.StringVar(value="40")
+        self.bw_duration_var = tk.StringVar(value="3.0")
+        self._label(diag, "latency packets").grid(row=0, column=0,
+                                                   sticky="e")
+        tk.Entry(diag, textvariable=self.lat_count_var, width=6, bg=BG,
+                 fg=FG, insertbackground=FG, relief="flat").grid(
+                     row=0, column=1, padx=6)
+        tk.Button(diag, text="test latency", command=self._start_latency,
+                  bg=ACCENT, fg="#08111f", relief="flat", padx=12).grid(
+                      row=0, column=2, padx=6)
+
+        self._label(diag, "bandwidth seconds").grid(row=0, column=3,
+                                                     sticky="e", padx=(18, 0))
+        tk.Entry(diag, textvariable=self.bw_duration_var, width=6, bg=BG,
+                 fg=FG, insertbackground=FG, relief="flat").grid(
+                     row=0, column=4, padx=6)
+        tk.Button(diag, text="test bandwidth", command=self._start_bandwidth,
+                  bg=ACCENT, fg="#08111f", relief="flat", padx=12).grid(
+                      row=0, column=5, padx=6)
+        tk.Button(diag, text="stop", command=self._cancel_diagnostics,
+                  bg=PANEL, fg=FG, relief="flat", padx=10).grid(
+                      row=0, column=6, padx=(6, 0))
+
+        self.diag_lbl = self._label(
+            diag, "idle - tests use a board echo; clock sync is not required")
+        self.diag_lbl.grid(row=1, column=0, columnspan=7, sticky="w",
+                           pady=(7, 0))
+        self._label(
+            diag,
+            "Bandwidth test saturates the companion link; stop the vehicle "
+            "and other high-rate traffic first.", BAD, size=8).grid(
+                row=2, column=0, columnspan=7, sticky="w", pady=(3, 0))
+
         # ---- receive ----------------------------------------------------
 
         recv = tk.LabelFrame(self, text=" estimator pose ", bg=PANEL,
@@ -319,6 +378,7 @@ class App(tk.Tk):
             # running would spend every tick failing to send, and the panel
             # would still be showing the last command it managed.
             self._stop_drive()
+            self._cancel_diagnostics()
             self.link.close()
             self.link = None
             self.open_btn.configure(text="open")
@@ -328,6 +388,7 @@ class App(tk.Tk):
         try:
             self.link = Link(self.port_var.get(), int(self.baud_var.get()),
                              self.q)
+            self.link.frame_observer = self._observe_frame
             self.link.start()
         except Exception as exc:
             self.state_lbl.configure(text=str(exc)[:44], fg=BAD)
@@ -335,6 +396,13 @@ class App(tk.Tk):
 
         self.open_btn.configure(text="close")
         self.state_lbl.configure(text="open", fg=GOOD)
+
+    def _close_window(self):
+        self._stop_drive()
+        self._cancel_diagnostics()
+        if self.link:
+            self.link.close()
+        self.destroy()
 
     def _bump(self):
         self.reset_counter = (self.reset_counter + 1) & 0xFF
@@ -506,6 +574,235 @@ class App(tk.Tk):
                   f"{' A' if current else ''}"),
             fg=GOOD if self.throttle_var.get() == 0.0 else ACCENT)
 
+    # ---- latency / bandwidth ------------------------------------------
+
+    def _next_diag_seq(self):
+        self._diag_seq = (self._diag_seq + 1) & 0xFFFFFFFF
+        return self._diag_seq
+
+    def _begin_diagnostic(self, mode):
+        if not self.link:
+            self.diag_lbl.configure(text="open a port first", fg=BAD)
+            return False
+        self._cancel_diagnostics(show=False)
+        with self._diag_cv:
+            self._diag_generation += 1
+            self._diag_mode = mode
+            self._diag_pending.clear()
+            self._diag_corrupt = 0
+            return self._diag_generation
+
+    def _observe_frame(self, msg_id, body, rx_us):
+        """Runs on the serial-reader thread; never touches Tk widgets."""
+        if msg_id != comp_link.MSG_LINK_TEST_REP:
+            return
+
+        try:
+            decoded = comp_link.decode_link_test(body)
+        except ValueError:
+            with self._diag_cv:
+                self._diag_corrupt += 1
+                self._diag_cv.notify_all()
+            return
+
+        with self._diag_cv:
+            item = self._diag_pending.pop(decoded["sequence"], None)
+            if item is None:
+                return
+            if item["body"] != body or item["kind"] != decoded["kind"]:
+                self._diag_corrupt += 1
+            elif decoded["kind"] == comp_link.LINK_TEST_LATENCY:
+                self._lat_samples.append(
+                    max(0, rx_us - decoded["timestamp_us"]) / 1000.0)
+            else:
+                item["rx_us"] = rx_us
+                self._bw_received.append(item)
+            self._diag_cv.notify_all()
+
+    def _start_latency(self):
+        try:
+            count = int(self.lat_count_var.get())
+            if not 1 <= count <= 1000:
+                raise ValueError
+        except ValueError:
+            self.diag_lbl.configure(text="latency count must be 1..1000",
+                                    fg=BAD)
+            return
+        if self._begin_diagnostic("latency") is False:
+            return
+
+        self._lat_samples = []
+        self._lat_sent = 0
+        self._lat_target = count
+        self.diag_lbl.configure(text=f"latency: 0/{count}", fg=MUTED)
+        self._latency_tick()
+
+    def _latency_tick(self):
+        if self._diag_mode != "latency" or not self.link:
+            return
+        if self._lat_sent >= self._lat_target:
+            # Allow the last echo to drain. An absent reply becomes loss.
+            self._lat_job = self.after(750, self._finish_latency)
+            return
+
+        sequence = self._next_diag_seq()
+        frame = comp_link.encode_link_test(
+            sequence, comp_link.LINK_TEST_LATENCY,
+            comp_link.LINK_TEST_HEADER.size)
+        body = frame[3:-2]
+        with self._diag_cv:
+            self._diag_pending[sequence] = {
+                "body": body, "kind": comp_link.LINK_TEST_LATENCY}
+        if not self.link.send(frame):
+            with self._diag_cv:
+                self._diag_pending.pop(sequence, None)
+        self._lat_sent += 1
+        self.diag_lbl.configure(
+            text=f"latency: sent {self._lat_sent}/{self._lat_target}",
+            fg=MUTED)
+        self._lat_job = self.after(25, self._latency_tick)
+
+    def _finish_latency(self):
+        with self._diag_cv:
+            samples = list(self._lat_samples)
+            corrupt = self._diag_corrupt
+            lost = max(0, self._lat_sent - len(samples) - corrupt)
+            self._diag_pending.clear()
+            self._diag_mode = None
+        self._lat_job = None
+
+        if not samples:
+            self.diag_lbl.configure(
+                text=f"latency: no replies, lost {lost}, corrupt {corrupt}",
+                fg=BAD)
+            return
+        ordered = sorted(samples)
+        p95 = ordered[max(0, math.ceil(0.95 * len(ordered)) - 1)]
+        self.diag_lbl.configure(
+            text=(f"RTT ms  min {ordered[0]:.3f}  median "
+                  f"{statistics.median(ordered):.3f}  mean "
+                  f"{statistics.fmean(ordered):.3f}  p95 {p95:.3f}  "
+                  f"max {ordered[-1]:.3f}   replies {len(samples)}/"
+                  f"{self._lat_sent}, corrupt {corrupt}"),
+            fg=GOOD if not lost and not corrupt else BAD)
+
+    def _start_bandwidth(self):
+        try:
+            duration = float(self.bw_duration_var.get())
+            if not 0.25 <= duration <= 60.0 or not math.isfinite(duration):
+                raise ValueError
+        except ValueError:
+            self.diag_lbl.configure(text="duration must be 0.25..60 seconds",
+                                    fg=BAD)
+            return
+        generation = self._begin_diagnostic("bandwidth")
+        if generation is False:
+            return
+
+        # This test intentionally fills the transport. Do not compete with
+        # actuator commands, even on a bench where AUTO is not armed.
+        self._stop_drive()
+        self._bw_stop.clear()
+        self._bw_received = []
+        self.diag_lbl.configure(text="bandwidth: running...", fg=MUTED)
+        threading.Thread(target=self._bandwidth_worker,
+                         args=(duration, generation),
+                         daemon=True).start()
+
+    def _bandwidth_worker(self, duration, generation):
+        link = self.link
+        start_us = host_now_us()
+        deadline = time.monotonic() + duration
+        sent = 0
+        wire_sent = 0
+
+        # A bounded pipeline avoids measuring how fast pyserial can enqueue
+        # into an unbounded OS buffer. Replies wake this thread directly from
+        # the reader, so the Tk refresh period is not part of the result.
+        while (time.monotonic() < deadline and not self._bw_stop.is_set()
+               and link is not None):
+            with self._diag_cv:
+                while (len(self._diag_pending) >= 32 and
+                       time.monotonic() < deadline and
+                       not self._bw_stop.is_set() and
+                       generation == self._diag_generation):
+                    self._diag_cv.wait(timeout=0.05)
+                if (self._bw_stop.is_set() or
+                    generation != self._diag_generation or
+                    time.monotonic() >= deadline):
+                    break
+                sequence = self._next_diag_seq()
+                frame = comp_link.encode_link_test(
+                    sequence, comp_link.LINK_TEST_BANDWIDTH,
+                    comp_link.MAX_PAYLOAD)
+                self._diag_pending[sequence] = {
+                    "body": frame[3:-2],
+                    "kind": comp_link.LINK_TEST_BANDWIDTH,
+                    "wire_bytes": len(frame)}
+
+            if not link.send(frame):
+                with self._diag_cv:
+                    self._diag_pending.pop(sequence, None)
+                break
+            sent += 1
+            wire_sent += len(frame)
+
+        send_end_us = host_now_us()
+        # Drain one pipeline window after sending finishes.
+        drain_deadline = time.monotonic() + 1.0
+        with self._diag_cv:
+            while (self._diag_pending and time.monotonic() < drain_deadline
+                   and not self._bw_stop.is_set()
+                   and generation == self._diag_generation):
+                self._diag_cv.wait(timeout=0.05)
+            if generation != self._diag_generation:
+                return
+            received = list(self._bw_received)
+            lost = len(self._diag_pending)
+            corrupt = self._diag_corrupt
+            self._diag_pending.clear()
+            self._diag_mode = None
+
+        last_rx_us = max((x["rx_us"] for x in received), default=send_end_us)
+        elapsed_s = max(1e-6, (max(send_end_us, last_rx_us) - start_us) / 1e6)
+        good_wire = sum(x["wire_bytes"] for x in received)
+        self.q.put(("bandwidth_done", {
+            "sent": sent, "received": len(received), "lost": lost,
+            "corrupt": corrupt, "elapsed_s": elapsed_s,
+            "offered_kbps": wire_sent * 8.0 / max(
+                1e-6, (send_end_us - start_us) / 1e6) / 1000.0,
+            "each_kbps": good_wire * 8.0 / elapsed_s / 1000.0,
+        }))
+
+    def _show_bandwidth(self, result):
+        each = result["each_kbps"]
+        self.diag_lbl.configure(
+            text=(f"verified {each:.1f} kbit/s each direction, "
+                  f"{2 * each:.1f} kbit/s aggregate   host TX "
+                  f"{result['offered_kbps']:.1f} kbit/s   frames "
+                  f"{result['received']}/{result['sent']}, lost "
+                  f"{result['lost']}, corrupt {result['corrupt']}   "
+                  f"{result['elapsed_s']:.2f}s"),
+            fg=(GOOD if not result["lost"] and not result["corrupt"]
+                else BAD))
+
+    def _cancel_diagnostics(self, show=True):
+        self._bw_stop.set()
+        if self._lat_job is not None:
+            try:
+                self.after_cancel(self._lat_job)
+            except tk.TclError:
+                pass
+            self._lat_job = None
+        with self._diag_cv:
+            was_running = self._diag_mode is not None
+            self._diag_generation += 1
+            self._diag_mode = None
+            self._diag_pending.clear()
+            self._diag_cv.notify_all()
+        if show and was_running:
+            self.diag_lbl.configure(text="link test stopped", fg=MUTED)
+
     # ---- pump -----------------------------------------------------------
 
 
@@ -542,6 +839,10 @@ class App(tk.Tk):
                     # sent in so both sides of the solve agree.
                     self._sync_samples.append(
                         timesync_solve(rep, self.utc.to_utc(rx_us)))
+                # LINK_TEST_REP was already timestamped and consumed by the
+                # reader-thread observer. Do not measure it again here.
+            elif kind == "bandwidth_done":
+                self._show_bandwidth(payload)
             elif kind == "error":
                 self.state_lbl.configure(text=str(payload)[:44], fg=BAD)
 

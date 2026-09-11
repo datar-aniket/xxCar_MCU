@@ -44,11 +44,15 @@ int main(void)
   struct comp_direct_control_s cmd;
   struct comp_datum_reset_s datum;
   unsigned char traj[COMP_MAX_PAYLOAD];
+  unsigned char link_test[COMP_MAX_PAYLOAD];
   uint64_t traj_timestamp = 1234567890123ull;
   uint64_t solution_timestamp = 1234567880000ull;
   float traj_values[8] = {1.0f, 2.0f, 1.5f, 2.5f,
                           -0.25f, 0.2f, 0.5f, -0.1f};
   int n;
+  int i;
+  uint64_t link_timestamp = 987654321ull;
+  uint32_t link_sequence = 0x12345678u;
 
   printf("%zu %zu %zu %zu\n", sizeof(ext), sizeof(est), sizeof(cmd),
          sizeof(datum));
@@ -114,6 +118,20 @@ int main(void)
                   sizeof(frame));
   dump(frame, n);
 
+  memset(link_test, 0, sizeof(link_test));
+  memcpy(link_test, &link_timestamp, sizeof(link_timestamp));
+  memcpy(link_test + 8, &link_sequence, sizeof(link_sequence));
+  link_test[12] = COMP_LINK_TEST_BANDWIDTH;
+  link_test[13] = 1;
+  for (i = COMP_LINK_TEST_HEADER_SIZE; i < COMP_MAX_PAYLOAD; i++)
+    {
+      link_test[i] = (unsigned char)(link_sequence +
+                                     i - COMP_LINK_TEST_HEADER_SIZE);
+    }
+  n = comp_encode(COMP_MSG_LINK_TEST_REQ, link_test, sizeof(link_test),
+                  frame, sizeof(frame));
+  dump(frame, n);
+
   return 0;
 }
 """
@@ -139,6 +157,7 @@ def main():
     c_cmd_frame = bytes.fromhex(out[6])
     c_datum_frame = bytes.fromhex(out[7])
     c_traj_frame = bytes.fromhex(out[8])
+    c_link_frame = bytes.fromhex(out[9])
 
     assert c_ext_size == comp_link.EXTERNAL_POSE.size, (
         f"external_pose: C says {c_ext_size}, "
@@ -205,6 +224,16 @@ def main():
     assert decoded_traj["horizon"] == 2
     assert abs(decoded_traj["dt"] - 0.05) < 0.0001
     assert decoded_traj["poses"][1] == (1.5, 2.5)
+
+    py_link = comp_link.encode_link_test(
+        0x12345678, comp_link.LINK_TEST_BANDWIDTH,
+        comp_link.MAX_PAYLOAD, timestamp_us=987654321)
+    assert py_link == c_link_frame, (
+        f"LINK_TEST bytes differ\n  C:  {c_link_frame.hex()}\n"
+        f"  py: {py_link.hex()}")
+    decoded_link = comp_link.decode_link_test(py_link[3:-2])
+    assert decoded_link["sequence"] == 0x12345678
+    assert decoded_link["payload_size"] == comp_link.MAX_PAYLOAD
 
     # And the Python parser must accept what C produced.
     parser = comp_link.Parser()

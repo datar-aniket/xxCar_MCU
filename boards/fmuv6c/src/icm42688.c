@@ -11,9 +11,10 @@
  * (active-low), wired to PE6 (GPIO_DRDY_ICM42688). The falling edge fires a
  * GPIO interrupt whose ISR just posts a semaphore; a kthread then drains the
  * FIFO in one DMA burst and publishes each sample. This decouples sampling
- * from the OS tick entirely (no polling, no phase-locking) and amortises the
- * per-read overhead across a whole watermark of samples -> true 2 kHz at low
- * CPU.
+ * from the OS tick entirely and amortises the per-read overhead across a
+ * whole watermark of samples -> true 2 kHz at low CPU. A secondary device
+ * without a routed DRDY pin is instead drained on fixed 4 ms deadlines; its
+ * FIFO delta timestamps preserve the sensor ODR timing between drains.
  *
  * Register configuration and reset sequence mirror PX4's hardware-proven
  * icm42688p driver, including its 20-byte high-res FIFO packet (20-bit
@@ -154,6 +155,11 @@
 #define ICM_PERIOD_AVG_SAMPLES  4           /* four-second moving average */
 #define ICM_PERIOD_MIN_Q5       (450ull << ICM_TIMESTAMP_FRAC_BITS)
 #define ICM_PERIOD_MAX_Q5       (550ull << ICM_TIMESTAMP_FRAC_BITS)
+#define ICM_POLL_INTERVAL_US    4000ull
+#define ICM_POLL_PHASE_DIV      8
+#define ICM_FIFO_TS_SCALE_NUM   (16ull * 32ull)
+#define ICM_FIFO_TS_SCALE_DEN   30ull
+#define ICM_FIFO_PERIOD_LPF_DIV 64
 
 /****************************************************************************
  * Private Types
@@ -173,9 +179,10 @@ struct icm42688_dev_s
   struct icm42688_sensor_s  gyro;
   FAR struct spi_dev_s     *spi;
   uint32_t                  devid;
+  uint32_t                  drdy_gpio;
   bool                      accel_en;
   bool                      gyro_en;
-  bool                      streaming;  /* DRDY interrupt armed */
+  bool                      streaming;  /* FIFO packet stream enabled */
   uint64_t                  last_timestamp_q5;
   uint64_t                  sample_period_q5;
   uint64_t                  sample_count;
@@ -523,6 +530,22 @@ static int32_t icm42688_reassemble20(uint8_t hi, uint8_t mid, uint8_t lo)
   return (int32_t)x;
 }
 
+/* With TMST_DELTA_EN and 16 us resolution, FIFO bytes 15..16 contain the
+ * interval since the preceding ODR event. Without an external RTC input the
+ * data-sheet conversion is raw * 16 * 32/30 us. Return Q5 microseconds so it
+ * can update the same fractional period state used by the DRDY path.
+ */
+
+static uint64_t icm42688_fifo_period_q5(FAR const uint8_t *p)
+{
+  uint16_t raw = ((uint16_t)p[15] << 8) | p[16];
+  uint64_t q5 = ((uint64_t)raw * ICM_FIFO_TS_SCALE_NUM *
+                 (1ull << ICM_TIMESTAMP_FRAC_BITS) +
+                 ICM_FIFO_TS_SCALE_DEN / 2) / ICM_FIFO_TS_SCALE_DEN;
+
+  return q5 >= ICM_PERIOD_MIN_Q5 && q5 <= ICM_PERIOD_MAX_Q5 ? q5 : 0;
+}
+
 /* Parse one 20-byte hi-res FIFO packet into its batch slots. Returns false
  * only on a bad header (framing lost -> caller should flush and resync).
  */
@@ -685,6 +708,7 @@ static void icm42688_drain_fifo(FAR struct icm42688_dev_s *dev)
   uint64_t causal_base_q5;
   uint64_t drdy_timestamp;
   uint64_t watermark_edge_sample;
+  uint64_t poll_step_q5;
   uint32_t drdy_sequence;
   uint32_t drdy_events;
   irqstate_t flags;
@@ -732,6 +756,7 @@ static void icm42688_drain_fifo(FAR struct icm42688_dev_s *dev)
     }
 
   period_q5 = dev->sample_period_q5;
+  poll_step_q5 = period_q5;
 
   /* Build this batch from a physical TIM5 reference, never from the preceding
    * batch. A unique watermark edge identifies the packet at the FIFO threshold
@@ -752,6 +777,37 @@ static void icm42688_drain_fifo(FAR struct icm42688_dev_s *dev)
 
   causal_base_q5 = batch_now_q5 - batch_span_q5;
   base_q5 = causal_base_q5;
+
+  /* Without a usable physical edge, keep the sample sequence continuous and
+   * use the FIFO's own ODR interval while slowly aligning that sequence to
+   * TIM5. The correction removes sensor/MCU clock drift without putting the
+   * 4 ms polling jitter into individual samples. It is deliberately confined
+   * to the polling path.
+   */
+
+  if (dev->drdy_gpio == 0 && dev->last_timestamp_q5 != 0)
+    {
+      uint64_t target_latest_q5 = batch_now_q5 > period_q5 ?
+        batch_now_q5 - period_q5 : batch_now_q5;
+      uint64_t predicted_latest_q5 = dev->last_timestamp_q5 +
+        (uint64_t)total * period_q5;
+      int64_t phase_error_q5 = (int64_t)target_latest_q5 -
+                               (int64_t)predicted_latest_q5;
+      int64_t correction_q5 = phase_error_q5 /
+        ((int64_t)total * ICM_POLL_PHASE_DIV);
+      int64_t corrected_q5 = (int64_t)period_q5 + correction_q5;
+
+      if (corrected_q5 < (int64_t)ICM_PERIOD_MIN_Q5)
+        {
+          corrected_q5 = ICM_PERIOD_MIN_Q5;
+        }
+      else if (corrected_q5 > (int64_t)ICM_PERIOD_MAX_Q5)
+        {
+          corrected_q5 = ICM_PERIOD_MAX_Q5;
+        }
+
+      poll_step_q5 = (uint64_t)corrected_q5;
+    }
 
   if (drdy_events != 0 && total >= ICM_FIFO_WM_SAMPLES)
     {
@@ -782,7 +838,7 @@ static void icm42688_drain_fifo(FAR struct icm42688_dev_s *dev)
    * discard rather than emit impossible timestamps.
    */
 
-  if (dev->last_timestamp_q5 != 0 &&
+  if (dev->drdy_gpio != 0 && dev->last_timestamp_q5 != 0 &&
       base_q5 <= dev->last_timestamp_q5)
     {
       icm42688_fifo_flush(dev);
@@ -804,13 +860,24 @@ static void icm42688_drain_fifo(FAR struct icm42688_dev_s *dev)
 
       for (i = 0; i < n; i++, idx++)
         {
-          uint64_t ts_q5 = base_q5 + (uint64_t)idx * period_q5;
-          uint64_t ts =
-            (ts_q5 + (1ull << (ICM_TIMESTAMP_FRAC_BITS - 1))) >>
-            ICM_TIMESTAMP_FRAC_BITS;
+          FAR const uint8_t *packet =
+            dev->fifobuf + i * ICM_FIFO_PACKET;
+          uint64_t ts_q5;
+          uint64_t ts;
 
-          if (!icm42688_decode(dev,
-                               dev->fifobuf + i * ICM_FIFO_PACKET,
+          if (dev->drdy_gpio == 0 && dev->last_timestamp_q5 != 0)
+            {
+              ts_q5 = dev->last_timestamp_q5 + poll_step_q5;
+            }
+          else
+            {
+              ts_q5 = base_q5 + (uint64_t)idx * period_q5;
+            }
+
+          ts = (ts_q5 + (1ull << (ICM_TIMESTAMP_FRAC_BITS - 1))) >>
+               ICM_TIMESTAMP_FRAC_BITS;
+
+          if (!icm42688_decode(dev, packet,
                                ts, decoded, accel_en, gyro_en))
             {
               /* Preserve the valid prefix just as per-sample publication did,
@@ -824,6 +891,21 @@ static void icm42688_drain_fifo(FAR struct icm42688_dev_s *dev)
 
           decoded++;
           dev->last_timestamp_q5 = ts_q5;
+
+          if (dev->drdy_gpio == 0)
+            {
+              uint64_t fifo_period_q5 =
+                icm42688_fifo_period_q5(packet);
+
+              if (fifo_period_q5 != 0)
+                {
+                  int64_t error_q5 = (int64_t)fifo_period_q5 -
+                                     (int64_t)dev->sample_period_q5;
+                  dev->sample_period_q5 = (uint64_t)
+                    ((int64_t)dev->sample_period_q5 +
+                     error_q5 / ICM_FIFO_PERIOD_LPF_DIV);
+                }
+            }
         }
 
       icm42688_push_batch(dev, decoded, accel_en, gyro_en);
@@ -866,15 +948,57 @@ static int icm42688_thread(int argc, FAR char **argv)
 {
   FAR struct icm42688_dev_s *dev =
       (FAR struct icm42688_dev_s *)((uintptr_t)strtoul(argv[1], NULL, 16));
+  uint64_t next_poll_us = 0;
 
   for (; ; )
     {
-      /* Wait for the FIFO-watermark interrupt; the timeout is a watchdog so a
-       * missed edge still gets drained (~50 Hz fallback), never a permanent
-       * stall.
+      /* With DRDY, wait for the FIFO-watermark interrupt; the timeout is a
+       * watchdog so a missed edge still gets drained (~50 Hz fallback).
+       * Without DRDY, use fixed TIM5-referenced polling deadlines below.
        */
 
-      nxsem_tickwait(&dev->run, MSEC2TICK(ICM_WATCHDOG_MS));
+      if (dev->drdy_gpio != 0)
+        {
+          nxsem_tickwait(&dev->run, MSEC2TICK(ICM_WATCHDOG_MS));
+        }
+      else if (!dev->streaming)
+        {
+          next_poll_us = 0;
+          nxsig_usleep(ICM_POLL_INTERVAL_US);
+        }
+      else
+        {
+          uint64_t now_us = fmuv6c_imu_time_now();
+
+          if (next_poll_us == 0)
+            {
+              next_poll_us = now_us + ICM_POLL_INTERVAL_US;
+            }
+          else
+            {
+              next_poll_us += ICM_POLL_INTERVAL_US;
+
+              /* Keep a fixed phase instead of adding SPI and publication
+               * time to every 4 ms interval. If this thread was delayed by
+               * more than one interval, skip expired deadlines; the FIFO
+               * still retains every sample for the next drain.
+               */
+
+              if (next_poll_us <= now_us)
+                {
+                  next_poll_us +=
+                    ((now_us - next_poll_us) / ICM_POLL_INTERVAL_US + 1) *
+                    ICM_POLL_INTERVAL_US;
+                }
+            }
+
+          now_us = fmuv6c_imu_time_now();
+          while (next_poll_us > now_us)
+            {
+              nxsig_usleep((useconds_t)(next_poll_us - now_us));
+              now_us = fmuv6c_imu_time_now();
+            }
+        }
 
       if (dev->streaming)
         {
@@ -920,12 +1044,15 @@ static int icm42688_stream_start(FAR struct icm42688_dev_s *dev)
    * threshold crossing therefore always creates a new falling edge.
    */
 
-  ret = stm32_gpiosetevent(GPIO_DRDY_ICM42688, false, true, true,
-                          icm42688_isr, dev);
-  if (ret < 0)
+  if (dev->drdy_gpio != 0)
     {
-      snerr("ERROR: ICM-42688 PE6 EXTI setup failed: %d\n", ret);
-      return ret;
+      ret = stm32_gpiosetevent(dev->drdy_gpio, false, true, true,
+                              icm42688_isr, dev);
+      if (ret < 0)
+        {
+          snerr("ERROR: ICM-42688 EXTI setup failed: %d\n", ret);
+          return ret;
+        }
     }
 
   dev->streaming = true;
@@ -946,8 +1073,11 @@ static int icm42688_stream_start(FAR struct icm42688_dev_s *dev)
       icm42688_write_reg(dev, ICM_REG_INT_SOURCE0, 0x00);
       icm42688_modify(dev, ICM_REG_FIFO_CONFIG1,
                       ICM_FIFO_WM_GT_TH, 0x1f);
-      stm32_gpiosetevent(GPIO_DRDY_ICM42688, false, false, false,
-                         NULL, NULL);
+      if (dev->drdy_gpio != 0)
+        {
+          stm32_gpiosetevent(dev->drdy_gpio, false, false, false,
+                             NULL, NULL);
+        }
       dev->streaming = false;
       snerr("ERROR: ICM-42688 stream enable verification failed\n");
       return -EIO;
@@ -963,7 +1093,10 @@ static void icm42688_stream_stop(FAR struct icm42688_dev_s *dev)
   dev->streaming = false;
   icm42688_write_reg(dev, ICM_REG_INT_SOURCE0, 0x00);
   icm42688_modify(dev, ICM_REG_FIFO_CONFIG1, ICM_FIFO_WM_GT_TH, 0x1f);
-  stm32_gpiosetevent(GPIO_DRDY_ICM42688, false, false, false, NULL, NULL);
+  if (dev->drdy_gpio != 0)
+    {
+      stm32_gpiosetevent(dev->drdy_gpio, false, false, false, NULL, NULL);
+    }
   icm42688_fifo_flush(dev);
 }
 
@@ -1048,7 +1181,8 @@ static const struct sensor_ops_s g_icm42688_ops =
  * Public Functions
  ****************************************************************************/
 
-int icm42688_register(FAR struct spi_dev_s *spi, int devno)
+int icm42688_register(FAR struct spi_dev_s *spi, int devno,
+                      uint32_t devid, uint32_t drdy_gpio)
 {
   FAR struct icm42688_dev_s *dev;
   FAR char *argv[2];
@@ -1061,8 +1195,9 @@ int icm42688_register(FAR struct spi_dev_s *spi, int devno)
       return -ENOMEM;
     }
 
-  dev->spi   = spi;
-  dev->devid = SPIDEV_IMU(FMUV6C_SPIDEV_ICM42688);
+  dev->spi       = spi;
+  dev->devid     = devid;
+  dev->drdy_gpio = drdy_gpio;
 
   dev->accel.dev            = dev;
   dev->accel.lower.ops      = &g_icm42688_ops;
@@ -1101,7 +1236,8 @@ int icm42688_register(FAR struct spi_dev_s *spi, int devno)
   snprintf(arg1, sizeof(arg1), "%p", dev);
   argv[0] = arg1;
   argv[1] = NULL;
-  ret = kthread_create("icm42688", FMUV6C_SENSOR_PRIO, 2048,
+  ret = kthread_create(devno == 0 ? "icm42688-0" : "icm42688-1",
+                       FMUV6C_SENSOR_PRIO, 2048,
                        icm42688_thread, argv);
   if (ret < 0)
     {

@@ -5,7 +5,8 @@
 # Logging : syslog -> BOTH the TELEM1 console (live) AND RAMLOG (/dev/ramlog),
 #           readable after boot with `cat /dev/ramlog` or `dmesg`.
 # Buses   : I2C4 (internal: MS5611+IST8310+EEPROM), I2C2 (external), SPI1 (IMUs).
-# USB     : CDC-ACM raw data port /dev/ttyACM0 (VID 0x3162/PID 0x0053).
+# USB     : two CDC-ACM ports, /dev/ttyACM0 and /dev/ttyACM1
+#           (one composite device, VID 0x3162/PID 0x0053).
 # Float/libc: full float + libc extension set enabled up front.
 #
 # Regenerate after menuconfig with:  make -C deps/nuttx savedefconfig
@@ -344,9 +345,9 @@ CONFIG_SCHED_CPULOAD_NONE=y
 CONFIG_CDCACM=y
 CONFIG_SERIAL_REMOVABLE=y
 
-# USB = permanent CDC/ACM + Mass Storage composite. The CDC serial data port is
-# always enumerated, so it never disappears. Only the mass-storage MEDIA is
-# toggled at runtime (see boards/fmuv6c/src/stm32_composite.c):
+# USB = two permanent CDC/ACM functions + optional Mass Storage. Both serial
+# ports are always enumerated. The mass-storage function is toggled at runtime
+# (see boards/fmuv6c/src/stm32_composite.c):
 #
 #   boot      -> SD mounted locally at /fs/microsd; the MSC LUN is left UNBOUND
 #                so the host sees "no medium" and cannot touch the card.
@@ -466,8 +467,9 @@ CONFIG_WATCHDOG_AUTOMONITOR_BY_WORKER=y
 CONFIG_WATCHDOG_AUTOMONITOR_TIMEOUT=2000
 
 # microSD on SDMMC2 (4-bit SDIO, internal DMA) -> /dev/mmcsd0, mounted FAT at
-# /fs/microsd at boot. This is the store for logs, params and config, and the
-# volume exported over USB mass storage. No card-detect line on the FMUv6C, so
+# /fs/microsd at boot. This is the store for logs and the FMUv6C parameter
+# file; Matek uses internal flash for primary parameter storage. The volume is
+# exported over USB mass storage. No card-detect line on the FMUv6C, so
 # MMCSD_HAVE_CARDDETECT stays off and the board reports the card present.
 # The SDMMC driver's media-change callback support requires the HIGH-priority
 # work queue specifically (LPWORK alone is not enough).

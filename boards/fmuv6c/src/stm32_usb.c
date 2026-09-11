@@ -134,14 +134,23 @@ void stm32_usbinitialize(void)
    * No GPIO configuration is required
    */
 
-  /* Configure the OTG FS VBUS sensing GPIO,
-   * Power On, and Overcurrent GPIOs
+  /* The Matek H743-SLIM has no GPIO VBUS-sense input: PE2 is the second
+   * external SPI chip-select.  NuttX device mode is built without
+   * CONFIG_USBDEV_VBUSSENSING and forces B-session-valid internally, so the
+   * Matek must not reconfigure PE2 here.  FMUv6C retains its real VBUS input.
+   * Host power/overcurrent pins are not connected on either board and their
+   * historical placeholders overlap USART6, so never claim them in the
+   * normal device-only configuration.
    */
 
 #ifdef CONFIG_STM32H7_OTGFS
+#ifndef CONFIG_XXCAR_BOARD_MATEKH743
   stm32_configgpio(GPIO_OTGFS_VBUS);
+#endif
+#ifdef CONFIG_USBHOST
   stm32_configgpio(GPIO_OTGFS_PWRON);
   stm32_configgpio(GPIO_OTGFS_OVER);
+#endif
 #endif
 }
 

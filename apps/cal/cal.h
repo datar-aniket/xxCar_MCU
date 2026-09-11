@@ -16,9 +16,10 @@
  * printable and cannot be the '{' that starts a JSON line, so a reader can
  * always resynchronise on it.
  *
- * `cal session` runs from the shell on TELEM1/DEBUG and opens /dev/ttyACM0.
- * The shell living on a different port is what makes this safe: nothing else
- * holds the USB port, so there is no handoff and no race for input bytes.
+ * `cal session` runs from a shell on another port and opens whichever USB CDC
+ * port is reserved with SER_*_FUNC=CAL. The shell living on a different port
+ * is what makes this safe: nothing else holds the CAL port, so there is no
+ * handoff and no race for input bytes.
  ****************************************************************************/
 
 #ifndef __APPS_CAL_CAL_H
@@ -27,12 +28,6 @@
 #include <nuttx/config.h>
 
 #include <stdint.h>
-
-/* The port the GUI listens on. Not configurable - it is the only USB serial
- * device on this board.
- */
-
-#define CAL_DEVPATH  "/dev/ttyACM0"
 
 /* Protocol version, reported in `hello` so a mismatched GUI can say so instead
  * of misbehaving. 2 added batched, integer-encoded sample frames; 3 added the

@@ -37,7 +37,14 @@ MSG_TIMESYNC_START = 5
 MSG_TIMESYNC_END = 6
 MSG_DIRECT_CONTROL = 7
 MSG_DATUM_RESET = 8
+MSG_LINK_TEST_REQ = 9
 MSG_VEHICLE_STATE = 16
+MSG_LINK_TEST_REP = 17
+
+LINK_TEST_LATENCY = 0
+LINK_TEST_BANDWIDTH = 1
+LINK_TEST_VERSION = 1
+LINK_TEST_HEADER = struct.Struct("<QIBBH")
 
 POSE_FLAG_VALID = 1 << 0
 
@@ -103,6 +110,7 @@ assert TIMESYNC_REQ.size == 8, TIMESYNC_REQ.size
 assert TIMESYNC_REP.size == 24, TIMESYNC_REP.size
 assert TIMESYNC_START.size == 8, TIMESYNC_START.size
 assert TIMESYNC_END.size == 16, TIMESYNC_END.size
+assert LINK_TEST_HEADER.size == 16, LINK_TEST_HEADER.size
 
 PAYLOAD_LEN = {
     MSG_EXTERNAL_POSE: EXTERNAL_POSE.size,
@@ -174,6 +182,47 @@ def encode_datum_reset(request_counter: int) -> bytes:
     if not 0 <= int(request_counter) <= 0xFFFFFFFF:
         raise ValueError("datum reset counter must fit uint32")
     return encode(MSG_DATUM_RESET, DATUM_RESET.pack(int(request_counter)))
+
+
+def encode_link_test(sequence: int, kind: int, payload_size: int = 16,
+                     timestamp_us=None) -> bytes:
+    """Build a diagnostic request with verifiable contents.
+
+    timestamp_us is deliberately host MONOTONIC time. The board echoes it
+    unchanged, so RTT needs neither UTC nor a board/host clock relation.
+    """
+    if not 0 <= int(sequence) <= 0xFFFFFFFF:
+        raise ValueError("link-test sequence must fit uint32")
+    if kind not in (LINK_TEST_LATENCY, LINK_TEST_BANDWIDTH):
+        raise ValueError("unknown link-test kind")
+    if not LINK_TEST_HEADER.size <= int(payload_size) <= MAX_PAYLOAD:
+        raise ValueError(f"link-test payload must be {LINK_TEST_HEADER.size}"
+                         f"..{MAX_PAYLOAD} bytes")
+
+    stamp = host_now_us() if timestamp_us is None else int(timestamp_us)
+    header = LINK_TEST_HEADER.pack(stamp, int(sequence), int(kind),
+                                   LINK_TEST_VERSION, 0)
+    pattern = bytes(((int(sequence) + i) & 0xFF)
+                    for i in range(int(payload_size) - len(header)))
+    return encode(MSG_LINK_TEST_REQ, header + pattern)
+
+
+def decode_link_test(payload: bytes) -> dict:
+    """Decode and verify a diagnostic echo payload."""
+    if not LINK_TEST_HEADER.size <= len(payload) <= MAX_PAYLOAD:
+        raise ValueError("invalid link-test payload length")
+    timestamp_us, sequence, kind, version, reserved = \
+        LINK_TEST_HEADER.unpack_from(payload)
+    if version != LINK_TEST_VERSION or reserved != 0:
+        raise ValueError("unsupported link-test header")
+    if kind not in (LINK_TEST_LATENCY, LINK_TEST_BANDWIDTH):
+        raise ValueError("unknown link-test kind")
+    expected = bytes(((sequence + i) & 0xFF)
+                     for i in range(len(payload) - LINK_TEST_HEADER.size))
+    if payload[LINK_TEST_HEADER.size:] != expected:
+        raise ValueError("link-test payload pattern mismatch")
+    return {"timestamp_us": timestamp_us, "sequence": sequence,
+            "kind": kind, "payload_size": len(payload)}
 
 
 
@@ -507,6 +556,13 @@ class Parser:
             self.frames += 1
             return self.id, bytes(self.payload)
 
+        if self.id in (MSG_LINK_TEST_REQ, MSG_LINK_TEST_REP):
+            if self.len < LINK_TEST_HEADER.size:
+                self.bad_length += 1
+                return None
+            self.frames += 1
+            return self.id, bytes(self.payload)
+
         expect = PAYLOAD_LEN.get(self.id)
         if expect is None:
             self.unknown_id += 1
@@ -534,15 +590,22 @@ class Link(threading.Thread):
         self.bytes_in = 0
         self.bytes_out = 0
         self.tx_frames = 0
+        # Optional thread-safe observer for diagnostics that must wake a
+        # sender immediately. Tk still receives every frame through `out`.
+        self.frame_observer = None
 
     def send(self, frame: bytes):
         try:
             with self._tx_lock:
-                self.ser.write(frame)
+                written = self.ser.write(frame)
+            if written != len(frame):
+                raise IOError(f"short serial write {written}/{len(frame)}")
             self.bytes_out += len(frame)
             self.tx_frames += 1
+            return True
         except Exception as exc:
             self.out.put(("error", f"write failed: {exc}"))
+            return False
 
     def close(self):
         self.stop_flag.set()
@@ -569,6 +632,12 @@ class Link(threading.Thread):
                 for b in chunk:
                     got = self.parser.feed(b)
                     if got is not None:
+                        if self.frame_observer is not None:
+                            try:
+                                self.frame_observer(got[0], got[1], rx_us)
+                            except Exception as exc:
+                                self.out.put(("error",
+                                              f"frame observer: {exc}"))
                         self.out.put(("frame", (got[0], got[1], rx_us)))
         try:
             self.ser.close()

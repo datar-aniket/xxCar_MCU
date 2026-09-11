@@ -82,10 +82,19 @@ static const struct sens_row_s g_rows[] =
 {
   { "sensor_accel0", "accel0  ICM-42688", KIND_ACCEL, NULL, 0 },
   { "sensor_gyro0",  "gyro0   ICM-42688", KIND_GYRO,  NULL, 0 },
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+  { "sensor_accel1", "accel1  ICM-42688", KIND_ACCEL, NULL, 1 },
+  { "sensor_gyro1",  "gyro1   ICM-42688", KIND_GYRO,  NULL, 1 },
+#else
   { "sensor_accel1", "accel1  Bosch-2nd", KIND_ACCEL, NULL, 1 },
   { "sensor_gyro1",  "gyro1   Bosch-2nd", KIND_GYRO,  NULL, 1 },
+#endif
   { "sensor_mag0",   "mag0    IST8310",   KIND_MAG,   NULL, 0 },
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+  { "sensor_baro0",  "baro0   DPS368",    KIND_BARO,  NULL, 0 },
+#else
   { "sensor_baro0",  "baro0   MS5611",    KIND_BARO,  NULL, 0 },
+#endif
   { "optical_flow",  "flow    MTF-02",    KIND_FLOW,
     ORB_ID(optical_flow), 0 },
   { "distance_sensor", "range MTF-02",    KIND_DIST,
@@ -195,6 +204,7 @@ static void sensor_status_run(int window_ms)
 
       fd[i]   = -1;
       gen0[i] = 0;
+      t0[i]   = 0;
 
       if (meta == NULL)
         {
@@ -234,11 +244,27 @@ static void sensor_status_run(int window_ms)
       if (orb_get_state(fd[i], &st) == 0)
         {
           uint64_t dgen = st.generation - gen0[i];
-          uint64_t dt   = orb_absolute_time() - t0[i];
+          uint64_t dt = t0[i] != 0 ? orb_absolute_time() - t0[i] : 0;
 
           if (dt > 0)
             {
-              hz = (double)dgen * 1000000.0 / (double)dt;
+              /* NuttX sensor generations are time-domain counters: each
+               * event advances generation by min_interval, rather than
+               * necessarily by one.  orb_get_state() exposes its reciprocal
+               * as max_frequency.  Convert the generation delta back to an
+               * event count before calculating the observed rate.  Topics
+               * without an interval retain the traditional +1 generation.
+               */
+
+              if (st.max_frequency != 0)
+                {
+                  hz = (double)dgen * (double)st.max_frequency /
+                       (double)dt;
+                }
+              else
+                {
+                  hz = (double)dgen * 1000000.0 / (double)dt;
+                }
             }
         }
 

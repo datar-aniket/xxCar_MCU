@@ -497,6 +497,37 @@ static void test_timesync_round_trip(void)
   assert(out.board_tx_us == in.board_tx_us);
 }
 
+static void test_link_test_variable_payload(void)
+{
+  uint8_t body[COMP_MAX_PAYLOAD];
+  uint8_t frame[COMP_MAX_PAYLOAD + COMP_FRAME_OVERHEAD];
+  size_t i;
+  int n;
+
+  for (i = 0; i < sizeof(body); i++)
+    {
+      body[i] = (uint8_t)i;
+    }
+
+  n = comp_encode(COMP_MSG_LINK_TEST_REQ, body, sizeof(body), frame,
+                  sizeof(frame));
+  comp_parser_init(&g_parser);
+  assert(feed(frame, (size_t)n) == COMP_MSG_LINK_TEST_REQ);
+  assert(g_parser.len == sizeof(body));
+  assert(memcmp(g_parser.payload, body, sizeof(body)) == 0);
+
+  n = comp_encode(COMP_MSG_LINK_TEST_REP, body,
+                  COMP_LINK_TEST_HEADER_SIZE, frame, sizeof(frame));
+  comp_parser_init(&g_parser);
+  assert(feed(frame, (size_t)n) == COMP_MSG_LINK_TEST_REP);
+
+  n = comp_encode(COMP_MSG_LINK_TEST_REQ, body,
+                  COMP_LINK_TEST_HEADER_SIZE - 1, frame, sizeof(frame));
+  comp_parser_init(&g_parser);
+  assert(feed(frame, (size_t)n) == 0);
+  assert(g_parser.bad_length == 1);
+}
+
 static void test_encode_refuses_a_short_buffer(void)
 {
   struct comp_external_pose_s in = sample_pose();
@@ -517,6 +548,7 @@ int main(void)
   test_unknown_id_versus_bad_length();
   test_back_to_back();
   test_timesync_round_trip();
+  test_link_test_variable_payload();
   test_datum_reset_round_trip();
   test_direct_control_round_trip();
   test_control_trajectory_round_trip();

@@ -5,10 +5,10 @@
  *
  * xxCar parameter system.
  *
- * Typed, named, bounded parameters with defaults, persisted to the microSD as
- * HUMAN-READABLE TEXT (/fs/microsd/params.txt). The text format is deliberate:
- * the card can be exported to a Linux host with `sdmsc on`, so the file must be
- * editable in any text editor, not a binary blob.
+ * Typed, named, bounded parameters with defaults. FMUv6C persists them as a
+ * human-readable microSD file. MatekH743 uses an atomic journal in the final
+ * two internal-flash sectors, with the SD file retained as a one-time import
+ * path when no internal snapshot exists.
  *
  * Everything configurable hangs off this: serial port functions and baud
  * (including which port runs NSH), RC protocol, sensor rates, MAVLink IDs,
@@ -44,6 +44,12 @@
 #endif
 #ifndef PARAM_TMPFILE
 #  define PARAM_TMPFILE  "/fs/microsd/params.tmp"
+#endif
+
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+#  define PARAM_STORAGE_NAME "internal flash"
+#else
+#  define PARAM_STORAGE_NAME PARAM_FILE
 #endif
 
 /* Serial port function (SER_*_FUNC). Which physical port runs NSH is just a
@@ -134,8 +140,8 @@ struct param_def_s
  * Public Function Prototypes
  ****************************************************************************/
 
-/* Load params from the SD card (defaults for anything missing). Safe to call
- * repeatedly; called automatically on first access.
+/* Load params from persistent storage (defaults for anything missing). Safe
+ * to call repeatedly; called automatically on first access.
  */
 
 int param_init(void);
@@ -160,8 +166,8 @@ int param_set_f32(FAR const char *name, float value);
 int32_t param_i32(FAR const char *name);
 float   param_f32(FAR const char *name);
 
-/* Persistence. save() writes PARAM_FILE; load() re-reads it; reset() restores
- * defaults in RAM (call save() to make it stick).
+/* Persistence. On Matek, save/load use internal flash; otherwise they use
+ * PARAM_FILE. reset() restores defaults in RAM (call save() to make it stick).
  */
 
 int param_save(void);

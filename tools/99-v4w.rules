@@ -1,0 +1,11 @@
+# MATEKSYS H743-SLIM-V4 xxCar application (USB VID:PID 1209:1013).
+#
+# One physical USB device exposes two CDC ACM functions. Match the USB
+# interface number rather than ttyACM0/ttyACM1 because those kernel numbers
+# depend on enumeration order and on other serial devices connected to Linux.
+
+# CDC interface 00: USB0, NSH console by default.
+ACTION=="add|change", SUBSYSTEM=="tty", KERNEL=="ttyACM*", ENV{ID_VENDOR_ID}=="1209", ENV{ID_MODEL_ID}=="1013", ENV{ID_USB_INTERFACE_NUM}=="00", SYMLINK+="v4w_consol", GROUP="dialout", MODE="0660", TAG+="uaccess"
+
+# CDC interface 02: USB1, CAL/companion I/O.
+ACTION=="add|change", SUBSYSTEM=="tty", KERNEL=="ttyACM*", ENV{ID_VENDOR_ID}=="1209", ENV{ID_MODEL_ID}=="1013", ENV{ID_USB_INTERFACE_NUM}=="02", SYMLINK+="v4w_io", GROUP="dialout", MODE="0660", TAG+="uaccess"

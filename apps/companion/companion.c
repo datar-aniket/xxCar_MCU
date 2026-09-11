@@ -41,6 +41,7 @@
 #define COMP_READ_MAX  256
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_tx_lock = PTHREAD_MUTEX_INITIALIZER;
 static volatile bool g_running;
 static volatile bool g_should_stop;
 static struct companion_status_s g_status;
@@ -358,6 +359,22 @@ static int comp_write_all(int fd, FAR const uint8_t *data, size_t len)
     }
 
   return sent == len ? OK : -EAGAIN;
+}
+
+/* The periodic vehicle-state sender and receive-side replies share one byte
+ * stream. A write can complete partially, so a mutex must cover the complete
+ * write-all operation; locking individual write() calls would still permit
+ * two valid frames to be interleaved into one invalid stream.
+ */
+
+static int comp_send_frame(int fd, FAR const uint8_t *data, size_t len)
+{
+  int ret;
+
+  pthread_mutex_lock(&g_tx_lock);
+  ret = comp_write_all(fd, data, len);
+  pthread_mutex_unlock(&g_tx_lock);
+  return ret;
 }
 
 /* Route one decoded frame. Adding a message means adding a case and a topic;
@@ -699,11 +716,39 @@ static void comp_route(int id, FAR const struct comp_parser_s *parser,
       n = comp_encode(COMP_MSG_TIMESYNC_REP, &rep, sizeof(rep), frame,
                       sizeof(frame));
 
-      if (n > 0 && comp_write_all(fd, frame, (size_t)n) == OK)
+      if (n > 0 && comp_send_frame(fd, frame, (size_t)n) == OK)
         {
           s->bytes_out += (uint64_t)n;
           s->tx_frames++;
           s->timesync_replies++;
+        }
+      else
+        {
+          s->tx_errors++;
+        }
+    }
+
+  else if (id == COMP_MSG_LINK_TEST_REQ)
+    {
+      uint8_t frame[COMP_MAX_PAYLOAD + COMP_FRAME_OVERHEAD];
+      int n;
+
+      /* Echo exactly what passed the parser. No timestamps are taken here:
+       * latency is measured against one host monotonic clock, and bandwidth
+       * verifies the returned pattern byte for byte.
+       */
+
+      n = comp_encode(COMP_MSG_LINK_TEST_REP, parser->payload, parser->len,
+                      frame, sizeof(frame));
+
+      s->rx_link_test++;
+      s->last_rx_us = rx_us;
+
+      if (n > 0 && comp_send_frame(fd, frame, (size_t)n) == OK)
+        {
+          s->bytes_out += (uint64_t)n;
+          s->tx_frames++;
+          s->tx_link_test++;
         }
       else
         {
@@ -1070,7 +1115,7 @@ static void comp_transmit(int fd, int state_pub, int est_sub, int gyro_sub,
       return;
     }
 
-  if (comp_write_all(fd, frame, (size_t)n) < 0)
+  if (comp_send_frame(fd, frame, (size_t)n) < 0)
     {
       /* A companion that stopped reading backs the port up. Count it and
        * carry on: dropping a pose is correct, blocking the downlink is not.

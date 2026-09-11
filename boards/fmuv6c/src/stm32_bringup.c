@@ -90,7 +90,7 @@
 #  include "../../../apps/serial/serial.h"
 #endif
 
-#ifdef CONFIG_XXCAR_PX4IO
+#if defined(CONFIG_XXCAR_PX4IO) && !defined(CONFIG_XXCAR_BOARD_MATEKH743)
 #  include "../../../apps/px4io/px4io.h"
 #endif
 
@@ -697,7 +697,7 @@ int stm32_bringup(void)
 #endif
 
 #ifdef CONFIG_MMCSD_SDIO
-  /* microSD on SDMMC2 -> /dev/mmcsd0, mounted as FAT at /fs/microsd. This is
+  /* microSD -> /dev/mmcsd0, mounted as FAT at /fs/microsd. This is
    * the store for logs, parameters and config. A missing/unformatted card is
    * non-fatal: the board still boots, just without persistent storage.
    */
@@ -705,7 +705,7 @@ int stm32_bringup(void)
   ret = stm32_sdio_initialize();
   if (ret < 0)
     {
-      syslog(LOG_ERR, "ERROR: microSD (SDMMC2) init failed: %d\n", ret);
+      syslog(LOG_ERR, "ERROR: microSD init failed: %d\n", ret);
       fmuv6c_boot_optional_failure(&boot);
     }
   else
@@ -872,9 +872,8 @@ int stm32_bringup(void)
 #endif
 
 #ifdef CONFIG_XXCAR_PPS
-  /* TIM3 captures the rising edge on TELEM2 CTS in hardware. It is
-   * observe-only in this validation step: PPS loss or reacquisition cannot
-   * step either the monotonic estimator clock or UTC.
+  /* Hardware input capture observes PPS without stepping the monotonic
+   * estimator clock or UTC.
    */
 
   if (param_i32("PPS_EN") != 0)
@@ -888,7 +887,12 @@ int stm32_bringup(void)
       else
         {
           syslog(LOG_INFO,
-                 "[pps] TELEM2 CTS PC9/TIM3_CH4 capture ready\n");
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+                 "[pps] S1 PA0/TIM5_CH1 capture ready\n"
+#else
+                 "[pps] TELEM2 CTS PC9/TIM3_CH4 capture ready\n"
+#endif
+                 );
         }
     }
 #endif
@@ -909,7 +913,7 @@ int stm32_bringup(void)
     }
 #endif
 
-#ifdef CONFIG_XXCAR_PX4IO
+#if defined(CONFIG_XXCAR_PX4IO) && !defined(CONFIG_XXCAR_BOARD_MATEKH743)
   /* The PX4IO co-processor owns the RC IN connector and the PWM rails, and it
    * failsafes those rails if we stop talking to it. Starting the client at boot
    * is what makes RC available without anyone having to type a command.

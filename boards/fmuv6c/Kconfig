@@ -4,5 +4,11 @@
 # For a description of the syntax of this configuration file, see
 # the file kconfig-language.txt in the NuttX tools repository.
 #
-# Stage 1 has no board-specific Kconfig options yet. Sensor-bus and
-# override/failsafe options will be added in later stages.
+config XXCAR_BOARD_MATEKH743
+	bool "Build for Mateksys H743-SLIM-V4"
+	default n
+	help
+		Select the Mateksys H743-SLIM-V4 hardware description while reusing
+		the common xxCar STM32H743 board layer.  Leave this disabled for the
+		Holybro Pixhawk 6C/FMUV6C target.  Use tools/build.sh or make BOARD=...
+		rather than changing this option by hand.

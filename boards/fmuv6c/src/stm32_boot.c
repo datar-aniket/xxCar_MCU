@@ -62,10 +62,12 @@ void stm32_boardinitialize(void)
    *   VDD_5V_HIPOWER -> the higher-current 5V (servo / RC power)
    */
 
+#ifdef XXCAR_BOARD_HAS_SWITCHED_POWER
   stm32_configgpio(GPIO_VDD_5V_PERIPH_nEN);
   stm32_configgpio(GPIO_VDD_5V_PERIPH_nOC);
   stm32_configgpio(GPIO_VDD_5V_HIPOWER_nEN);
   stm32_configgpio(GPIO_VDD_5V_HIPOWER_nOC);
+#endif
 
 #ifdef CONFIG_ARCH_LEDS
   /* Configure on-board LEDs if LED support has been selected. */

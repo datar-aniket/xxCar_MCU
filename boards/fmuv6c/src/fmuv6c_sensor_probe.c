@@ -50,6 +50,9 @@
 #define IST8310_WAI_REG       0x00
 #define IST8310_WAI_VAL       0x10
 #define MS5611_RESET_CMD      0x1e
+#define DPS368_ID_REG         0x0d
+#define DPS368_ID_MASK        0x0f
+#define DPS368_ID_VAL         0x00
 
 /****************************************************************************
  * Private Functions
@@ -98,6 +101,7 @@ static int i2c_read_reg(FAR struct i2c_master_s *i2c, uint8_t addr,
   return I2C_TRANSFER(i2c, msg, 2);
 }
 
+#ifndef CONFIG_XXCAR_BOARD_MATEKH743
 static int i2c_write_cmd(FAR struct i2c_master_s *i2c, uint8_t addr,
                          uint8_t cmd)
 {
@@ -111,6 +115,7 @@ static int i2c_write_cmd(FAR struct i2c_master_s *i2c, uint8_t addr,
 
   return I2C_TRANSFER(i2c, &msg, 1);
 }
+#endif
 
 #define PF(ok) ((ok) ? "PASS" : "FAIL")
 
@@ -128,6 +133,9 @@ FAR const char *fmuv6c_secondary_imu_name(
 
       case FMUV6C_SECONDARY_IMU_BMI088:
         return "BMI088";
+
+      case FMUV6C_SECONDARY_IMU_ICM42688:
+        return "ICM42688";
 
       default:
         return "unknown";
@@ -149,7 +157,11 @@ int fmuv6c_sensor_probe(FAR struct fmuv6c_sensor_probe_s *result)
 
   memset(result, 0, sizeof(*result));
 
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+  syslog(LOG_INFO, "==== MATEKH743-SLIM-V4 sensor discovery ====\n");
+#else
   syslog(LOG_INFO, "==== FMUv6C sensor discovery ====\n");
+#endif
 
   /* ---- SPI1 IMUs ---- */
 
@@ -161,15 +173,20 @@ int fmuv6c_sensor_probe(FAR struct fmuv6c_sensor_probe_s *result)
     }
   else
     {
-      /* ICM-42688-P (CS PC13), SPI mode 3 */
+      /* Primary ICM-42688-P, SPI mode 3. */
 
       id = spi_read_id(spi, SPIDEV_IMU(FMUV6C_SPIDEV_ICM42688),
                        ICM42688_WHOAMI_REG, SPIDEV_MODE3, false);
       result->icm42688_id = id;
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+      syslog(LOG_INFO, "[probe] ICM-42688-P  SPI1 CS PC15  WHOAMI=0x%02x  %s\n",
+#else
       syslog(LOG_INFO, "[probe] ICM-42688-P  SPI1 CS PC13  WHOAMI=0x%02x  %s\n",
+#endif
              id, PF(id == ICM42688_WHOAMI_VAL));
       fail += (id != ICM42688_WHOAMI_VAL);
 
+#ifndef CONFIG_XXCAR_BOARD_MATEKH743
       /* 2nd-IMU accel (CS PC15). The FMUv6C ships one of two Bosch parts by
        * board rev: BMI055 accel (chip-id 0xFA @reg0x00, NO dummy byte) on early
        * revs, or BMI088 accel (chip-id 0x1E @reg0x00, WITH a dummy byte) on
@@ -233,7 +250,35 @@ int fmuv6c_sensor_probe(FAR struct fmuv6c_sensor_probe_s *result)
       syslog(LOG_INFO, "[probe] BMI0xx-gyro  SPI1 CS PC14  CHIPID=0x%02x  %s\n",
              id, PF(id == BMI_GYR_CHIPID_VAL));
       fail += (id != BMI_GYR_CHIPID_VAL);
+#endif
     }
+
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+  /* The V4 secondary ICM-42688-P is on SPI4, CS PC13. */
+
+  spi = stm32_spibus_initialize(4);
+  if (spi == NULL)
+    {
+      syslog(LOG_ERR, "[probe] SPI4 init FAILED\n");
+      fail++;
+    }
+  else
+    {
+      id = spi_read_id(spi, SPIDEV_IMU(MATEKH743_SPIDEV_ICM42688_2),
+                       ICM42688_WHOAMI_REG, SPIDEV_MODE3, false);
+      result->secondary_accel_id = id;
+      result->secondary_gyro_id = id;
+      if (id == ICM42688_WHOAMI_VAL)
+        {
+          result->secondary_imu = FMUV6C_SECONDARY_IMU_ICM42688;
+        }
+
+      syslog(LOG_INFO,
+             "[probe] ICM-42688-P  SPI4 CS PC13  WHOAMI=0x%02x  %s\n",
+             id, PF(id == ICM42688_WHOAMI_VAL));
+      fail += (id != ICM42688_WHOAMI_VAL);
+    }
+#endif
 
   /* ---- I2C4 internal sensor module ---- */
 
@@ -245,6 +290,26 @@ int fmuv6c_sensor_probe(FAR struct fmuv6c_sensor_probe_s *result)
     }
   else
     {
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+      /* DPS368 barometer @0x76. Product ID is the low nibble (zero). */
+
+      val = 0xff;
+      if (i2c_read_reg(i2c, 0x76, DPS368_ID_REG, &val) == OK &&
+          (val & DPS368_ID_MASK) == DPS368_ID_VAL)
+        {
+          result->baro_id = val;
+          syslog(LOG_INFO,
+                 "[probe] DPS368      I2C2 0x76    ID=0x%02x       PASS\n",
+                 val);
+        }
+      else
+        {
+          syslog(LOG_INFO,
+                 "[probe] DPS368      I2C2 0x76    ID=0x%02x       FAIL\n",
+                 val);
+          fail++;
+        }
+#else
       /* IST8310 magnetometer @0x0c */
 
       val = 0;
@@ -283,6 +348,7 @@ int fmuv6c_sensor_probe(FAR struct fmuv6c_sensor_probe_s *result)
           syslog(LOG_INFO, "[probe] EEPROM      I2C4 0x50    no-ACK       FAIL\n");
           fail++;
         }
+#endif
     }
 
   syslog(LOG_INFO, "==== sensor discovery: %s (%d fail) ====\n",
@@ -290,10 +356,11 @@ int fmuv6c_sensor_probe(FAR struct fmuv6c_sensor_probe_s *result)
   result->failures = fail > UINT8_MAX ? UINT8_MAX : (uint8_t)fail;
   syslog(LOG_INFO,
          "[imu-id] primary=ICM42688(0x%02x) secondary=%s"
-         " accel=0x%02x gyro=0x%02x\n",
+         " accel=0x%02x gyro=0x%02x baro=0x%02x\n",
          result->icm42688_id,
          fmuv6c_secondary_imu_name(result->secondary_imu),
-         result->secondary_accel_id, result->secondary_gyro_id);
+         result->secondary_accel_id, result->secondary_gyro_id,
+         result->baro_id);
   return fail ? -ENODEV : OK;
 }
 

@@ -60,7 +60,11 @@
  * to OTG_FS PA11/PA12).  TODO(hw): port pin-mux from PX4 fmu-v6c board.h.
  */
 
-#define STM32_BOARD_XTAL        16000000ul
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+#  define STM32_BOARD_XTAL       8000000ul
+#else
+#  define STM32_BOARD_XTAL      16000000ul
+#endif
 
 #define STM32_HSI_FREQUENCY     16000000ul
 #define STM32_LSI_FREQUENCY     32000
@@ -107,12 +111,20 @@
                                  RCC_PLLCFGR_DIVQ1EN | \
                                  RCC_PLLCFGR_DIVR1EN)
 #define STM32_PLLCFG_PLL1M       RCC_PLLCKSELR_DIVM1(1)
-#define STM32_PLLCFG_PLL1N       RCC_PLL1DIVR_N1(60)
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+#  define STM32_PLLCFG_PLL1N     RCC_PLL1DIVR_N1(120)
+#else
+#  define STM32_PLLCFG_PLL1N     RCC_PLL1DIVR_N1(60)
+#endif
 #define STM32_PLLCFG_PLL1P       RCC_PLL1DIVR_P1(2)
 #define STM32_PLLCFG_PLL1Q       RCC_PLL1DIVR_Q1(4)
 #define STM32_PLLCFG_PLL1R       RCC_PLL1DIVR_R1(8)
 
-#define STM32_VCO1_FREQUENCY     ((STM32_HSE_FREQUENCY / 1) * 60)
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+#  define STM32_VCO1_FREQUENCY   ((STM32_HSE_FREQUENCY / 1) * 120)
+#else
+#  define STM32_VCO1_FREQUENCY   ((STM32_HSE_FREQUENCY / 1) * 60)
+#endif
 #define STM32_PLL1P_FREQUENCY    (STM32_VCO1_FREQUENCY / 2)
 #define STM32_PLL1Q_FREQUENCY    (STM32_VCO1_FREQUENCY / 4)
 #define STM32_PLL1R_FREQUENCY    (STM32_VCO1_FREQUENCY / 8)
@@ -124,36 +136,59 @@
                                   RCC_PLLCFGR_DIVP2EN | \
                                   RCC_PLLCFGR_DIVQ2EN | \
                                   RCC_PLLCFGR_DIVR2EN)
-#define STM32_PLLCFG_PLL2M       RCC_PLLCKSELR_DIVM2(4)
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+#  define STM32_PLLCFG_PLL2M     RCC_PLLCKSELR_DIVM2(2)
+#else
+#  define STM32_PLLCFG_PLL2M     RCC_PLLCKSELR_DIVM2(4)
+#endif
 #define STM32_PLLCFG_PLL2N       RCC_PLL2DIVR_N2(48)
 #define STM32_PLLCFG_PLL2P       RCC_PLL2DIVR_P2(2)
 #define STM32_PLLCFG_PLL2Q       RCC_PLL2DIVR_Q2(2)
 #define STM32_PLLCFG_PLL2R       RCC_PLL2DIVR_R2(2)
 
-#define STM32_VCO2_FREQUENCY     ((STM32_HSE_FREQUENCY / 4) * 48)
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+#  define STM32_VCO2_FREQUENCY   ((STM32_HSE_FREQUENCY / 2) * 48)
+#else
+#  define STM32_VCO2_FREQUENCY   ((STM32_HSE_FREQUENCY / 4) * 48)
+#endif
 #define STM32_PLL2P_FREQUENCY    (STM32_VCO2_FREQUENCY / 2)
 #define STM32_PLL2Q_FREQUENCY    (STM32_VCO2_FREQUENCY / 2)
 #define STM32_PLL2R_FREQUENCY    (STM32_VCO2_FREQUENCY / 2)
 
-/* PLL3 is DISABLED. FMUv6C/PX4 clock USB from PLL3Q, but NuttX's H7 RCC waits
- * for PLL3RDY in an unbounded loop, so a mis-lock would hang boot before USB
- * ever comes up. We instead clock USB from the internal HSI48 (see USBSRC
- * below + CONFIG_STM32H7_HSI48), which always locks -- nucleo-h743zi does the
- * same. Nothing else on this board uses PLL3. TODO: revisit if a peripheral
- * needs a PLL3 output.
+/* Matek's known-good PX4 bootloader and application clock USB from an exact
+ * 48 MHz PLL3Q derived from the board's 8 MHz HSE.  Using the free-running
+ * HSI48 here made the bootloader enumerate correctly and the application fail
+ * to enumerate on H743-SLIM-V4 hardware.  Keep the existing HSI48 choice for
+ * FMUv6C, where it has already been verified on hardware.
  */
 
-#define STM32_PLLCFG_PLL3CFG 0
-#define STM32_PLLCFG_PLL3M   0
-#define STM32_PLLCFG_PLL3N   0
-#define STM32_PLLCFG_PLL3P   0
-#define STM32_PLLCFG_PLL3Q   0
-#define STM32_PLLCFG_PLL3R   0
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+#  define STM32_PLLCFG_PLL3CFG  (RCC_PLLCFGR_PLL3VCOSEL_WIDE | \
+                                 RCC_PLLCFGR_PLL3RGE_4_8_MHZ | \
+                                 RCC_PLLCFGR_DIVQ3EN)
+#  define STM32_PLLCFG_PLL3M    RCC_PLLCKSELR_DIVM3(2)
+#  define STM32_PLLCFG_PLL3N    RCC_PLL3DIVR_N3(48)
+#  define STM32_PLLCFG_PLL3P    RCC_PLL3DIVR_P3(2)
+#  define STM32_PLLCFG_PLL3Q    RCC_PLL3DIVR_Q3(4)
+#  define STM32_PLLCFG_PLL3R    RCC_PLL3DIVR_R3(2)
 
-#define STM32_VCO3_FREQUENCY
-#define STM32_PLL3P_FREQUENCY
-#define STM32_PLL3Q_FREQUENCY
-#define STM32_PLL3R_FREQUENCY
+#  define STM32_VCO3_FREQUENCY  ((STM32_HSE_FREQUENCY / 2) * 48)
+#  define STM32_PLL3P_FREQUENCY (STM32_VCO3_FREQUENCY / 2)
+#  define STM32_PLL3Q_FREQUENCY (STM32_VCO3_FREQUENCY / 4)
+#  define STM32_PLL3R_FREQUENCY (STM32_VCO3_FREQUENCY / 2)
+#else
+#  define STM32_PLLCFG_PLL3CFG  0
+#  define STM32_PLLCFG_PLL3M    0
+#  define STM32_PLLCFG_PLL3N    0
+#  define STM32_PLLCFG_PLL3P    0
+#  define STM32_PLLCFG_PLL3Q    0
+#  define STM32_PLLCFG_PLL3R    0
+
+#  define STM32_VCO3_FREQUENCY
+#  define STM32_PLL3P_FREQUENCY
+#  define STM32_PLL3Q_FREQUENCY
+#  define STM32_PLL3R_FREQUENCY
+#endif
 
 /* SYSCLK = PLL1P = 480 MHz
  * CPUCLK = SYSCLK / 1 = 480 MHz
@@ -241,9 +276,13 @@
 
 #define STM32_RCC_D3CCIPR_SPI6SRC    RCC_D3CCIPR_SPI6SEL_PLL2
 
-/* USB 1 and 2 clock source - HSI48 (internal 48 MHz RC; see PLL3 note above) */
+/* USB 1 and 2 clock source. */
 
-#define STM32_RCC_D2CCIP2R_USBSRC    RCC_D2CCIP2R_USBSEL_HSI48
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+#  define STM32_RCC_D2CCIP2R_USBSRC  RCC_D2CCIP2R_USBSEL_PLL3
+#else
+#  define STM32_RCC_D2CCIP2R_USBSRC  RCC_D2CCIP2R_USBSEL_HSI48
+#endif
 
 /* UART clock selection - reset to default RCC (overwrite any bootloader change) */
 
@@ -300,8 +339,13 @@
 #define STM32_SDMMC_INIT_CLKDIV     (300 << STM32_SDMMC_CLKCR_CLKDIV_SHIFT)
 
 #if defined(CONFIG_STM32H7_SDMMC_IDMA)
-#  define STM32_SDMMC_MMCXFR_CLKDIV (5 << STM32_SDMMC_CLKCR_CLKDIV_SHIFT)
-#  define STM32_SDMMC_SDXFR_CLKDIV  (5 << STM32_SDMMC_CLKCR_CLKDIV_SHIFT)
+#  ifdef CONFIG_XXCAR_BOARD_MATEKH743
+#    define STM32_SDMMC_MMCXFR_CLKDIV (6 << STM32_SDMMC_CLKCR_CLKDIV_SHIFT)
+#    define STM32_SDMMC_SDXFR_CLKDIV  (6 << STM32_SDMMC_CLKCR_CLKDIV_SHIFT)
+#  else
+#    define STM32_SDMMC_MMCXFR_CLKDIV (5 << STM32_SDMMC_CLKCR_CLKDIV_SHIFT)
+#    define STM32_SDMMC_SDXFR_CLKDIV  (5 << STM32_SDMMC_CLKCR_CLKDIV_SHIFT)
+#  endif
 #else
 #  define STM32_SDMMC_MMCXFR_CLKDIV (100 << STM32_SDMMC_CLKCR_CLKDIV_SHIFT)
 #  define STM32_SDMMC_SDXFR_CLKDIV  (100 << STM32_SDMMC_CLKCR_CLKDIV_SHIFT)
@@ -321,12 +365,21 @@
  * even the ones that have only a single option.
  */
 
-#define GPIO_SDMMC2_CK    GPIO_SDMMC2_CK_1   /* PD6  */
-#define GPIO_SDMMC2_CMD   GPIO_SDMMC2_CMD_1  /* PD7  */
-#define GPIO_SDMMC2_D0    GPIO_SDMMC2_D0_0   /* PB14 */
-#define GPIO_SDMMC2_D1    GPIO_SDMMC2_D1_0   /* PB15 */
-#define GPIO_SDMMC2_D2    GPIO_SDMMC2_D2_2   /* PB3  */
-#define GPIO_SDMMC2_D3    GPIO_SDMMC2_D3_0   /* PB4  */
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+#  define GPIO_SDMMC1_CK  (GPIO_SDMMC1_CK_0  | GPIO_SPEED_50MHz) /* PC12 */
+#  define GPIO_SDMMC1_CMD (GPIO_SDMMC1_CMD_0 | GPIO_SPEED_50MHz) /* PD2  */
+#  define GPIO_SDMMC1_D0  (GPIO_SDMMC1_D0_0  | GPIO_SPEED_50MHz) /* PC8  */
+#  define GPIO_SDMMC1_D1  (GPIO_SDMMC1_D1_0  | GPIO_SPEED_50MHz) /* PC9  */
+#  define GPIO_SDMMC1_D2  (GPIO_SDMMC1_D2_0  | GPIO_SPEED_50MHz) /* PC10 */
+#  define GPIO_SDMMC1_D3  (GPIO_SDMMC1_D3_0  | GPIO_SPEED_50MHz) /* PC11 */
+#else
+#  define GPIO_SDMMC2_CK    GPIO_SDMMC2_CK_1   /* PD6  */
+#  define GPIO_SDMMC2_CMD   GPIO_SDMMC2_CMD_1  /* PD7  */
+#  define GPIO_SDMMC2_D0    GPIO_SDMMC2_D0_0   /* PB14 */
+#  define GPIO_SDMMC2_D1    GPIO_SDMMC2_D1_0   /* PB15 */
+#  define GPIO_SDMMC2_D2    GPIO_SDMMC2_D2_2   /* PB3  */
+#  define GPIO_SDMMC2_D3    GPIO_SDMMC2_D3_0   /* PB4  */
+#endif
 
 /* Ethernet definitions *****************************************************/
 
@@ -454,11 +507,19 @@
 /* USART1 = GPS1 */
 
 #define GPIO_USART1_RX    (GPIO_USART1_RX_2 | GPIO_SPEED_100MHz) /* PA10 */
-#define GPIO_USART1_TX    (GPIO_USART1_TX_3 | GPIO_SPEED_100MHz) /* PB6 */
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+#  define GPIO_USART1_TX  (GPIO_USART1_TX_2 | GPIO_SPEED_100MHz) /* PA9 */
+#else
+#  define GPIO_USART1_TX  (GPIO_USART1_TX_3 | GPIO_SPEED_100MHz) /* PB6 */
+#endif
 
 /* USART2 = TELEM3 */
 
-#define GPIO_USART2_RX    (GPIO_USART2_RX_1 | GPIO_SPEED_100MHz) /* PA3 */
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+#  define GPIO_USART2_RX  (GPIO_USART2_RX_2 | GPIO_SPEED_100MHz) /* PD6 */
+#else
+#  define GPIO_USART2_RX  (GPIO_USART2_RX_1 | GPIO_SPEED_100MHz) /* PA3 */
+#endif
 #define GPIO_USART2_TX    (GPIO_USART2_TX_2 | GPIO_SPEED_100MHz) /* PD5 */
 
 /* USART3 = FMU DEBUG connector */
@@ -469,10 +530,15 @@
 #define DMAMAP_USART3_RX DMAMAP_DMA12_USART3RX_0
 #define DMAMAP_USART3_TX DMAMAP_DMA12_USART3TX_1
 
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+/* UART4 = spare/debug pads */
+#  define GPIO_UART4_RX   (GPIO_UART4_RX_3 | GPIO_SPEED_100MHz) /* PB8 */
+#  define GPIO_UART4_TX   (GPIO_UART4_TX_3 | GPIO_SPEED_100MHz) /* PB9 */
+#else
 /* UART5 = TELEM2 */
-
-#define GPIO_UART5_RX     (GPIO_UART5_RX_3 | GPIO_SPEED_100MHz) /* PD2 */
-#define GPIO_UART5_TX     (GPIO_UART5_TX_3 | GPIO_SPEED_100MHz) /* PC12 */
+#  define GPIO_UART5_RX   (GPIO_UART5_RX_3 | GPIO_SPEED_100MHz) /* PD2 */
+#  define GPIO_UART5_TX   (GPIO_UART5_TX_3 | GPIO_SPEED_100MHz) /* PC12 */
+#endif
 
 /* USART6 = link to the PX4IO co-processor (STM32F103).
  *
@@ -512,8 +578,12 @@
  * no measurable gain - the same argument USART6 makes below.
  */
 
-#define DMAMAP_USART2_RX  DMAMAP_DMA12_USART2RX_1  /* DMA2 - TELEM3 */
-#define DMAMAP_UART5_RX   DMAMAP_DMA12_UART5RX_1   /* DMA2 - TELEM2 */
+#define DMAMAP_USART2_RX  DMAMAP_DMA12_USART2RX_1  /* DMA2 */
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+#  define DMAMAP_UART4_RX DMAMAP_DMA12_UART4RX_1   /* DMA2 - TELEM2 */
+#else
+#  define DMAMAP_UART5_RX DMAMAP_DMA12_UART5RX_1   /* DMA2 - TELEM2 */
+#endif
 
 #define DMAMAP_USART6_RX  DMAMAP_DMA12_USART6RX_0  /* DMA1:71 */
 #define DMAMAP_USART6_TX  DMAMAP_DMA12_USART6TX_0  /* DMA1:72 */
@@ -531,9 +601,13 @@
 #define GPIO_UART8_RX     (GPIO_UART8_RX_1 | GPIO_SPEED_100MHz) /* PE0 */
 #define GPIO_UART8_TX     (GPIO_UART8_TX_1 | GPIO_SPEED_100MHz) /* PE1 */
 
-/* I2C1 - external / expansion bus (PB8/PB7) */
+/* I2C1 - external / expansion bus */
 
-#define GPIO_I2C1_SCL     (GPIO_I2C1_SCL_2 | GPIO_SPEED_50MHz) /* PB8 */
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+#  define GPIO_I2C1_SCL   (GPIO_I2C1_SCL_1 | GPIO_SPEED_50MHz) /* PB6 */
+#else
+#  define GPIO_I2C1_SCL   (GPIO_I2C1_SCL_2 | GPIO_SPEED_50MHz) /* PB8 */
+#endif
 #define GPIO_I2C1_SDA     (GPIO_I2C1_SDA_1 | GPIO_SPEED_50MHz) /* PB7 */
 
 /* I2C2 - external I2C connector (PB10/PB11) */
@@ -554,7 +628,14 @@
 
 #define GPIO_SPI1_SCK     (GPIO_SPI1_SCK_1  | GPIO_SPEED_50MHz) /* PA5 */
 #define GPIO_SPI1_MISO    (GPIO_SPI1_MISO_1 | GPIO_SPEED_50MHz) /* PA6 */
-#define GPIO_SPI1_MOSI    (GPIO_SPI1_MOSI_1 | GPIO_SPEED_50MHz) /* PA7 */
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+#  define GPIO_SPI1_MOSI  (GPIO_SPI1_MOSI_3 | GPIO_SPEED_50MHz) /* PD7 */
+#  define GPIO_SPI4_SCK   (GPIO_SPI4_SCK_1  | GPIO_SPEED_50MHz) /* PE12 */
+#  define GPIO_SPI4_MISO  (GPIO_SPI4_MISO_1 | GPIO_SPEED_50MHz) /* PE13 */
+#  define GPIO_SPI4_MOSI  (GPIO_SPI4_MOSI_1 | GPIO_SPEED_50MHz) /* PE14 */
+#else
+#  define GPIO_SPI1_MOSI  (GPIO_SPI1_MOSI_1 | GPIO_SPEED_50MHz) /* PA7 */
+#endif
 
 /* TIM1 - Advanced Timer 16-bit (4 channels) */
 #define GPIO_TIM1_CH1IN   (GPIO_TIM1_CH1IN_2)   /* PE9  */
@@ -634,6 +715,11 @@
 
 #define DMAMAP_SPI1_RX DMAMAP_DMA12_SPI1RX_0 /* DMA1 - internal IMU bus */
 #define DMAMAP_SPI1_TX DMAMAP_DMA12_SPI1TX_0 /* DMA1 - internal IMU bus */
+
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+#  define DMAMAP_SPI4_RX DMAMAP_DMA12_SPI4RX_1 /* DMA2 - secondary IMU */
+#  define DMAMAP_SPI4_TX DMAMAP_DMA12_SPI4TX_1 /* DMA2 - secondary IMU */
+#endif
 
 #define DMAMAP_SPI3_RX DMAMAP_DMA12_SPI3RX_0 /* DMA1 */
 #define DMAMAP_SPI3_TX DMAMAP_DMA12_SPI3TX_0 /* DMA1 */

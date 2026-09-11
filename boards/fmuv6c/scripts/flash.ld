@@ -100,8 +100,10 @@ MEMORY
   itcm  (rwx) : ORIGIN = 0x00000000, LENGTH =   64K
   /* App runs ABOVE the factory PX4 bootloader (first 128K sector at 0x08000000).
    * The bootloader validates and jumps to our vector table at 0x08020000.
-   * 1920K = 2048K total - 128K reserved for the bootloader. Must match the
-   * fmu-v6c firmware.prototype image_maxsize (1966080 bytes = 1920K). */
+   * The Matek package additionally limits its image to 0x081c0000 so sectors
+   * 14 and 15 remain available for the parameter journal.  The assertion
+   * below makes that reservation impossible to violate accidentally even
+   * though this shared FMUv6C memory region describes all remaining flash. */
   flash (rx)  : ORIGIN = 0x08020000, LENGTH = 1920K
   dtcm1 (rwx) : ORIGIN = 0x20000000, LENGTH =   64K
   dtcm2 (rwx) : ORIGIN = 0x20010000, LENGTH =   64K
@@ -166,6 +168,16 @@ SECTIONS
         . = ALIGN(4);
         _edata = ABSOLUTE(.);
     } > sram AT > flash
+
+    /* ArduPilot's MatekH743 definition also starts parameter storage at
+     * sector 14.  Keep every board image below that boundary; current images
+     * are much smaller, and failing the link is preferable to silently
+     * overwriting persistent calibration on a future larger build.
+     */
+
+    __flash_image_end = LOADADDR(.data) + SIZEOF(.data);
+    ASSERT(__flash_image_end <= 0x081c0000,
+           "firmware overlaps reserved parameter flash sectors 14-15")
 
     .bss :
     {

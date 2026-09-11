@@ -8,8 +8,8 @@
  *   param show [pattern]   list params (pattern is a name prefix)
  *   param get <name>       print one value
  *   param set <name> <v>   change a value (in RAM; use 'param save' to keep)
- *   param save             write /fs/microsd/params.txt
- *   param load             re-read it (e.g. after editing on a Linux host)
+ *   param save             write persistent storage
+ *   param load             re-read persistent storage
  *   param reset            restore defaults in RAM
  *
  * Typical Linux-host workflow:
@@ -39,9 +39,9 @@ static void param_usage(void)
          "  get <name>        print one value\n"
          "  set <name> <val>  change a value (RAM only until 'save')\n"
          "  save              write %s\n"
-         "  load              re-read it (after editing on a host)\n"
+         "  load              re-read persistent values\n"
          "  reset             restore defaults (RAM only until 'save')\n",
-         PARAM_FILE);
+         PARAM_STORAGE_NAME);
 }
 
 static int param_do_show(FAR const char *pattern)
@@ -159,12 +159,15 @@ int main(int argc, FAR char *argv[])
       if (ret < 0)
         {
           fprintf(stderr, "param: save failed: %d\n", ret);
+#ifndef CONFIG_XXCAR_BOARD_MATEKH743
           fprintf(stderr, "  is the card present and not exported "
                           "over USB (sdmsc off)?\n");
+#endif
           return 1;
         }
 
-      printf("saved %d changed parameter(s) to %s\n", ret, PARAM_FILE);
+      printf("saved %d changed parameter(s) to %s\n", ret,
+             PARAM_STORAGE_NAME);
       return 0;
     }
 
@@ -173,12 +176,13 @@ int main(int argc, FAR char *argv[])
       ret = param_load();
       if (ret < 0)
         {
-          fprintf(stderr, "param: load failed: %d (no %s?)\n",
-                  ret, PARAM_FILE);
+          fprintf(stderr, "param: load failed: %d (%s unavailable?)\n",
+                  ret, PARAM_STORAGE_NAME);
           return 1;
         }
 
-      printf("loaded %d parameter(s) from %s\n", ret, PARAM_FILE);
+      printf("loaded %d parameter(s) from %s\n", ret,
+             PARAM_STORAGE_NAME);
       return 0;
     }
 

@@ -21,7 +21,7 @@
  *
  * A board with no shell at all is a legal configuration and boots normally - it
  * is simply headless. The ways back in are the USB shell (on by default), the
- * microSD card (pull it and edit params.txt), or a reflash.
+ * microSD card (pull it and edit params.txt on FMUv6C), or a reflash.
  ****************************************************************************/
 
 #include <nuttx/config.h>

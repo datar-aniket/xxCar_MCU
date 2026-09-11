@@ -60,8 +60,9 @@ static bool g_initialized;
 
 static void phy_set_led(int led, bool state)
 {
-  /* Active High */
-
+#ifdef XXCAR_LED_ACTIVE_LOW
+  state = !state;
+#endif
   stm32_gpiowrite(g_ledmap[led], state);
 }
 
