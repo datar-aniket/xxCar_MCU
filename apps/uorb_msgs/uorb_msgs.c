@@ -253,6 +253,19 @@ static_assert(sizeof(struct estimator_diag_s)                         == 288, "l
 static_assert(ESTIMATOR_DIAG_QUEUE_SIZE >= 64u,
               "estimator_diag queue must absorb ordinary SD stalls");
 
+static_assert(offsetof(struct estimator_health_s, timestamp)              ==   0, "layout");
+static_assert(offsetof(struct estimator_health_s, timestamp_sample)       ==   8, "layout");
+static_assert(offsetof(struct estimator_health_s, last_extnav_accept)     ==  16, "layout");
+static_assert(offsetof(struct estimator_health_s, clock_skew_us)          ==  32, "layout");
+static_assert(offsetof(struct estimator_health_s, imu_age_us)             ==  40, "layout");
+static_assert(offsetof(struct estimator_health_s, horizon_us)             ==  60, "layout");
+static_assert(offsetof(struct estimator_health_s, imu_dt_s)               ==  64, "layout");
+static_assert(offsetof(struct estimator_health_s, input_count)            ==  96, "layout");
+static_assert(offsetof(struct estimator_health_s, output_replay_samples)  == 128, "layout");
+static_assert(offsetof(struct estimator_health_s, flags)                  == 132, "layout");
+static_assert(offsetof(struct estimator_health_s, solution_status)        == 134, "layout");
+static_assert(sizeof(struct estimator_health_s)                           == 136, "layout");
+
 /****************************************************************************
  * Private Data
  ****************************************************************************/
@@ -275,7 +288,6 @@ static const char distance_sensor_format[] =
 static const char vehicle_accel_format[] =
   "timestamp:%" PRIu64
   ",timestamp_sample:%" PRIu64
-  ",extnav_timestamp:%" PRIu64
   ",x:%hf,y:%hf,z:%hf"
   ",instance:%hhu,calibrated:%hhu";
 
@@ -433,6 +445,23 @@ static const char estimator_diag_format[] =
   ",gravity_accept_count:%" PRIu32 ",gravity_reject_count:%" PRIu32
   ",wheel_accept_count:%" PRIu32 ",wheel_reject_count:%" PRIu32
   ",reset_counter:%hu,flags:%hu,instance:%hhu";
+
+static const char estimator_health_format[] =
+  "timestamp:%" PRIu64 ",timestamp_sample:%" PRIu64
+  ",last_extnav_accept:%" PRIu64 ",last_extnav_rx:%" PRIu64
+  ",clock_skew_us:%" PRId64
+  ",imu_age_us:%" PRId32 ",output_age_us:%" PRId32
+  ",extnav_accept_age_us:%" PRId32 ",extnav_rx_age_us:%" PRId32
+  ",extnav_source_age_us:%" PRId32 ",horizon_us:%" PRIu32
+  ",imu_dt_s:%hf,covariance_diag_min:%hf,covariance_diag_max:%hf"
+  ",covariance_asymmetry_max:%hf,extnav_test_ratio:%hf,gravity_nis:%hf"
+  ",monitor_aiding_tilt:%hf,monitor_imu_tilt:%hf"
+  ",input_count:%" PRIu32 ",predict_count:%" PRIu32
+  ",process_reject_count:%" PRIu32 ",numerical_reset_count:%" PRIu32
+  ",imu_overflow_count:%" PRIu32 ",aiding_overflow_count:%" PRIu32
+  ",extnav_reject_run:%" PRIu32 ",publish_error_count:%" PRIu32
+  ",output_replay_samples:%hu,reset_counter:%hu,flags:%hu"
+  ",solution_status:%hhu,instance:%hhu";
 #endif
 
 /****************************************************************************
@@ -459,6 +488,8 @@ ORB_DEFINE(estimator_state, struct estimator_state_s,
            estimator_state_format);
 ORB_DEFINE(estimator_diag, struct estimator_diag_s,
            estimator_diag_format);
+ORB_DEFINE(estimator_health, struct estimator_health_s,
+           estimator_health_format);
 
 /****************************************************************************
  * Public Functions
@@ -705,4 +736,20 @@ int estimator_diag_publish(int fd, FAR const struct estimator_diag_s *msg)
     }
 
   return orb_publish(ORB_ID(estimator_diag), fd, msg);
+}
+
+int estimator_health_advertise(void)
+{
+  return orb_advertise(ORB_ID(estimator_health), NULL);
+}
+
+int estimator_health_publish(int fd,
+                             FAR const struct estimator_health_s *msg)
+{
+  if (fd < 0 || msg == NULL)
+    {
+      return -EINVAL;
+    }
+
+  return orb_publish(ORB_ID(estimator_health), fd, msg);
 }

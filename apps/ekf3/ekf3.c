@@ -44,6 +44,7 @@
 #define EKF3_MAG_MAX_AGE_US   500000ull
 #define EKF3_EXT_MAX_AGE_US   500000ull
 #define EKF3_WHEEL_MAX_AGE_US 200000ull
+#define EKF3_HEALTH_PERIOD_US  100000ull
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static volatile bool g_running;
@@ -359,6 +360,214 @@ static void publish_diagnostics(
     }
 }
 
+static int32_t health_age_us(uint64_t newer, uint64_t older)
+{
+  int64_t age;
+
+  if (older == 0)
+    {
+      return INT32_MAX;
+    }
+
+  age = (int64_t)newer - (int64_t)older;
+  if (age > INT32_MAX)
+    {
+      return INT32_MAX;
+    }
+
+  if (age < INT32_MIN)
+    {
+      return INT32_MIN;
+    }
+
+  return (int32_t)age;
+}
+
+static void publish_health(int publisher, FAR struct ekf3_status_s *status,
+                           uint64_t now, uint64_t newest_sample_time)
+{
+  FAR const struct ekf_core_s *core = &status->core;
+  struct estimator_health_s message;
+  float diagonal_min = INFINITY;
+  float diagonal_max = -INFINITY;
+  float asymmetry_max = 0.0f;
+  bool covariance_finite = true;
+  bool covariance_positive = true;
+  int row;
+  int column;
+
+  if (publisher < 0 ||
+      (status->last_health_us != 0 &&
+       now - status->last_health_us < EKF3_HEALTH_PERIOD_US))
+    {
+      return;
+    }
+
+  memset(&message, 0, sizeof(message));
+
+  for (row = 0; row < EKF_STATE_DIM; row++)
+    {
+      float diagonal = core->covariance[EKF_P_INDEX(row, row)];
+
+      if (!isfinite(diagonal))
+        {
+          covariance_finite = false;
+          covariance_positive = false;
+        }
+      else
+        {
+          if (diagonal < diagonal_min)
+            {
+              diagonal_min = diagonal;
+            }
+
+          if (diagonal > diagonal_max)
+            {
+              diagonal_max = diagonal;
+            }
+
+          if (diagonal < 0.0f)
+            {
+              covariance_positive = false;
+            }
+        }
+
+      for (column = row + 1; column < EKF_STATE_DIM; column++)
+        {
+          float upper = core->covariance[EKF_P_INDEX(row, column)];
+          float lower = core->covariance[EKF_P_INDEX(column, row)];
+          float difference;
+
+          if (!isfinite(upper) || !isfinite(lower))
+            {
+              covariance_finite = false;
+              continue;
+            }
+
+          difference = fabsf(upper - lower);
+          if (difference > asymmetry_max)
+            {
+              asymmetry_max = difference;
+            }
+        }
+    }
+
+  message.timestamp = now;
+  message.timestamp_sample = newest_sample_time;
+  message.last_extnav_accept = core->last_extnav_timestamp;
+  message.last_extnav_rx = core->last_extnav_rx_timestamp;
+  message.clock_skew_us = status->clock_skew_us;
+  message.imu_age_us = health_age_us(now, newest_sample_time);
+  message.output_age_us = health_age_us(now, status->last_output_us);
+  message.extnav_accept_age_us =
+    health_age_us(core->last_timestamp_sample, core->last_extnav_timestamp);
+  message.extnav_rx_age_us =
+    health_age_us(core->last_timestamp_sample, core->last_extnav_rx_timestamp);
+  message.extnav_source_age_us = status->extnav_age_samples == 0 ?
+    INT32_MAX : status->extnav_age_us > INT32_MAX ?
+    INT32_MAX : status->extnav_age_us < INT32_MIN ?
+    INT32_MIN : (int32_t)status->extnav_age_us;
+  message.horizon_us = status->horizon_ms * 1000u;
+  message.imu_dt_s = status->last_imu_dt_s;
+  message.covariance_diag_min = isfinite(diagonal_min) ? diagonal_min : NAN;
+  message.covariance_diag_max = isfinite(diagonal_max) ? diagonal_max : NAN;
+  message.covariance_asymmetry_max = asymmetry_max;
+  message.extnav_test_ratio = core->extnav_test_ratio;
+  message.gravity_nis = core->last_gravity_nis;
+  message.monitor_aiding_tilt = status->mon_aiding_tilt;
+  message.monitor_imu_tilt = status->mon_imu_tilt;
+  message.input_count = core->input_count;
+  message.predict_count = core->predict_count;
+  message.process_reject_count = core->rejected_count;
+  message.numerical_reset_count = core->numerical_reset_count;
+  message.imu_overflow_count = status->imu_overflow;
+  message.aiding_overflow_count = status->mag_overflow +
+    status->baro_overflow + status->extnav_overflow + status->wheel_overflow;
+  message.extnav_reject_run = core->extnav_consecutive_rejects;
+  message.publish_error_count = status->publish_errors;
+  message.output_replay_samples = status->output_replay;
+  message.reset_counter = core->reset_counter;
+  message.solution_status = ekf_core_solution_status(core);
+
+  if (core->initialized)
+    {
+      message.flags |= EST_HEALTH_INITIALIZED;
+    }
+
+  if (covariance_finite)
+    {
+      message.flags |= EST_HEALTH_COV_FINITE;
+    }
+
+  if (covariance_positive)
+    {
+      message.flags |= EST_HEALTH_COV_NONNEGATIVE;
+    }
+
+  if (covariance_finite &&
+      asymmetry_max <= 1.0e-5f * fmaxf(1.0f, fabsf(diagonal_max)))
+    {
+      message.flags |= EST_HEALTH_COV_SYMMETRIC;
+    }
+
+  if (status->extnav_available)
+    {
+      message.flags |= EST_HEALTH_EXTNAV_AVAILABLE;
+    }
+
+  if (core->extnav_healthy)
+    {
+      message.flags |= EST_HEALTH_EXTNAV_HEALTHY;
+    }
+
+  if (ekf_core_position_aided(core))
+    {
+      message.flags |= EST_HEALTH_POSITION_AIDED;
+    }
+
+  if (status->wheel_fresh)
+    {
+      message.flags |= EST_HEALTH_WHEEL_FRESH;
+    }
+
+  if (status->wheel_slipping)
+    {
+      message.flags |= EST_HEALTH_WHEEL_SLIPPING;
+    }
+
+  if (status->mon_aiding_fault)
+    {
+      message.flags |= EST_HEALTH_MON_AIDING_FAULT;
+    }
+
+  if (status->mon_imu_fault)
+    {
+      message.flags |= EST_HEALTH_MON_IMU_FAULT;
+    }
+
+  if (status->imu_overflow != 0)
+    {
+      message.flags |= EST_HEALTH_IMU_OVERFLOW;
+    }
+
+  if (message.aiding_overflow_count != 0)
+    {
+      message.flags |= EST_HEALTH_AIDING_OVERFLOW;
+    }
+
+  if (status->publish_errors != 0)
+    {
+      message.flags |= EST_HEALTH_PUBLISH_ERROR;
+    }
+
+  if (estimator_health_publish(publisher, &message) < 0)
+    {
+      status->publish_errors++;
+    }
+
+  status->last_health_us = now;
+}
+
 /* Take exactly ONE fresh IMU packet into the ring. Returns false when there
  * is nothing left to read.
  *
@@ -405,6 +614,7 @@ static bool take_imu_sample(int sub, FAR struct ekf3_status_s *status,
         }
 
       fill_core_sample(&message, &sample);
+      status->last_imu_dt_s = sample.delta_velocity_dt;
       ekf_delay_push_imu(&g_delay, &sample);
 
       if (newest_sample_time != NULL)
@@ -960,6 +1170,7 @@ static int ekf3_daemon(int argc, FAR char *argv[])
   int wheel_sub = -1;
   int publisher = -1;
   int diag_publisher = -1;
+  int health_publisher = -1;
   int result = EXIT_FAILURE;
 
   memset(&status, 0, sizeof(status));
@@ -997,8 +1208,10 @@ static int ekf3_daemon(int argc, FAR char *argv[])
   subscriber = orb_subscribe(ORB_ID(vehicle_imu));
   publisher = estimator_state_advertise();
   diag_publisher = estimator_diag_advertise();
+  health_publisher = estimator_health_advertise();
 
-  if (subscriber < 0 || publisher < 0 || diag_publisher < 0)
+  if (subscriber < 0 || publisher < 0 || diag_publisher < 0 ||
+      health_publisher < 0)
     {
       syslog(LOG_ERR,
              "[ekf3] IMU or estimator publisher unavailable; start "
@@ -1507,6 +1720,7 @@ static int ekf3_daemon(int argc, FAR char *argv[])
       status.baro_overflow = g_delay.baro_overflow_count;
       status.extnav_overflow = g_delay.extnav_overflow_count;
       status.wheel_overflow = g_delay.wheel_overflow_count;
+      publish_health(health_publisher, &status, now, newest_sample_time);
       status_publish(&status);
     }
 
@@ -1554,6 +1768,11 @@ out:
   if (diag_publisher >= 0)
     {
       close(diag_publisher);
+    }
+
+  if (health_publisher >= 0)
+    {
+      close(health_publisher);
     }
 
   g_running = false;

@@ -110,6 +110,7 @@
 #define ULOG_MSG_FORMAT  'F'
 #define ULOG_MSG_ADD_SUB 'A'
 #define ULOG_MSG_DATA    'D'
+#define ULOG_MSG_PARAM   'P'
 
 /****************************************************************************
  * Private Types
@@ -207,6 +208,16 @@ g_formats[] =
   { "vehicle_accel",
     "uint64_t timestamp;uint64_t timestamp_sample;float x;float y;float z;"
     "uint8_t instance;uint8_t calibrated;" },
+  { "vehicle_mag",
+    "uint64_t timestamp;uint64_t timestamp_sample;float[3] field;"
+    "float temperature;uint8_t calibrated;uint8_t instance;" },
+  { "vehicle_baro",
+    "uint64_t timestamp;uint64_t timestamp_sample;float pressure;"
+    "float temperature;" },
+  { "vesc_status",
+    "uint64_t timestamp;uint64_t timestamp_sample;int32_t tachometer;"
+    "float current_a;float adc_volts;uint8_t controller_id;"
+    "uint8_t[3] _padding0;float speed_cps;uint16_t servo_us;" },
   { "vehicle_state_tx",
     "uint64_t timestamp;uint64_t timestamp_sample;"
     "uint64_t accel_timestamp_sample;uint64_t wire_timestamp_us;"
@@ -234,6 +245,21 @@ g_formats[] =
     "uint32_t gravity_reject_count;uint32_t wheel_accept_count;"
     "uint32_t wheel_reject_count;uint16_t reset_counter;uint16_t flags;"
     "uint8_t instance;" },
+  { "estimator_health",
+    "uint64_t timestamp;uint64_t timestamp_sample;"
+    "uint64_t last_extnav_accept;uint64_t last_extnav_rx;"
+    "int64_t clock_skew_us;int32_t imu_age_us;int32_t output_age_us;"
+    "int32_t extnav_accept_age_us;int32_t extnav_rx_age_us;"
+    "int32_t extnav_source_age_us;uint32_t horizon_us;float imu_dt_s;"
+    "float covariance_diag_min;float covariance_diag_max;"
+    "float covariance_asymmetry_max;float extnav_test_ratio;"
+    "float gravity_nis;float monitor_aiding_tilt;float monitor_imu_tilt;"
+    "uint32_t input_count;uint32_t predict_count;"
+    "uint32_t process_reject_count;uint32_t numerical_reset_count;"
+    "uint32_t imu_overflow_count;uint32_t aiding_overflow_count;"
+    "uint32_t extnav_reject_run;uint32_t publish_error_count;"
+    "uint16_t output_replay_samples;uint16_t reset_counter;uint16_t flags;"
+    "uint8_t solution_status;uint8_t instance;" },
 };
 
 #define NFORMATS ((int)(sizeof(g_formats) / sizeof(g_formats[0])))
@@ -265,8 +291,12 @@ static const struct log_topic_s g_topics[] =
   { NULL,            ORB_ID(estimator_state),    0, "estimator_state", 0, 128,"LOG_EKF"  },
   { NULL,            ORB_ID(external_pose),      0, "external_pose",   0, 54, "LOG_EKF"  },
   { NULL,            ORB_ID(vehicle_accel),      0, "vehicle_accel",   0, 30, "LOG_EKF"  },
+  { NULL,            ORB_ID(vehicle_mag),        0, "vehicle_mag",     0, 34, "LOG_EKF"  },
+  { NULL,            ORB_ID(vehicle_baro),       0, "vehicle_baro",    0, 24, "LOG_EKF"  },
+  { NULL,            ORB_ID(vesc_status),        0, "vesc_status",     0, 38, "LOG_EKF"  },
   { NULL,            ORB_ID(vehicle_state_tx),   0, "vehicle_state_tx",0, 119,"LOG_EKF"  },
   { NULL,            ORB_ID(estimator_diag),     0, "estimator_diag",  0, 285,"LOG_EKF"  },
+  { NULL,            ORB_ID(estimator_health),   0, "estimator_health",0, 136,"LOG_EKF"  },
 };
 
 #define NTOPICS ((int)(sizeof(g_topics) / sizeof(g_topics[0])))
@@ -577,6 +607,71 @@ static bool log_write_formats(void)
   return true;
 }
 
+/* Freeze the complete parameter set into every independently readable part.
+ * Replaying a sensor stream against today's parameters is not replaying the
+ * flight that produced it. ULog's P record is a one-byte key length, the key
+ * (`int32_t NAME` or `float NAME`), then the native little-endian value.
+ */
+
+static bool log_write_parameters(void)
+{
+  int count = param_count();
+  int index;
+
+  for (index = 0; index < count; index++)
+    {
+      FAR const struct param_def_s *def = param_def(index);
+      FAR const char *type;
+      union param_value_u value;
+      char key[64];
+      size_t keylen;
+      uint8_t payload[1 + sizeof(key) + sizeof(value)];
+      int result;
+
+      if (def == NULL)
+        {
+          return false;
+        }
+
+      if (def->type == PARAM_TYPE_INT32)
+        {
+          type = "int32_t";
+          result = param_get_i32(def->name, &value.i);
+        }
+      else
+        {
+          type = "float";
+          result = param_get_f32(def->name, &value.f);
+        }
+
+      if (result < 0)
+        {
+          return false;
+        }
+
+      result = snprintf(key, sizeof(key), "%s %s", type, def->name);
+      if (result <= 0 || (size_t)result >= sizeof(key) || result > UINT8_MAX)
+        {
+          syslog(LOG_ERR, "logger: parameter key is too long: %s\n",
+                 def->name);
+          return false;
+        }
+
+      keylen = (size_t)result;
+      payload[0] = (uint8_t)keylen;
+      memcpy(&payload[1], key, keylen);
+      memcpy(&payload[1 + keylen], &value, sizeof(uint32_t));
+
+      if (!log_msg(ULOG_MSG_PARAM, payload,
+                   (uint16_t)(1 + keylen + sizeof(uint32_t))))
+        {
+          return false;
+        }
+    }
+
+  return true;
+}
+
 static bool log_write_subscription(FAR const struct log_sub_s *sub)
 {
   uint8_t payload[64];
@@ -748,8 +843,12 @@ static int log_daemon(int argc, FAR char *argv[])
    * part - see LOG_PART_BYTES.
    */
 
-  log_write_header();
-  log_write_formats();
+  if (!log_write_header() || !log_write_formats() ||
+      !log_write_parameters())
+    {
+      syslog(LOG_ERR, "logger: could not write ULog prologue\n");
+      goto stop;
+    }
 
   for (i = 0; i < nsubs; i++)
     {
@@ -915,8 +1014,13 @@ static int log_daemon(int argc, FAR char *argv[])
           g_buflen     = 0;
           g_part_bytes = 0;
 
-          log_write_header();
-          log_write_formats();
+          if (!log_write_header() || !log_write_formats() ||
+              !log_write_parameters())
+            {
+              syslog(LOG_ERR,
+                     "logger: could not write prologue for part %d\n", part);
+              break;
+            }
 
           for (i = 0; i < nsubs; i++)
             {
@@ -931,6 +1035,7 @@ static int log_daemon(int argc, FAR char *argv[])
         }
     }
 
+stop:
   /* Guarded: the loop can exit with no file open, if opening the next part
    * failed. Flushing to -1 would silently discard the buffer, and fsync/close
    * on -1 are simply errors.

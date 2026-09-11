@@ -86,6 +86,7 @@ for sym in cal_session cal_main param_init serial_manager_start \
            g_orb_vehicle_imu \
            ekf_core_process \
            g_orb_estimator_state g_orb_estimator_diag \
+           g_orb_estimator_health \
            control_router_start g_orb_control_cmd; do
   if grep -qE "^[0-9a-f]+ T $sym\$" "$NM"; then
     printf '  %-22s linked\n' "$sym"

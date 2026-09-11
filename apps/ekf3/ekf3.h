@@ -63,6 +63,8 @@ struct ekf3_status_s
   uint64_t mon_imu_since;
   uint64_t first_output_us;
   uint64_t last_output_us;
+  uint64_t last_health_us;
+  float    last_imu_dt_s;
   uint32_t publish_count;
   uint32_t publish_errors;
   uint32_t stale_count;

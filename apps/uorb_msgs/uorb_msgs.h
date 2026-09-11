@@ -15,6 +15,7 @@
  *   vehicle_imu      unfiltered coning/sculling-corrected IMU deltas
  *   estimator_state  current-time EKF nominal state and validity
  *   estimator_diag   filter-horizon acceleration/fusion audit stream
+ *   estimator_health low-rate timing, covariance and fault summary
  *   control_trajectory  finite-horizon companion plan (non-actuating)
  *
  * The publisher is whatever driver has the data (apps/mavlink for now); the
@@ -531,6 +532,62 @@ struct estimator_diag_s
 
 #define ESTIMATOR_DIAG_QUEUE_SIZE 128u
 
+/* Ten-Hz operational health. This deliberately complements estimator_diag:
+ * diagnostics explain an individual update, while health shows whether the
+ * estimator and its input pipeline remain numerically and temporally sound.
+ */
+
+#define EST_HEALTH_INITIALIZED       (1u << 0)
+#define EST_HEALTH_COV_FINITE        (1u << 1)
+#define EST_HEALTH_COV_NONNEGATIVE   (1u << 2)
+#define EST_HEALTH_COV_SYMMETRIC     (1u << 3)
+#define EST_HEALTH_EXTNAV_AVAILABLE  (1u << 4)
+#define EST_HEALTH_EXTNAV_HEALTHY    (1u << 5)
+#define EST_HEALTH_POSITION_AIDED    (1u << 6)
+#define EST_HEALTH_WHEEL_FRESH       (1u << 7)
+#define EST_HEALTH_WHEEL_SLIPPING    (1u << 8)
+#define EST_HEALTH_MON_AIDING_FAULT  (1u << 9)
+#define EST_HEALTH_MON_IMU_FAULT     (1u << 10)
+#define EST_HEALTH_IMU_OVERFLOW      (1u << 11)
+#define EST_HEALTH_AIDING_OVERFLOW   (1u << 12)
+#define EST_HEALTH_PUBLISH_ERROR     (1u << 13)
+
+struct estimator_health_s
+{
+  uint64_t timestamp;                 /*   0: TIM5 publication time */
+  uint64_t timestamp_sample;          /*   8: newest IMU sample */
+  uint64_t last_extnav_accept;        /*  16: filter time, or zero */
+  uint64_t last_extnav_rx;            /*  24: filter time, or zero */
+  int64_t  clock_skew_us;             /*  32: TIM5 - CLOCK_MONOTONIC */
+  int32_t  imu_age_us;                /*  40: now - newest IMU */
+  int32_t  output_age_us;             /*  44: now - output horizon */
+  int32_t  extnav_accept_age_us;      /*  48: filter - last accept */
+  int32_t  extnav_rx_age_us;          /*  52: filter - last received */
+  int32_t  extnav_source_age_us;      /*  56: receive - source stamp */
+  uint32_t horizon_us;                /*  60: configured delay */
+  float    imu_dt_s;                  /*  64: latest delta interval */
+  float    covariance_diag_min;       /*  68 */
+  float    covariance_diag_max;       /*  72 */
+  float    covariance_asymmetry_max;  /*  76: max abs(Pij - Pji) */
+  float    extnav_test_ratio;         /*  80 */
+  float    gravity_nis;               /*  84 */
+  float    monitor_aiding_tilt;       /*  88: rad */
+  float    monitor_imu_tilt;          /*  92: rad */
+  uint32_t input_count;               /*  96 */
+  uint32_t predict_count;             /* 100 */
+  uint32_t process_reject_count;      /* 104 */
+  uint32_t numerical_reset_count;     /* 108 */
+  uint32_t imu_overflow_count;        /* 112 */
+  uint32_t aiding_overflow_count;     /* 116: mag+baro+extnav+wheel */
+  uint32_t extnav_reject_run;         /* 120 */
+  uint32_t publish_error_count;       /* 124 */
+  uint16_t output_replay_samples;     /* 128 */
+  uint16_t reset_counter;             /* 130 */
+  uint16_t flags;                     /* 132: EST_HEALTH_* */
+  uint8_t  solution_status;           /* 134 */
+  uint8_t  instance;                  /* 135 */
+};
+
 /****************************************************************************
  * Public Data
  ****************************************************************************/
@@ -550,6 +607,7 @@ ORB_DECLARE(control_trajectory);
 ORB_DECLARE(vehicle_imu);
 ORB_DECLARE(estimator_state);
 ORB_DECLARE(estimator_diag);
+ORB_DECLARE(estimator_health);
 
 /****************************************************************************
  * Public Function Prototypes
@@ -602,5 +660,8 @@ int estimator_state_publish(int fd, FAR const struct estimator_state_s *msg);
 
 int estimator_diag_advertise(void);
 int estimator_diag_publish(int fd, FAR const struct estimator_diag_s *msg);
+
+int estimator_health_advertise(void);
+int estimator_health_publish(int fd, FAR const struct estimator_health_s *msg);
 
 #endif /* __APPS_UORB_MSGS_UORB_MSGS_H */
