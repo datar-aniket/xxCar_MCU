@@ -36,6 +36,20 @@ static struct router_config_s config_default(void)
   return c;
 }
 
+static struct router_config_s config_with_rear(void)
+{
+  /* config_default() leaves map_steer_r at zero, which is the two-wheel-steer
+   * vehicle. CH2 is the only channel the default mapping does not already
+   * claim, so the rear axis goes there.
+   */
+
+  struct router_config_s c = config_default();
+
+  c.map_steer_r = 2;
+  c.steering_rear = c.steering;
+  return c;
+}
+
 static struct router_input_s input_default(uint64_t now)
 {
   struct router_input_s in;
@@ -492,6 +506,128 @@ static void test_unused_channel_may_be_absent(void)
   assert(out.rc_valid);
 }
 
+static void test_rear_steering_is_independent(void)
+{
+  struct router_config_s c = config_with_rear();
+  struct router_state_s s;
+  struct router_input_s in = input_default(8000000);
+  struct router_output_s out;
+
+  assert(router_config_valid(&c));
+  router_state_init(&s);
+  arm_manual(&c, &s, &in, &out);
+
+  /* Front and rear are two sticks, not one. Deflecting the front must leave
+   * the rear where the operator put it, which is what makes crab and
+   * counter-steer the operator's choice rather than a fixed linkage.
+   */
+
+  in.rc_channel[0] = 2000;
+  in.rc_channel[1] = 1000;
+  in.now_us += 1000;
+  step(&c, &s, &in, &out);
+  assert(out.reason == ROUTER_REASON_OK);
+  assert(fabsf(out.rc_steering - 1.0f) < 1e-6f);
+  assert(fabsf(out.steering - 1.0f) < 1e-6f);
+  assert(fabsf(out.rc_delta_rear + 1.0f) < 1e-6f);
+  assert(fabsf(out.delta_rear + 1.0f) < 1e-6f);
+
+  /* Centred rear stick is a centred rear axle even at full front lock. */
+
+  in.rc_channel[1] = 1500;
+  in.now_us += 1000;
+  step(&c, &s, &in, &out);
+  assert(fabsf(out.steering - 1.0f) < 1e-6f);
+  assert(out.delta_rear == 0.0f);
+
+  /* An unmapped rear axis stays at zero no matter what CH2 carries: a 2WS
+   * car must not start steering from the back because a spare channel moved.
+   */
+
+  c.map_steer_r = 0;
+  in.rc_channel[1] = 1000;
+  in.now_us += 1000;
+  step(&c, &s, &in, &out);
+  assert(out.rc_delta_rear == 0.0f);
+  assert(out.delta_rear == 0.0f);
+}
+
+static void test_mapped_rear_channel_must_arrive(void)
+{
+  struct router_config_s c = config_with_rear();
+  struct router_state_s s;
+  struct router_input_s in = input_default(9000000);
+  struct router_output_s out;
+
+  /* Once the rear axis is mapped it is an actuation input like any other, so
+   * a receiver that stops sending it makes RC unhealthy rather than silently
+   * parking the rear wheels at whatever zero decodes to.
+   */
+
+  router_state_init(&s);
+  in.rc_channel[1] = 0;
+  step(&c, &s, &in, &out);
+  assert(!out.rc_valid);
+  assert(out.reason == ROUTER_REASON_RC_LOST);
+
+  /* The same frame is fine for a vehicle that never asked for the channel. */
+
+  c.map_steer_r = 0;
+  router_state_init(&s);
+  in.now_us += 1000;
+  step(&c, &s, &in, &out);
+  assert(out.rc_valid);
+
+  /* A mapped rear channel also has to be within the reported count. */
+
+  c = config_with_rear();
+  c.map_steer_r = 9;
+  c.map_steering = 1;
+  router_state_init(&s);
+  in.rc_channel[1] = 1500;
+  in.rc_channel[8] = 1500;
+  in.rc_count = 8;
+  in.now_us += 1000;
+  step(&c, &s, &in, &out);
+  assert(!out.rc_valid);
+
+  in.rc_count = 9;
+  in.now_us += 1000;
+  step(&c, &s, &in, &out);
+  assert(out.rc_valid);
+}
+
+static void test_rear_axis_calibration_is_checked_when_mapped(void)
+{
+  struct router_config_s c = config_with_rear();
+
+  /* Endpoints on the same side of trim cannot produce a signed deflection.
+   * That must refuse the configuration when the axis is in use...
+   */
+
+  c.steering_rear.negative = 1600;
+  c.steering_rear.trim = 1500;
+  c.steering_rear.positive = 2000;
+  assert(!router_config_valid(&c));
+
+  c = config_with_rear();
+  c.steering_rear.deadzone = 600;
+  assert(!router_config_valid(&c));
+
+  c = config_with_rear();
+  c.map_steer_r = ROUTER_RC_CHANNELS + 1;
+  assert(!router_config_valid(&c));
+
+  /* ...and be ignored when it is not, so a 2WS car is not held hostage by
+   * rear calibration numbers nothing reads.
+   */
+
+  c = config_with_rear();
+  c.map_steer_r = 0;
+  memset(&c.steering_rear, 0, sizeof(c.steering_rear));
+  assert(router_config_valid(&c));
+}
+
 int main(void)
 {
   struct router_config_s c = config_default();
@@ -508,6 +644,9 @@ int main(void)
   test_rc_loss_disarms_and_requires_recycle();
   test_rc_safety_overrides_external_arm();
   test_unused_channel_may_be_absent();
+  test_rear_steering_is_independent();
+  test_mapped_rear_channel_must_arrive();
+  test_rear_axis_calibration_is_checked_when_mapped();
   puts("control_router: mapping, selection and safety transitions - OK");
   return 0;
 }

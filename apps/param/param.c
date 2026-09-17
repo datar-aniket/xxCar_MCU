@@ -131,6 +131,15 @@ static const struct param_def_s g_params[] =
   { "RC_MAP_ARM", PARAM_TYPE_INT32, I32(7), I32(1), I32(18),
     "RC arm/disarm switch channel", PARAM_RANGE_ENUM },
 
+  /* Rear steering is the one RC function that may legitimately be absent: a
+   * two-wheel-steer car has no rear axis to drive. Zero means "no manual rear
+   * steering" rather than a channel number, so such a vehicle neither
+   * requires the channel to arrive nor has its rear calibration checked.
+   */
+
+  { "RC_MAP_STEER_R", PARAM_TYPE_INT32, I32(2), I32(0), I32(18),
+    "RC rear steering channel (one-based, 0=none)", PARAM_RANGE_ENUM },
+
   { "RC_ST_MIN", PARAM_TYPE_INT32, I32(1000), I32(750), I32(2250),
     "Steering PWM at -1 (us)" },
   { "RC_ST_TRIM", PARAM_TYPE_INT32, I32(1500), I32(750), I32(2250),
@@ -139,6 +148,14 @@ static const struct param_def_s g_params[] =
     "Steering PWM at +1 (us)" },
   { "RC_ST_DZ", PARAM_TYPE_INT32, I32(30), I32(0), I32(400),
     "Steering deadzone about trim (us)" },
+  { "RC_ST_R_MIN", PARAM_TYPE_INT32, I32(1000), I32(750), I32(2250),
+    "Rear steering PWM at -1 (us)" },
+  { "RC_ST_R_TRIM", PARAM_TYPE_INT32, I32(1500), I32(750), I32(2250),
+    "Rear steering centre PWM (us)" },
+  { "RC_ST_R_MAX", PARAM_TYPE_INT32, I32(2000), I32(750), I32(2250),
+    "Rear steering PWM at +1 (us)" },
+  { "RC_ST_R_DZ", PARAM_TYPE_INT32, I32(30), I32(0), I32(400),
+    "Rear steering deadzone about trim (us)" },
   { "RC_THR_MIN", PARAM_TYPE_INT32, I32(1000), I32(750), I32(2250),
     "Throttle PWM at -1 (us)" },
   { "RC_THR_TRIM", PARAM_TYPE_INT32, I32(1500), I32(750), I32(2250),

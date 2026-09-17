@@ -629,7 +629,8 @@ static void test_control_router_parameters(void)
     { "RC_MAP_THROTTLE", 3 },
     { "RC_MAP_SOURCE", 5 },
     { "RC_MAP_MODE", 6 },
-    { "RC_MAP_ARM", 7 }
+    { "RC_MAP_ARM", 7 },
+    { "RC_MAP_STEER_R", 2 }
   };
   size_t i;
   int32_t value;
@@ -653,6 +654,30 @@ static void test_control_router_parameters(void)
         {
           fail("RC channel selector accepted an invalid channel");
         }
+    }
+
+  /* Rear steering is the one RC function that may be switched off entirely:
+   * zero is a legal choice meaning "this vehicle has no manual rear axis",
+   * not an out-of-range channel number.
+   */
+
+  if (param_set_i32("RC_MAP_STEER_R", 0) < 0 ||
+      param_get_i32("RC_MAP_STEER_R", &value) < 0 || value != 0)
+    {
+      fail("rear steering channel cannot be disabled with zero");
+    }
+
+  if (param_set_i32("RC_MAP_STEER_R", 2) < 0)
+    {
+      fail("rear steering channel could not be restored");
+    }
+
+  if (param_get_i32("RC_ST_R_MIN", &value) < 0 || value != 1000 ||
+      param_get_i32("RC_ST_R_TRIM", &value) < 0 || value != 1500 ||
+      param_get_i32("RC_ST_R_MAX", &value) < 0 || value != 2000 ||
+      param_get_i32("RC_ST_R_DZ", &value) < 0 || value != 30)
+    {
+      fail("rear steering calibration defaults do not mirror the front");
     }
 
   if (param_get_i32("RC_SW_LOW", &value) < 0 || value != 1300 ||

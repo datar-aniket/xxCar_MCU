@@ -30,6 +30,7 @@ struct control_router_status_s
   uint64_t auto_age_us;
   float rc_throttle;
   float rc_steering;
+  float rc_delta_rear;
   float output_motor;
   float output_steering;
   float output_delta_rear;

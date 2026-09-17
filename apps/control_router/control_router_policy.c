@@ -134,6 +134,19 @@ bool router_config_valid(const struct router_config_s *config)
       return false;
     }
 
+  /* Rear steering is optional: map_steer_r == 0 means a vehicle with no
+   * manual rear axis. Its calibration is only held to the same standard as
+   * the other axes once it is actually mapped, so a two-wheel-steer car is
+   * not refused over numbers nothing reads.
+   */
+
+  if (config->map_steer_r > ROUTER_RC_CHANNELS ||
+      (config->map_steer_r != 0 &&
+       !axis_config_valid(&config->steering_rear)))
+    {
+      return false;
+    }
+
   maps[0] = config->map_steering;
   maps[1] = config->map_throttle;
   maps[2] = config->map_source;
@@ -183,6 +196,7 @@ void router_policy_step(const struct router_config_s *config,
     }
 
   required = config->map_steering;
+  if (config->map_steer_r > required) required = config->map_steer_r;
   if (config->map_throttle > required) required = config->map_throttle;
   if (config->map_source > required) required = config->map_source;
   if (config->map_mode > required) required = config->map_mode;
@@ -195,20 +209,26 @@ void router_policy_step(const struct router_config_s *config,
 
   if (output->rc_valid)
     {
-      uint8_t maps[5];
+      uint8_t maps[6];
+      unsigned nmaps = 0;
       unsigned i;
 
-      maps[0] = config->map_steering;
-      maps[1] = config->map_throttle;
-      maps[2] = config->map_source;
-      maps[3] = config->map_mode;
-      maps[4] = config->map_arm;
+      maps[nmaps++] = config->map_steering;
+      maps[nmaps++] = config->map_throttle;
+      maps[nmaps++] = config->map_source;
+      maps[nmaps++] = config->map_mode;
+      maps[nmaps++] = config->map_arm;
+
+      if (config->map_steer_r != 0)
+        {
+          maps[nmaps++] = config->map_steer_r;
+        }
 
       /* A receiver may leave unused channels at zero. Only inputs which can
        * affect routing or actuation are required to contain valid PWM.
        */
 
-      for (i = 0; i < 5; i++)
+      for (i = 0; i < nmaps; i++)
         {
           if (!channel_valid(input->rc_channel[maps[i] - 1]))
             {
@@ -302,6 +322,9 @@ void router_policy_step(const struct router_config_s *config,
     input->rc_channel[config->map_throttle - 1], &config->throttle);
   output->rc_steering = axis_map(
     input->rc_channel[config->map_steering - 1], &config->steering);
+  output->rc_delta_rear = config->map_steer_r != 0 ?
+    axis_map(input->rc_channel[config->map_steer_r - 1],
+             &config->steering_rear) : 0.0f;
   output->source = state->source_auto ? ROUTER_SOURCE_AUTO : ROUTER_SOURCE_RC;
   selected_mode = state->source_auto && auto_usable ? input->auto_mode :
                   state->mode_current ? ROUTER_MODE_CURRENT : ROUTER_MODE_DUTY;
@@ -347,7 +370,7 @@ void router_policy_step(const struct router_config_s *config,
                        (selected_mode == ROUTER_MODE_CURRENT ?
                           config->current_max : config->duty_max);
       selected_steering = output->rc_steering;
-      selected_rear = 0.0f;
+      selected_rear = output->rc_delta_rear;
       arm_motor_fraction = fabsf(output->rc_throttle);
     }
 

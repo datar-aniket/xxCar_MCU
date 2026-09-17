@@ -65,6 +65,7 @@ static void load_config(struct router_config_s *config)
 {
   memset(config, 0, sizeof(*config));
   config->map_steering = (uint8_t)param_i32("RC_MAP_STEERING");
+  config->map_steer_r = (uint8_t)param_i32("RC_MAP_STEER_R");
   config->map_throttle = (uint8_t)param_i32("RC_MAP_THROTTLE");
   config->map_source = (uint8_t)param_i32("RC_MAP_SOURCE");
   config->map_mode = (uint8_t)param_i32("RC_MAP_MODE");
@@ -78,6 +79,8 @@ static void load_config(struct router_config_s *config)
   config->arm_motor_max = param_f32("RC_ARM_MAX");
   load_axis(&config->steering, "RC_ST_MIN", "RC_ST_TRIM", "RC_ST_MAX",
             "RC_ST_DZ");
+  load_axis(&config->steering_rear, "RC_ST_R_MIN", "RC_ST_R_TRIM",
+            "RC_ST_R_MAX", "RC_ST_R_DZ");
   load_axis(&config->throttle, "RC_THR_MIN", "RC_THR_TRIM", "RC_THR_MAX",
             "RC_THR_DZ");
 }
@@ -142,9 +145,10 @@ static int control_router_daemon(int argc, FAR char *argv[])
   g_running = true;
   status_publish(&status);
   syslog(LOG_INFO,
-         "[router] RC ch steer=%u throttle=%u source=%u mode=%u arm=%u\n",
-         config.map_steering, config.map_throttle, config.map_source,
-         config.map_mode, config.map_arm);
+         "[router] RC ch steer=%u rear=%u throttle=%u source=%u mode=%u "
+         "arm=%u\n",
+         config.map_steering, config.map_steer_r, config.map_throttle,
+         config.map_source, config.map_mode, config.map_arm);
 
   while (!g_should_stop)
     {
@@ -251,6 +255,7 @@ static int control_router_daemon(int argc, FAR char *argv[])
       status.reason = routed.reason;
       status.rc_throttle = routed.rc_throttle;
       status.rc_steering = routed.rc_steering;
+      status.rc_delta_rear = routed.rc_delta_rear;
       status.output_motor = routed.motor;
       status.output_steering = routed.steering;
       status.output_delta_rear = routed.delta_rear;

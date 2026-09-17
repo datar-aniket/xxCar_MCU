@@ -55,9 +55,11 @@ static int print_status(void)
   printf("control_router: %s %s, %s, reason %s\n",
          s.armed ? "ARMED" : "disarmed", source_name(s.source),
          mode_name(s.mode), control_router_reason_name(s.reason));
-  printf("  rc      %s source=%u throttle=%+.3f steering=%+.3f\n",
+  printf("  rc      %s source=%u throttle=%+.3f "
+         "steering front/rear=%+.3f/%+.3f\n",
          s.rc_valid ? "valid" : "INVALID", s.rc_source,
-         (double)s.rc_throttle, (double)s.rc_steering);
+         (double)s.rc_throttle, (double)s.rc_steering,
+         (double)s.rc_delta_rear);
   printf("  auto    %s%s\n", s.auto_valid ? "valid" : "INVALID",
          s.reason == ROUTER_REASON_AUTO_CYCLE ?
            "  - LOCKED OUT until the source switch is cycled to RC and back"

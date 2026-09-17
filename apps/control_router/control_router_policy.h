@@ -48,6 +48,7 @@ struct router_axis_config_s
 struct router_config_s
 {
   uint8_t map_steering;          /* one-based RC channel */
+  uint8_t map_steer_r;           /* one-based, 0 disables manual rear */
   uint8_t map_throttle;
   uint8_t map_source;
   uint8_t map_mode;
@@ -60,6 +61,7 @@ struct router_config_s
   float current_max;
   float arm_motor_max;
   struct router_axis_config_s steering;
+  struct router_axis_config_s steering_rear;
   struct router_axis_config_s throttle;
 };
 
@@ -117,6 +119,7 @@ struct router_output_s
   float delta_rear;
   float rc_throttle;
   float rc_steering;
+  float rc_delta_rear;
   uint8_t source;
   uint8_t mode;
   uint8_t reason;
