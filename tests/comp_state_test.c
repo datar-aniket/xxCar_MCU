@@ -492,6 +492,42 @@ static void test_build_packs_rc_and_control_status(void)
   assert((out.source_valid & COMP_SRC_RC) == 0);
 }
 
+/* The trigger bit has to be an input of its own, and this is what says so.
+ *
+ * It used to be sourced from a hard-coded channel 6, which on this vehicle is
+ * the arm switch - so bit 26 just repeated bit 24 and a companion watching for
+ * an operator button saw the vehicle arming instead. The channel is now named
+ * by RC_MAP_TRIGGER and is unmapped by default, which makes "armed with no
+ * trigger" the case that must survive.
+ */
+
+static void test_trigger_bit_is_not_the_arm_bit(void)
+{
+  struct comp_state_inputs_s in;
+  struct comp_vehicle_state_s out;
+
+  memset(&in, 0, sizeof(in));
+  in.rc_valid = true;
+  in.rc_steering_pwm = 1500;
+  in.rc_throttle_pwm = 1500;
+  in.control_armed = true;
+  in.trigger_high = false;
+
+  comp_state_build(&in, 0, &out);
+  assert((out.rc_status & COMP_RC_ARMED) != 0);
+  assert((out.rc_status & COMP_RC_TRIGGER_HIGH) == 0);
+
+  /* And the other way round: a button pressed on a disarmed vehicle must
+   * reach the companion without claiming the motor is live.
+   */
+
+  in.control_armed = false;
+  in.trigger_high = true;
+  comp_state_build(&in, 0, &out);
+  assert((out.rc_status & COMP_RC_ARMED) == 0);
+  assert((out.rc_status & COMP_RC_TRIGGER_HIGH) != 0);
+}
+
 /* The velocity in the packet must be BODY frame. Pointing north at 2 m/s
  * due north is 2 m/s forward, not 2 m/s on the y axis.
  */
@@ -532,6 +568,7 @@ int main(void)
   test_build_scalars();
   test_sent_servo_feedback();
   test_build_packs_rc_and_control_status();
+  test_trigger_bit_is_not_the_arm_bit();
   test_build_velocity_is_body();
 
   printf("comp_state: frames, gravity removal and tachometer rate - OK\n");

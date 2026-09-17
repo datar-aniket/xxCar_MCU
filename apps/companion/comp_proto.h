@@ -248,8 +248,10 @@ struct comp_vehicle_state_s
 
 /* rc_status: the two raw PWM values consume 12 bits each; four booleans use
  * the high byte. A zero PWM means unavailable, and COMP_SRC_RC then stays
- * clear. CH6 is the physical trigger level; CURRENT is the router's latched
- * control mode, so releasing a momentary CH6 does not lose the selected mode.
+ * clear. TRIGGER_HIGH is the level of the channel named by RC_MAP_TRIGGER, a
+ * pass-through operator button the MCU takes no action on - it is zero when
+ * that parameter is unmapped. CURRENT is the router's latched control mode,
+ * so releasing a momentary switch does not lose the selected mode.
  */
 
 #define COMP_RC_PWM_MASK          0x0fffu

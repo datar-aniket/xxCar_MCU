@@ -76,6 +76,7 @@ static float g_state_speed_k = 1.0f;
 static uint8_t g_steer_source;
 static uint8_t g_rc_steering_index;
 static uint8_t g_rc_throttle_index;
+static uint8_t g_rc_trigger_index;
 static uint16_t g_rc_switch_high;
 
 #define COMP_STEER_SOURCE_VESC_ADC 0u
@@ -1072,12 +1073,21 @@ static void comp_transmit(int fd, int state_pub, int est_sub, int gyro_sub,
   if (rc_sub >= 0 && router.rc_valid &&
       orb_copy(ORB_ID(rc_in), rc_sub, &rc) >= 0 &&
       g_rc_steering_index < rc.count && g_rc_throttle_index < rc.count &&
-      rc.count > 5u && rc.ok != 0 && rc.failsafe == 0)
+      rc.ok != 0 && rc.failsafe == 0)
     {
       in.rc_valid = true;
       in.rc_steering_pwm = rc.channel[g_rc_steering_index];
       in.rc_throttle_pwm = rc.channel[g_rc_throttle_index];
-      in.trigger_high = rc.channel[5] >= g_rc_switch_high;
+
+      /* The bound check sits here rather than in the validity condition
+       * above: an unmapped trigger holds UINT8_MAX, and gating the whole
+       * block on it would drop steering and throttle from the downlink on
+       * every vehicle that has no trigger button. A short frame therefore
+       * costs the trigger bit, not the packet.
+       */
+
+      in.trigger_high = g_rc_trigger_index < rc.count &&
+                        rc.channel[g_rc_trigger_index] >= g_rc_switch_high;
     }
 
   /* UTC on the wire once synced. Before that the companion gets the board's
@@ -1395,6 +1405,7 @@ static int companion_daemon(int argc, FAR char *argv[])
   {
     int32_t steering_map = param_i32("RC_MAP_STEERING");
     int32_t throttle_map = param_i32("RC_MAP_THROTTLE");
+    int32_t trigger_map = param_i32("RC_MAP_TRIGGER");
 
     g_rc_steering_index = steering_map >= 1 &&
                           steering_map <= RC_IN_MAX_CHANNELS ?
@@ -1402,6 +1413,9 @@ static int companion_daemon(int argc, FAR char *argv[])
     g_rc_throttle_index = throttle_map >= 1 &&
                           throttle_map <= RC_IN_MAX_CHANNELS ?
                           (uint8_t)(throttle_map - 1) : UINT8_MAX;
+    g_rc_trigger_index = trigger_map >= 1 &&
+                         trigger_map <= RC_IN_MAX_CHANNELS ?
+                         (uint8_t)(trigger_map - 1) : UINT8_MAX;
     g_rc_switch_high = (uint16_t)param_i32("RC_SW_HIGH");
   }
   status.pps_max_correction_us = (uint32_t)param_i32("PPS_MAX_COR_US");

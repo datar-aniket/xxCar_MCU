@@ -328,14 +328,15 @@ by the safety router without increasing the 96-byte packet size:
 | 12..23 | throttle/control PWM in µs, from `RC_MAP_THROTTLE` |
 | 24 | armed (`1`) / disarmed (`0`) |
 | 25 | AUTO (`1`) / RC (`0`) source selected by the router |
-| 26 | physical RC channel 6 trigger high (`1`) / low (`0`) |
+| 26 | operator trigger / no-overtake level from `RC_MAP_TRIGGER` (`0` when unmapped) |
 | 27 | current/torque control (`1`) / duty-cycle control (`0`) |
 | 28..31 | reserved, zero |
 
 Each PWM occupies 12 bits (`value & 0x0fff`). When RC is unavailable both PWM
-values are zero and `COMP_SRC_RC` is clear. The CH6 bit is its live input level
-using `RC_SW_HIGH`; the control-mode bit is the router's latched selection.
-They can therefore differ after a momentary CH6 trigger is released.
+values are zero and `COMP_SRC_RC` is clear. The trigger bit is the live input
+level of the `RC_MAP_TRIGGER` channel against `RC_SW_HIGH`, forwarded without
+the firmware acting on it; the control-mode bit is the router's latched
+selection. They can therefore differ after a momentary trigger is released.
 
 ### The frames are not all the same
 

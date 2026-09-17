@@ -79,6 +79,9 @@ RC_STEER_SHIFT = 0
 RC_THROTTLE_SHIFT = 12
 RC_ARMED = 1 << 24
 RC_AUTO = 1 << 25
+# Bit 26 is the level of the RC channel named by RC_MAP_TRIGGER, forwarded
+# untouched: the MCU takes no action on it, so whatever it means - no-overtake,
+# a mission hold - is decided here. It reads zero when RC_MAP_TRIGGER is 0.
 RC_TRIGGER_HIGH = 1 << 26
 RC_CURRENT = 1 << 27
 

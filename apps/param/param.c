@@ -140,6 +140,19 @@ static const struct param_def_s g_params[] =
   { "RC_MAP_STEER_R", PARAM_TYPE_INT32, I32(2), I32(0), I32(18),
     "RC rear steering channel (one-based, 0=none)", PARAM_RANGE_ENUM },
 
+  /* A pass-through operator button. The firmware never acts on it: the level
+   * is forwarded to the companion in rc_status bit 26 and whatever meaning it
+   * carries - no-overtake, a mission hold - lives entirely on the Jetson.
+   *
+   * It defaults to none rather than to a channel number on purpose. The
+   * literal channel 6 this replaces was silently the arm switch, so the bit
+   * merely repeated "armed"; an operator who wants a trigger has to say which
+   * channel it is.
+   */
+
+  { "RC_MAP_TRIGGER", PARAM_TYPE_INT32, I32(0), I32(0), I32(18),
+    "RC operator trigger channel (one-based, 0=none)", PARAM_RANGE_ENUM },
+
   { "RC_ST_MIN", PARAM_TYPE_INT32, I32(1000), I32(750), I32(2250),
     "Steering PWM at -1 (us)" },
   { "RC_ST_TRIM", PARAM_TYPE_INT32, I32(1500), I32(750), I32(2250),
