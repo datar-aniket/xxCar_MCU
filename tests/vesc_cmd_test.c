@@ -268,18 +268,186 @@ static void test_steering_offset_and_final_bounds(void)
   assert(o.clamped);
 }
 
-static void test_rc_live_trim_map(void)
+static struct vesc_trim_cfg_s trim_cfg(void)
 {
-  assert(vesc_cmd_rc_trim(1000) == -100);
-  assert(vesc_cmd_rc_trim(1250) == -50);
-  assert(vesc_cmd_rc_trim(1500) == 0);
-  assert(vesc_cmd_rc_trim(1750) == 50);
-  assert(vesc_cmd_rc_trim(2000) == 100);
+  struct vesc_trim_cfg_s cfg;
 
-  /* Receiver values beyond the nominal stick/knob range saturate. */
+  cfg.sw_low = 1300;
+  cfg.sw_high = 1700;
+  cfg.step_us = 2;
+  cfg.limit_us = VESC_TRIM_LIMIT_US;
+  return cfg;
+}
 
-  assert(vesc_cmd_rc_trim(750) == -100);
-  assert(vesc_cmd_rc_trim(2250) == 100);
+/* One flick is one step. The trim this replaces was an absolute knob
+ * position, so a switch that happened to sit off centre at boot applied a
+ * standing offset nobody asked for; a nudge has to do nothing at all until
+ * it is moved.
+ */
+
+static void test_trim_steps_once_on_the_edge(void)
+{
+  struct vesc_trim_cfg_s cfg = trim_cfg();
+  struct vesc_trim_state_s s;
+  uint64_t t = 1000000;
+
+  memset(&s, 0, sizeof(s));
+  assert(vesc_cmd_trim_nudge(&s, 1500, t, &cfg) == 0);
+
+  t += 20000;
+  assert(vesc_cmd_trim_nudge(&s, 2000, t, &cfg) == 2);
+
+  /* Held, but not yet long enough to repeat. */
+
+  t += 20000;
+  assert(vesc_cmd_trim_nudge(&s, 2000, t, &cfg) == 2);
+  t += 400000;
+  assert(vesc_cmd_trim_nudge(&s, 2000, t, &cfg) == 2);
+}
+
+static void test_trim_repeats_while_held(void)
+{
+  struct vesc_trim_cfg_s cfg = trim_cfg();
+  struct vesc_trim_state_s s;
+  uint64_t t = 1000000;
+
+  memset(&s, 0, sizeof(s));
+  assert(vesc_cmd_trim_nudge(&s, 2000, t, &cfg) == 2);
+
+  t += VESC_TRIM_REPEAT_DELAY_US;
+  assert(vesc_cmd_trim_nudge(&s, 2000, t, &cfg) == 4);
+
+  t += VESC_TRIM_REPEAT_US;
+  assert(vesc_cmd_trim_nudge(&s, 2000, t, &cfg) == 6);
+
+  /* Sampling faster than the repeat period must not step faster. */
+
+  t += VESC_TRIM_REPEAT_US / 5;
+  assert(vesc_cmd_trim_nudge(&s, 2000, t, &cfg) == 6);
+  t += VESC_TRIM_REPEAT_US / 5;
+  assert(vesc_cmd_trim_nudge(&s, 2000, t, &cfg) == 6);
+}
+
+static void test_trim_rearms_only_through_centre(void)
+{
+  struct vesc_trim_cfg_s cfg = trim_cfg();
+  struct vesc_trim_state_s s;
+  uint64_t t = 1000000;
+
+  memset(&s, 0, sizeof(s));
+  assert(vesc_cmd_trim_nudge(&s, 2000, t, &cfg) == 2);
+
+  /* Back to centre: no step, and the repeat clock is disarmed. */
+
+  t += 20000;
+  assert(vesc_cmd_trim_nudge(&s, 1500, t, &cfg) == 2);
+  t += 20000;
+  assert(vesc_cmd_trim_nudge(&s, 1500, t, &cfg) == 2);
+
+  /* Pressed again: a fresh edge, so one step immediately rather than having
+   * to wait out the repeat delay.
+   */
+
+  t += 20000;
+  assert(vesc_cmd_trim_nudge(&s, 2000, t, &cfg) == 4);
+
+  /* Thrown straight to the other side without passing centre is also an
+   * edge, and it steps the other way.
+   */
+
+  t += 20000;
+  assert(vesc_cmd_trim_nudge(&s, 1000, t, &cfg) == 2);
+}
+
+static void test_trim_clamps_at_the_limit(void)
+{
+  struct vesc_trim_cfg_s cfg = trim_cfg();
+  struct vesc_trim_state_s s;
+  uint64_t t = 1000000;
+  int i;
+
+  memset(&s, 0, sizeof(s));
+  cfg.step_us = 100;
+
+  for (i = 0; i < 20; i++)
+    {
+      vesc_cmd_trim_nudge(&s, 2000, t, &cfg);
+      t += VESC_TRIM_REPEAT_DELAY_US;
+    }
+
+  assert(s.offset_us == VESC_TRIM_LIMIT_US);
+
+  for (i = 0; i < 40; i++)
+    {
+      vesc_cmd_trim_nudge(&s, 1000, t, &cfg);
+      t += VESC_TRIM_REPEAT_DELAY_US;
+    }
+
+  assert(s.offset_us == -VESC_TRIM_LIMIT_US);
+}
+
+/* A centred or absent channel contributes nothing. An unmapped trim reads
+ * zero PWM, which is below sw_low - so this is also what keeps a vehicle
+ * with no trim switch from walking its steering to the negative stop.
+ */
+
+static void test_trim_idle_and_unconfigured_are_inert(void)
+{
+  struct vesc_trim_cfg_s cfg = trim_cfg();
+  struct vesc_trim_state_s s;
+  uint64_t t = 1000000;
+  int i;
+
+  memset(&s, 0, sizeof(s));
+
+  for (i = 0; i < 10; i++)
+    {
+      assert(vesc_cmd_trim_nudge(&s, 1500, t, &cfg) == 0);
+      t += VESC_TRIM_REPEAT_DELAY_US;
+    }
+
+  /* Going stale holds the offset rather than zeroing or creeping it. */
+
+  vesc_cmd_trim_nudge(&s, 2000, t, &cfg);
+  assert(s.offset_us == 2);
+  t += VESC_TRIM_REPEAT_DELAY_US * 10;
+  vesc_cmd_trim_idle(&s);
+  assert(s.offset_us == 2);
+
+  /* A nonsensical configuration must not step at all. */
+
+  cfg.step_us = 0;
+  t += VESC_TRIM_REPEAT_DELAY_US;
+  assert(vesc_cmd_trim_nudge(&s, 2000, t, &cfg) == 2);
+  cfg.step_us = 2;
+  cfg.sw_low = 1700;
+  cfg.sw_high = 1300;
+  assert(vesc_cmd_trim_nudge(&s, 2000, t, &cfg) == 2);
+  assert(vesc_cmd_trim_nudge(NULL, 2000, t, &cfg) == 0);
+}
+
+/* Front and rear are two accumulators. The defect this replaces added its
+ * trim to the front limits only, so a 4WS car could never trim the rear.
+ */
+
+static void test_trim_front_and_rear_are_independent(void)
+{
+  struct vesc_trim_cfg_s cfg = trim_cfg();
+  struct vesc_trim_state_s front;
+  struct vesc_trim_state_s rear;
+  uint64_t t = 1000000;
+
+  memset(&front, 0, sizeof(front));
+  memset(&rear, 0, sizeof(rear));
+
+  assert(vesc_cmd_trim_nudge(&front, 2000, t, &cfg) == 2);
+  assert(vesc_cmd_trim_nudge(&rear, 1500, t, &cfg) == 0);
+
+  t += 20000;
+  assert(vesc_cmd_trim_nudge(&front, 1500, t, &cfg) == 2);
+  assert(vesc_cmd_trim_nudge(&rear, 1000, t, &cfg) == -2);
+
+  assert(front.offset_us == 2 && rear.offset_us == -2);
 }
 
 /* NaN compares false against every bound. Written the wrong way round, the
@@ -382,7 +550,12 @@ int main(void)
   test_steering_asymmetric();
   test_steering_reversed();
   test_steering_offset_and_final_bounds();
-  test_rc_live_trim_map();
+  test_trim_steps_once_on_the_edge();
+  test_trim_repeats_while_held();
+  test_trim_rearms_only_through_centre();
+  test_trim_clamps_at_the_limit();
+  test_trim_idle_and_unconfigured_are_inert();
+  test_trim_front_and_rear_are_independent();
   test_non_finite_is_neutral();
   test_may_arm();
   test_telemetry_lost();

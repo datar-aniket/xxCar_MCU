@@ -32,7 +32,7 @@ servo command. Connect the front servo to **MAIN 1** (`STEER_IO_CH`) and rear
 servo to **MAIN 2** (`STEER_REAR_CH`). Both channels are configurable from 1–8
 and must differ. Use an appropriate servo supply and common ground.
 The VESC still receives motor-only duty/current commands; the same RC and Auto
-steering path, pulse endpoints, trim, and RC channel 7 live trim are retained.
+steering path, pulse endpoints, trim, and the RC live trim are retained.
 
 ```text
 param set STEER_OUT_SRC 1   # 0 restores VESC CAN steering
@@ -85,7 +85,7 @@ TX to RX and connect a common ground. Check the Jetson carrier's UART voltage be
 
 Matek defaults to `STEER_OUT_SRC=1`, which sends steering PWM to S1 and sends
 motor-only CAN commands to VESC. `STEER_PWM_HZ` sets the S1 frame rate (default
-50 Hz); the same `VESC_STEER_MIN/TRIM/MAX/OFS` mapping and RC channel 7 trim
+50 Hz); the same `VESC_STEER_MIN/TRIM/MAX/OFS` mapping and RC live trim
 used on Pixhawk are applied. A 200 ms hardware watchdog returns S1 to neutral
 if command updates stop. S1 steering and S1 PPS are physically mutually
 exclusive, so `PPS_EN` defaults to 0 on Matek and boot suppresses PPS if board

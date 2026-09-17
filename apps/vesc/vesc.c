@@ -48,8 +48,6 @@
 
 #define VESC_DRAIN_MAX  32
 
-#define VESC_RC_TRIM_CHANNEL  7u
-#define VESC_RC_TRIM_INDEX    (VESC_RC_TRIM_CHANNEL - 1u)
 #define VESC_RC_PWM_VALID_MIN 750u
 #define VESC_RC_PWM_VALID_MAX 2250u
 
@@ -93,6 +91,21 @@ static struct vesc_daemon_status_s g_status;
  */
 
 static struct vesc_speed_s g_speed;
+
+/* The accumulated nudges. Shared because the CLI both reads them (status)
+ * and clears them (trim save/reset) while the transmit loop is stepping
+ * them, so every access is under g_lock.
+ *
+ * g_trim_fold is how a save reaches the transmit loop: the CLI writes the
+ * parameters, then asks the loop to reload its limits and zero the nudges in
+ * the same pass. Doing those two together is what keeps the servo still at
+ * the moment of saving - zeroing first would drop the offset for a cycle,
+ * which on a 300 us trim is a visible twitch.
+ */
+
+static struct vesc_trim_state_s g_trim_front;
+static struct vesc_trim_state_s g_trim_rear;
+static bool g_trim_fold;
 
 static uint64_t vesc_now_us(void)
 {
@@ -283,6 +296,72 @@ static void vesc_take_setpoints(int sub, FAR struct vesc_daemon_status_s *s)
     }
 }
 
+/* One mapped trim channel out of a frame, or zero.
+ *
+ * Zero is deliberately a value the nudge logic reads as "below sw_low but
+ * never an edge": an unmapped or missing channel simply never engages,
+ * because vesc_transmit only feeds a channel it actually has.
+ */
+
+static uint16_t rc_trim_pwm(FAR const struct rc_in_s *rc, uint8_t channel)
+{
+  uint16_t pwm;
+
+  if (channel < 1 || channel > RC_IN_MAX_CHANNELS || channel > rc->count)
+    {
+      return 0u;
+    }
+
+  pwm = rc->channel[channel - 1];
+  return pwm >= VESC_RC_PWM_VALID_MIN && pwm <= VESC_RC_PWM_VALID_MAX ?
+         pwm : 0u;
+}
+
+/* Every RC function must own its channel outright.
+ *
+ * This refuses rather than warns because a shared channel is never harmless:
+ * the trim that used to live on a fixed channel 7 silently became the mode
+ * toggle, so every duty/current flick jogged the front steering by 100 us.
+ * A warning in the boot log did not stop that, and the symptom on the ground
+ * looks like a mechanical fault rather than a configuration one.
+ */
+
+static bool vesc_rc_maps_distinct(void)
+{
+  static FAR const char *const names[] =
+  {
+    "RC_MAP_STEERING", "RC_MAP_STEER_R", "RC_MAP_THROTTLE", "RC_MAP_SOURCE",
+    "RC_MAP_MODE", "RC_MAP_ARM", "RC_MAP_TRIGGER", "RC_MAP_TRIM_F",
+    "RC_MAP_TRIM_R"
+  };
+  unsigned n = sizeof(names) / sizeof(names[0]);
+  unsigned i;
+  unsigned j;
+
+  for (i = 0; i < n; i++)
+    {
+      int32_t a = param_i32(names[i]);
+
+      if (a <= 0)
+        {
+          continue;   /* unmapped; any number of functions may be absent */
+        }
+
+      for (j = i + 1; j < n; j++)
+        {
+          if (param_i32(names[j]) == a)
+            {
+              syslog(LOG_ERR,
+                     "[vesc] %s and %s both claim RC channel %" PRIi32
+                     "; refusing to start\n", names[i], names[j], a);
+              return false;
+            }
+        }
+    }
+
+  return true;
+}
+
 static void vesc_take_rc(int sub, FAR struct vesc_daemon_status_s *s)
 {
   struct rc_in_s rc;
@@ -302,12 +381,9 @@ static void vesc_take_rc(int sub, FAR struct vesc_daemon_status_s *s)
     }
 
   s->rc_trim_stamp_us = rc.timestamp;
-  s->rc_trim_pwm = rc.count >= VESC_RC_TRIM_CHANNEL ?
-                   rc.channel[VESC_RC_TRIM_INDEX] : 0u;
-  s->rc_trim_input_valid = rc.ok != 0 && rc.failsafe == 0 &&
-                           rc.count >= VESC_RC_TRIM_CHANNEL &&
-                           s->rc_trim_pwm >= VESC_RC_PWM_VALID_MIN &&
-                           s->rc_trim_pwm <= VESC_RC_PWM_VALID_MAX;
+  s->trim_front_pwm = rc_trim_pwm(&rc, s->trim_front_channel);
+  s->trim_rear_pwm = rc_trim_pwm(&rc, s->trim_rear_channel);
+  s->rc_trim_input_valid = rc.ok != 0 && rc.failsafe == 0;
 }
 
 /* Disarm when telemetry stops.
@@ -365,22 +441,70 @@ static void vesc_transmit(FAR struct vesc_daemon_status_s *s)
   bool ok;
   bool rear_clamped = false;
   uint16_t rear_servo_us;
+  struct vesc_trim_cfg_s cfg;
 
   s->rc_trim_active = s->rc_trim_input_valid &&
                       s->rc_trim_stamp_us != 0 &&
                       s->rc_trim_stamp_us <= now &&
                       now - s->rc_trim_stamp_us <=
                       (uint64_t)s->rc_timeout_ms * 1000ull;
-  s->rc_trim_us = s->rc_trim_active ?
-                  vesc_cmd_rc_trim(s->rc_trim_pwm) : 0;
+
+  cfg.sw_low = s->trim_sw_low;
+  cfg.sw_high = s->trim_sw_high;
+  cfg.step_us = s->trim_step_us;
+  cfg.limit_us = VESC_TRIM_LIMIT_US;
+
+  pthread_mutex_lock(&g_lock);
+
+  if (g_trim_fold)
+    {
+      /* A save has already written the parameters. Pick them up and drop the
+       * nudges in the same breath, so the sum the servo sees never changes.
+       */
+
+      s->limits.steer_offset = (int16_t)param_i32("VESC_STEER_OFS");
+      s->rear_limits.steer_offset = (int16_t)param_i32("REAR_ST_OFS");
+      g_trim_front.offset_us = 0;
+      g_trim_rear.offset_us = 0;
+      vesc_cmd_trim_idle(&g_trim_front);
+      vesc_cmd_trim_idle(&g_trim_rear);
+      g_trim_fold = false;
+    }
+
+  if (s->rc_trim_active)
+    {
+      s->trim_front_us = vesc_cmd_trim_nudge(&g_trim_front,
+                                             s->trim_front_pwm, now, &cfg);
+      s->trim_rear_us = vesc_cmd_trim_nudge(&g_trim_rear,
+                                            s->trim_rear_pwm, now, &cfg);
+    }
+  else
+    {
+      /* A lost link freezes the trim rather than stepping or discarding it.
+       * Stepping would let a failsafe frame walk the steering away on its
+       * own; discarding would throw away what the operator dialled in over
+       * a momentary dropout.
+       */
+
+      vesc_cmd_trim_idle(&g_trim_front);
+      vesc_cmd_trim_idle(&g_trim_rear);
+      s->trim_front_us = (int16_t)g_trim_front.offset_us;
+      s->trim_rear_us = (int16_t)g_trim_rear.offset_us;
+    }
+
+  pthread_mutex_unlock(&g_lock);
 
   /* Apply the live trim after the control router. This deliberately has no
-   * dependency on whether the routed command came from RC or Auto.
+   * dependency on whether the routed command came from RC or Auto, and the
+   * rear half is applied to the rear servo - the front-only version of this
+   * meant a 4WS car could never trim its rear axle.
    */
 
   limits = s->limits;
-  limits.steer_offset = (int16_t)(limits.steer_offset + s->rc_trim_us);
+  limits.steer_offset = (int16_t)(limits.steer_offset + s->trim_front_us);
   rear_limits = s->rear_limits;
+  rear_limits.steer_offset =
+    (int16_t)(rear_limits.steer_offset + s->trim_rear_us);
 
   if (g_setpoint.valid && now > g_setpoint.stamp_us)
     {
@@ -571,6 +695,11 @@ static int vesc_daemon(int argc, FAR char *argv[])
   status.tlm_timeout_ms = (uint32_t)param_i32("VESC_TLM_TO_MS");
   status.cmd_timeout_ms = (uint32_t)param_i32("VESC_CMD_TO_MS");
   status.rc_timeout_ms = (uint32_t)param_i32("RC_INPUT_TO_MS");
+  status.trim_front_channel = (uint8_t)param_i32("RC_MAP_TRIM_F");
+  status.trim_rear_channel = (uint8_t)param_i32("RC_MAP_TRIM_R");
+  status.trim_step_us = (int16_t)param_i32("VESC_TRIM_STEP");
+  status.trim_sw_low = (uint16_t)param_i32("RC_SW_LOW");
+  status.trim_sw_high = (uint16_t)param_i32("RC_SW_HIGH");
   g_cmd_timeout_ms = status.cmd_timeout_ms;
   status.limits.cur_max = param_f32("VESC_CUR_MAX");
   status.limits.duty_max = param_f32("VESC_DUTY_MAX");
@@ -685,10 +814,9 @@ static int vesc_daemon(int argc, FAR char *argv[])
       goto out;
     }
 
-  if (param_i32("RC_MAP_ARM") == VESC_RC_TRIM_CHANNEL)
+  if (!vesc_rc_maps_distinct())
     {
-      syslog(LOG_WARNING,
-             "[vesc] RC channel 7 is both steering trim and RC_MAP_ARM\n");
+      goto out;
     }
 
   tx_period_us = 1000000ull / status.tx_rate;
@@ -860,6 +988,106 @@ int vesc_stop(void)
     }
 
   return g_running ? -ETIMEDOUT : 0;
+}
+
+static int32_t trim_clamp_ofs(int32_t value)
+{
+  if (value > VESC_TRIM_LIMIT_US)
+    {
+      return VESC_TRIM_LIMIT_US;
+    }
+
+  return value < -VESC_TRIM_LIMIT_US ? -VESC_TRIM_LIMIT_US : value;
+}
+
+int vesc_trim_commit(void)
+{
+  int32_t front_old;
+  int32_t rear_old;
+  int32_t front_new;
+  int32_t rear_new;
+  int ret;
+
+  if (g_armed)
+    {
+      /* Saving reloads the daemon's limits, and doing that under power is a
+       * way to move a steering servo nobody asked to move.
+       */
+
+      return -EPERM;
+    }
+
+  pthread_mutex_lock(&g_lock);
+  front_new = g_trim_front.offset_us;
+  rear_new = g_trim_rear.offset_us;
+  pthread_mutex_unlock(&g_lock);
+
+  front_old = param_i32("VESC_STEER_OFS");
+  rear_old = param_i32("REAR_ST_OFS");
+  front_new = trim_clamp_ofs(front_old + front_new);
+  rear_new = trim_clamp_ofs(rear_old + rear_new);
+
+  if (front_new == front_old && rear_new == rear_old)
+    {
+      /* Nothing moved, so nothing is written. A parameter save erases and
+       * rewrites a flash journal slot; doing that to store the values
+       * already there would spend the board's write endurance on a no-op.
+       */
+
+      return -EALREADY;
+    }
+
+  if (param_set_i32("VESC_STEER_OFS", front_new) < 0 ||
+      param_set_i32("REAR_ST_OFS", rear_new) < 0)
+    {
+      param_set_i32("VESC_STEER_OFS", front_old);
+      param_set_i32("REAR_ST_OFS", rear_old);
+      return -ERANGE;
+    }
+
+  ret = param_save();
+
+  if (ret < 0)
+    {
+      /* Put the in-RAM values back so what the daemon would reload matches
+       * what is actually on the card. Losing the save is recoverable; a
+       * board running an offset it did not persist is the confusing case.
+       */
+
+      param_set_i32("VESC_STEER_OFS", front_old);
+      param_set_i32("REAR_ST_OFS", rear_old);
+      return ret;
+    }
+
+  /* Hand the fold to the transmit loop. It reloads the limits and zeroes the
+   * nudges together, which is what keeps the servo still across the save.
+   */
+
+  pthread_mutex_lock(&g_lock);
+  g_trim_fold = true;
+  pthread_mutex_unlock(&g_lock);
+
+  if (!g_running)
+    {
+      /* No loop to do it, so there is nothing live to fold either. */
+
+      pthread_mutex_lock(&g_lock);
+      memset(&g_trim_front, 0, sizeof(g_trim_front));
+      memset(&g_trim_rear, 0, sizeof(g_trim_rear));
+      g_trim_fold = false;
+      pthread_mutex_unlock(&g_lock);
+    }
+
+  return 0;
+}
+
+int vesc_trim_reset(void)
+{
+  pthread_mutex_lock(&g_lock);
+  memset(&g_trim_front, 0, sizeof(g_trim_front));
+  memset(&g_trim_rear, 0, sizeof(g_trim_rear));
+  pthread_mutex_unlock(&g_lock);
+  return 0;
 }
 
 int vesc_arm(bool armed)

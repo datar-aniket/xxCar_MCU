@@ -153,6 +153,16 @@ static const struct param_def_s g_params[] =
   { "RC_MAP_TRIGGER", PARAM_TYPE_INT32, I32(0), I32(0), I32(18),
     "RC operator trigger channel (one-based, 0=none)", PARAM_RANGE_ENUM },
 
+  /* Steering trim switches. These request a nudge rather than carrying a
+   * value, so the radio holds no trim state and nothing double-applies when
+   * the accumulated offset is later saved to VESC_STEER_OFS / REAR_ST_OFS.
+   */
+
+  { "RC_MAP_TRIM_F", PARAM_TYPE_INT32, I32(0), I32(0), I32(18),
+    "RC front steering trim channel (one-based, 0=none)", PARAM_RANGE_ENUM },
+  { "RC_MAP_TRIM_R", PARAM_TYPE_INT32, I32(0), I32(0), I32(18),
+    "RC rear steering trim channel (one-based, 0=none)", PARAM_RANGE_ENUM },
+
   { "RC_ST_MIN", PARAM_TYPE_INT32, I32(1000), I32(750), I32(2250),
     "Steering PWM at -1 (us)" },
   { "RC_ST_TRIM", PARAM_TYPE_INT32, I32(1500), I32(750), I32(2250),
@@ -926,6 +936,8 @@ static const struct param_def_s g_params[] =
     "Final rear steering servo pulse offset (us)" },
   { "STEER_PWM_HZ", PARAM_TYPE_INT32, I32(50), I32(25), I32(400),
     "Direct board steering PWM frame rate (Hz)" },
+  { "VESC_TRIM_STEP", PARAM_TYPE_INT32, I32(2), I32(1), I32(50),
+    "Steering trim nudge per switch step (us)" },
 
   /* Scalars turning VESC telemetry into the engineering units the companion
    * expects. All 1.0 until the vehicle is characterised - a guessed gear

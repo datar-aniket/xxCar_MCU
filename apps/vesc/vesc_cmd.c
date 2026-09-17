@@ -116,23 +116,79 @@ uint16_t vesc_cmd_steering_us(float steering,
     lim, clamped);
 }
 
-int16_t vesc_cmd_rc_trim(uint16_t pwm)
+void vesc_cmd_trim_idle(FAR struct vesc_trim_state_s *state)
 {
-  float trim;
-
-  if (pwm < VESC_RC_TRIM_PWM_MIN)
+  if (state != NULL)
     {
-      pwm = VESC_RC_TRIM_PWM_MIN;
+      state->dir = 0;
+      state->next_step_us = 0;
     }
-  else if (pwm > VESC_RC_TRIM_PWM_MAX)
+}
+
+int16_t vesc_cmd_trim_nudge(FAR struct vesc_trim_state_s *state,
+                            uint16_t pwm, uint64_t now_us,
+                            FAR const struct vesc_trim_cfg_s *cfg)
+{
+  int32_t limit;
+  int8_t dir;
+
+  if (state == NULL)
     {
-      pwm = VESC_RC_TRIM_PWM_MAX;
+      return 0;
     }
 
-  trim = ((float)pwm - (float)VESC_RC_TRIM_PWM_MID) *
-         ((float)VESC_RC_TRIM_US_MAX /
-          ((float)VESC_RC_TRIM_PWM_MAX - (float)VESC_RC_TRIM_PWM_MID));
-  return (int16_t)lroundf(trim);
+  if (cfg == NULL || cfg->step_us <= 0 || cfg->limit_us <= 0 ||
+      cfg->sw_low >= cfg->sw_high)
+    {
+      vesc_cmd_trim_idle(state);
+      return (int16_t)state->offset_us;
+    }
+
+  limit = cfg->limit_us;
+  dir = pwm >= cfg->sw_high ? 1 : pwm <= cfg->sw_low ? -1 : 0;
+
+  if (dir == 0)
+    {
+      vesc_cmd_trim_idle(state);
+      return (int16_t)state->offset_us;
+    }
+
+  if (dir != state->dir)
+    {
+      /* The engaging edge, including a throw straight from one side to the
+       * other. One step now, and the repeat clock starts from here so a
+       * single deliberate flick cannot become two.
+       */
+
+      state->dir = dir;
+      state->next_step_us = now_us + VESC_TRIM_REPEAT_DELAY_US;
+    }
+  else if (now_us >= state->next_step_us)
+    {
+      /* Rearmed from now rather than advanced by one period: after a
+       * scheduling gap the offset should resume stepping, not catch up in a
+       * burst the operator never asked for.
+       */
+
+      state->next_step_us = now_us + VESC_TRIM_REPEAT_US;
+    }
+  else
+    {
+      return (int16_t)state->offset_us;
+    }
+
+  state->offset_us += (int32_t)dir * (int32_t)cfg->step_us;
+
+  if (state->offset_us > limit)
+    {
+      state->offset_us = limit;
+    }
+  else if (state->offset_us < -limit)
+    {
+      state->offset_us = -limit;
+    }
+
+  return (int16_t)state->offset_us;
 }
 
 static void cmd_neutral(uint8_t packet_id, uint8_t reason,

@@ -51,14 +51,33 @@
 
 #define VESC_CMD_ZERO_EPS     0.001f
 
-/* Fixed live steering trim requested from RC channel 7. Values outside the
- * transmitter's nominal range saturate at the corresponding trim endpoint.
+/* Live steering trim. The radio holds no trim state: a switch position is a
+ * nudge request, not a value, and the accumulated offset lives here. That is
+ * what stops a knob and a saved parameter from double-applying after a
+ * reboot, which is the failure the absolute-channel trim it replaces had.
+ *
+ * Auto-repeat so one held switch can walk the offset across its range without
+ * a hundred flicks, delayed so a deliberate single step is still possible.
  */
 
-#define VESC_RC_TRIM_PWM_MIN  1000u
-#define VESC_RC_TRIM_PWM_MID  1500u
-#define VESC_RC_TRIM_PWM_MAX  2000u
-#define VESC_RC_TRIM_US_MAX   100
+#define VESC_TRIM_LIMIT_US        300   /* matches VESC_STEER_OFS's range */
+#define VESC_TRIM_REPEAT_DELAY_US 500000ull
+#define VESC_TRIM_REPEAT_US       100000ull
+
+struct vesc_trim_cfg_s
+{
+  uint16_t sw_low;       /* at or below: nudge negative */
+  uint16_t sw_high;      /* at or above: nudge positive */
+  int16_t  step_us;      /* per step */
+  int16_t  limit_us;     /* magnitude ceiling on the accumulated offset */
+};
+
+struct vesc_trim_state_s
+{
+  int32_t  offset_us;    /* accumulated, not yet folded into a parameter */
+  int8_t   dir;          /* -1/0/+1: which way the switch is held now */
+  uint64_t next_step_us; /* when auto-repeat may fire again */
+};
 
 struct vesc_limits_s
 {
@@ -103,9 +122,24 @@ uint16_t vesc_cmd_steering_us(float steering,
                               FAR const struct vesc_limits_s *lim,
                               FAR bool *clamped);
 
-/* Map RC channel 7 from 1000..2000 us to -100..+100 us. */
+/* Integrate one trim switch sample and return the accumulated offset.
+ *
+ * A step is applied on the edge that engages the switch, then repeated while
+ * it is held. Returning to centre rearms the edge, so releasing and pressing
+ * again always yields exactly one step.
+ */
 
-int16_t vesc_cmd_rc_trim(uint16_t pwm);
+int16_t vesc_cmd_trim_nudge(FAR struct vesc_trim_state_s *state,
+                            uint16_t pwm, uint64_t now_us,
+                            FAR const struct vesc_trim_cfg_s *cfg);
+
+/* Treat the switch as centred without a sample, keeping the accumulated
+ * offset. Used when RC goes stale: a lost link must not leave a trim
+ * creeping, and it must not silently throw away what the operator dialled in
+ * either.
+ */
+
+void vesc_cmd_trim_idle(FAR struct vesc_trim_state_s *state);
 
 /* May the daemon be armed right now?
  *

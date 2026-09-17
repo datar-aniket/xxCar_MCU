@@ -58,15 +58,24 @@ struct vesc_daemon_status_s
   struct vesc_limits_s limits;
   struct vesc_limits_s rear_limits;
 
-  /* The fixed CH7 live trim is added after control routing, so it applies to
-   * both RC and automatic steering. An unhealthy/stale RC sample contributes
-   * zero, leaving the parameter offset in force.
+  /* Live steering trim, added after control routing so it applies to both RC
+   * and automatic steering. The switches request nudges; the accumulated
+   * offsets live in the daemon until `vesc trim save` folds them into
+   * VESC_STEER_OFS / REAR_ST_OFS. An unhealthy or stale RC sample freezes
+   * them where they are rather than stepping or discarding them.
    */
 
   uint32_t rc_timeout_ms;
   uint64_t rc_trim_stamp_us;
-  uint16_t rc_trim_pwm;
-  int16_t  rc_trim_us;
+  uint8_t  trim_front_channel;  /* one-based, 0 = unmapped */
+  uint8_t  trim_rear_channel;
+  uint16_t trim_front_pwm;
+  uint16_t trim_rear_pwm;
+  int16_t  trim_front_us;       /* live, not yet persisted */
+  int16_t  trim_rear_us;
+  int16_t  trim_step_us;
+  uint16_t trim_sw_low;         /* RC_SW_LOW / RC_SW_HIGH, shared with the */
+  uint16_t trim_sw_high;        /* router rather than duplicated as params */
   bool     rc_trim_input_valid;
   bool     rc_trim_active;
 
@@ -108,6 +117,18 @@ struct vesc_daemon_status_s
  */
 
 int  vesc_arm(bool armed);
+
+/* Fold the live trim nudges into VESC_STEER_OFS / REAR_ST_OFS and persist
+ * them, or discard them.
+ *
+ * Commit must be called from a context that may block on flash: it writes
+ * parameters, which the CAN transmit loop must never do. It refuses while
+ * armed, and reports -EALREADY when the saved values would not change so a
+ * bench session does not wear the journal for nothing.
+ */
+
+int  vesc_trim_commit(void);
+int  vesc_trim_reset(void);
 
 int  vesc_start(void);
 int  vesc_stop(void);

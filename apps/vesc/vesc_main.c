@@ -22,10 +22,13 @@
 #include "../param/param.h"
 #include "../uorb_msgs/uorb_msgs.h"
 
+#define TRIM_CH_NAME_MAX 8
+
 static void usage(void)
 {
   printf("Usage: vesc start | stop | status | arm | disarm\n"
          "       vesc set duty|current <motor> <steering> [seconds]\n"
+         "       vesc trim save | reset\n"
          "\n"
          "  Receives VESC telemetry on FDCAN1 and publishes vesc_status.\n"
          "  Commands motor and steering from routed actuator_command.\n"
@@ -69,8 +72,25 @@ static FAR const char *vesc_packet_name(uint8_t id)
     }
 }
 
+/* "ch9" or "off", into a caller-owned buffer so both axes can be named in
+ * one printf without a second static.
+ */
+
+static FAR const char *trim_channel_name(uint8_t channel, FAR char *buf)
+{
+  if (channel == 0)
+    {
+      return "off";
+    }
+
+  snprintf(buf, TRIM_CH_NAME_MAX, "ch%u", (unsigned)channel);
+  return buf;
+}
+
 static void print_status(void)
 {
+  char front_ch[TRIM_CH_NAME_MAX];
+  char rear_ch[TRIM_CH_NAME_MAX];
   struct vesc_daemon_status_s s;
   int i;
 
@@ -159,10 +179,13 @@ static void print_status(void)
          (unsigned)s.limits.steer_min, (unsigned)s.limits.steer_trim,
          (unsigned)s.limits.steer_max, (int)s.limits.steer_offset);
 
-  printf("  trim    RC7 %u us -> %+d us%s  effective offset %+d us\n",
-         (unsigned)s.rc_trim_pwm, (int)s.rc_trim_us,
-         s.rc_trim_active ? "" : " (inactive)",
-         (int)s.limits.steer_offset + (int)s.rc_trim_us);
+  printf("  trim    F %s %+d us  R %s %+d us%s  saved F/R %+d/%+d us\n",
+         trim_channel_name(s.trim_front_channel, front_ch),
+         (int)s.trim_front_us,
+         trim_channel_name(s.trim_rear_channel, rear_ch),
+         (int)s.trim_rear_us,
+         s.rc_trim_active ? "" : "  (RC stale, frozen)",
+         (int)s.limits.steer_offset, (int)s.rear_limits.steer_offset);
   printf("  rear    steer %u/%u/%u offset %d us\n",
          (unsigned)s.rear_limits.steer_min,
          (unsigned)s.rear_limits.steer_trim,
@@ -200,6 +223,68 @@ static void print_status(void)
  * returned. Stopping also demonstrates the failsafe, which is the behaviour
  * most worth seeing on a bench.
  */
+
+static int do_trim(int argc, FAR char *argv[])
+{
+  int ret;
+
+  if (argc < 3)
+    {
+      usage();
+      return EXIT_FAILURE;
+    }
+
+  if (strcmp(argv[2], "reset") == 0)
+    {
+      vesc_trim_reset();
+      printf("vesc: live trim discarded; the saved offsets are unchanged\n");
+      return EXIT_SUCCESS;
+    }
+
+  if (strcmp(argv[2], "save") != 0)
+    {
+      usage();
+      return EXIT_FAILURE;
+    }
+
+  ret = vesc_trim_commit();
+
+  if (ret == -EPERM)
+    {
+      printf("vesc: refused - disarm first. Saving reloads the steering\n"
+             "      limits, and doing that under power moves the servo.\n");
+      return EXIT_FAILURE;
+    }
+
+  if (ret == -EALREADY)
+    {
+      printf("vesc: nothing to save - the live trim is zero\n");
+      return EXIT_SUCCESS;
+    }
+
+  if (ret == -ERANGE)
+    {
+      printf("vesc: refused - the resulting offset is out of range\n");
+      return EXIT_FAILURE;
+    }
+
+  if (ret < 0)
+    {
+      /* Almost always a missing or unwritable SD card. Saying so beats
+       * reporting success for a value that is not on the card.
+       */
+
+      printf("vesc: NOT saved - param_save failed (%d). The trim is still\n"
+             "      live but will be lost on reboot. Check the SD card.\n",
+             ret);
+      return EXIT_FAILURE;
+    }
+
+  printf("vesc: trim saved to VESC_STEER_OFS %+" PRIi32 " us, "
+         "REAR_ST_OFS %+" PRIi32 " us\n",
+         param_i32("VESC_STEER_OFS"), param_i32("REAR_ST_OFS"));
+  return EXIT_SUCCESS;
+}
 
 static int do_set(int argc, FAR char *argv[])
 {
@@ -373,6 +458,11 @@ int main(int argc, FAR char *argv[])
   if (strcmp(argv[1], "set") == 0)
     {
       return do_set(argc, argv);
+    }
+
+  if (strcmp(argv[1], "trim") == 0)
+    {
+      return do_trim(argc, argv);
     }
 
   usage();

@@ -401,10 +401,14 @@ sent to the PX4IO rear channel, mapped from 1000–2000 us to -0.5–+0.5.
 
 `VESC_STEER_OFS` accepts -300 to +300 us and is added to the mapped servo pulse after
 `VESC_STEER_MIN/TRIM/MAX`. The transmitted result is bounded to 900–2100 us,
-so command-derived feedback includes the applied offset. A valid, fresh RC
-channel 7 adds a live trim on top in both RC and Auto modes: 1000–2000 us maps
-linearly to -100–+100 us. If RC is stale, in failsafe, or CH7 is unavailable,
-its contribution is zero.
+so command-derived feedback includes the applied offset. The channels named by
+`RC_MAP_TRIM_F` and `RC_MAP_TRIM_R` add a live trim on top in both RC and Auto
+modes, front offset to the front servo and rear to the rear. They are nudge
+switches, not knobs: each engaging edge steps the accumulated offset by
+`VESC_TRIM_STEP` us, repeating while held, bounded to ±300 us. `vesc trim save`
+folds the live offsets into `VESC_STEER_OFS` / `REAR_ST_OFS`. If RC is stale or
+in failsafe the offsets freeze where they are rather than stepping or
+resetting.
 
 All state-message scalars default to **1.0**, so until the vehicle is
 characterised these carry raw amps, raw volts and raw tachometer counts per
