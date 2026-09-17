@@ -1,0 +1,8 @@
+# Pixhawk 6C main (if00)
+ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyACM*", ENV{ID_VENDOR_ID}=="3162", ENV{ID_MODEL_ID}=="0053", ENV{ID_USB_INTERFACE_NUM}=="00", SYMLINK+="pixhawk_6c", MODE="0666", GROUP="dialout"
+
+# Pixhawk 6C secondary (if02)
+ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyACM*", ENV{ID_VENDOR_ID}=="3162", ENV{ID_MODEL_ID}=="0053", ENV{ID_USB_INTERFACE_NUM}=="02", SYMLINK+="pixhawk_6c_io", MODE="0666", GROUP="dialout"
+
+# Pixhawk 6C PX4
+ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyACM*", ENV{ID_VENDOR_ID}=="3185", ENV{ID_MODEL_ID}=="0038", ENV{ID_USB_INTERFACE_NUM}=="00", SYMLINK+="pixhawk_6c", MODE="0666", GROUP="dialout"
