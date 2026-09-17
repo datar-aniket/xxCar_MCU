@@ -152,7 +152,9 @@ static_assert(offsetof(struct vehicle_state_tx_s, rc_status) == 112,
               "layout");
 static_assert(offsetof(struct vehicle_state_tx_s, solution_status) == 116,
               "layout");
-static_assert(sizeof(struct vehicle_state_tx_s) == 120, "layout");
+static_assert(offsetof(struct vehicle_state_tx_s, steering_angle_rear) == 120,
+              "layout");
+static_assert(sizeof(struct vehicle_state_tx_s) == 128, "layout");
 static_assert(VEHICLE_STATE_TX_QUEUE_SIZE >= 32u,
               "vehicle state TX queue must absorb ordinary SD stalls");
 
@@ -164,18 +166,21 @@ static_assert(offsetof(struct vesc_status_s, adc_volts)        == 24, "layout");
 static_assert(offsetof(struct vesc_status_s, controller_id)    == 28, "layout");
 static_assert(offsetof(struct vesc_status_s, speed_cps)        == 32, "layout");
 static_assert(offsetof(struct vesc_status_s, servo_us)         == 36, "layout");
+static_assert(offsetof(struct vesc_status_s, rear_servo_us)    == 38, "layout");
 static_assert(sizeof(struct vesc_status_s)                     == 40, "layout");
 
 static_assert(offsetof(struct actuator_command_s, timestamp) ==  0, "layout");
 static_assert(offsetof(struct actuator_command_s, motor)     ==  8, "layout");
 static_assert(offsetof(struct actuator_command_s, steering)  == 12, "layout");
-static_assert(offsetof(struct actuator_command_s, mode)      == 16, "layout");
+static_assert(offsetof(struct actuator_command_s, delta_rear)== 16, "layout");
+static_assert(offsetof(struct actuator_command_s, mode)      == 20, "layout");
 static_assert(sizeof(struct actuator_command_s)              == 24, "layout");
 
 static_assert(offsetof(struct control_cmd_s, timestamp) ==  0, "layout");
 static_assert(offsetof(struct control_cmd_s, motor)     ==  8, "layout");
 static_assert(offsetof(struct control_cmd_s, steering)  == 12, "layout");
-static_assert(offsetof(struct control_cmd_s, mode)      == 16, "layout");
+static_assert(offsetof(struct control_cmd_s, delta_rear)== 16, "layout");
+static_assert(offsetof(struct control_cmd_s, mode)      == 20, "layout");
 static_assert(sizeof(struct control_cmd_s)              == 24, "layout");
 
 static_assert(offsetof(struct control_trajectory_s, timestamp) == 0,
@@ -186,9 +191,9 @@ static_assert(offsetof(struct control_trajectory_s, solution_time) == 16,
               "layout");
 static_assert(offsetof(struct control_trajectory_s, dt) == 24, "layout");
 static_assert(offsetof(struct control_trajectory_s, poses) == 28, "layout");
-static_assert(offsetof(struct control_trajectory_s, controls) == 140,
+static_assert(offsetof(struct control_trajectory_s, controls) == 116,
               "layout");
-static_assert(offsetof(struct control_trajectory_s, horizon) == 252,
+static_assert(offsetof(struct control_trajectory_s, horizon) == 248,
               "layout");
 static_assert(sizeof(struct control_trajectory_s) == 256, "layout");
 
@@ -333,7 +338,8 @@ static const char vehicle_state_tx_format[] =
   ",accel[0]:%hf,accel[1]:%hf,accel[2]:%hf"
   ",wheel_torque_nm:%hf,steering_angle:%hf,motor_speed_ms:%hf"
   ",rc_status:%" PRIu32
-  ",solution_status:%hhu,reset_counter:%hhu,source_valid:%hhu";
+  ",solution_status:%hhu,reset_counter:%hhu,source_valid:%hhu"
+  ",steering_angle_rear:%hf";
 
 static const char vesc_status_format[] =
   "timestamp:%" PRIu64
@@ -341,16 +347,16 @@ static const char vesc_status_format[] =
   ",tachometer:%" PRIi32
   ",current_a:%hf,adc_volts:%hf"
   ",controller_id:%hhu"
-  ",speed_cps:%hf,servo_us:%hu";
+  ",speed_cps:%hf,servo_us:%hu,rear_servo_us:%hu";
 
 static const char actuator_command_format[] =
   "timestamp:%" PRIu64
-  ",motor:%hf,steering:%hf"
+  ",motor:%hf,steering:%hf,delta_rear:%hf"
   ",mode:%hhu";
 
 static const char control_cmd_format[] =
   "timestamp:%" PRIu64
-  ",motor:%hf,steering:%hf"
+  ",motor:%hf,steering:%hf,delta_rear:%hf"
   ",mode:%hhu";
 
 static const char control_trajectory_format[] =
@@ -368,23 +374,17 @@ static const char control_trajectory_format[] =
   ",poses[8][0]:%hf,poses[8][1]:%hf"
   ",poses[9][0]:%hf,poses[9][1]:%hf"
   ",poses[10][0]:%hf,poses[10][1]:%hf"
-  ",poses[11][0]:%hf,poses[11][1]:%hf"
-  ",poses[12][0]:%hf,poses[12][1]:%hf"
-  ",poses[13][0]:%hf,poses[13][1]:%hf"
-  ",controls[0][0]:%hf,controls[0][1]:%hf"
-  ",controls[1][0]:%hf,controls[1][1]:%hf"
-  ",controls[2][0]:%hf,controls[2][1]:%hf"
-  ",controls[3][0]:%hf,controls[3][1]:%hf"
-  ",controls[4][0]:%hf,controls[4][1]:%hf"
-  ",controls[5][0]:%hf,controls[5][1]:%hf"
-  ",controls[6][0]:%hf,controls[6][1]:%hf"
-  ",controls[7][0]:%hf,controls[7][1]:%hf"
-  ",controls[8][0]:%hf,controls[8][1]:%hf"
-  ",controls[9][0]:%hf,controls[9][1]:%hf"
-  ",controls[10][0]:%hf,controls[10][1]:%hf"
-  ",controls[11][0]:%hf,controls[11][1]:%hf"
-  ",controls[12][0]:%hf,controls[12][1]:%hf"
-  ",controls[13][0]:%hf,controls[13][1]:%hf"
+  ",controls[0][0]:%hf,controls[0][1]:%hf,controls[0][2]:%hf"
+  ",controls[1][0]:%hf,controls[1][1]:%hf,controls[1][2]:%hf"
+  ",controls[2][0]:%hf,controls[2][1]:%hf,controls[2][2]:%hf"
+  ",controls[3][0]:%hf,controls[3][1]:%hf,controls[3][2]:%hf"
+  ",controls[4][0]:%hf,controls[4][1]:%hf,controls[4][2]:%hf"
+  ",controls[5][0]:%hf,controls[5][1]:%hf,controls[5][2]:%hf"
+  ",controls[6][0]:%hf,controls[6][1]:%hf,controls[6][2]:%hf"
+  ",controls[7][0]:%hf,controls[7][1]:%hf,controls[7][2]:%hf"
+  ",controls[8][0]:%hf,controls[8][1]:%hf,controls[8][2]:%hf"
+  ",controls[9][0]:%hf,controls[9][1]:%hf,controls[9][2]:%hf"
+  ",controls[10][0]:%hf,controls[10][1]:%hf,controls[10][2]:%hf"
   ",horizon:%hhu,control_method:%hhu";
 
 static const char vehicle_imu_format[] =

@@ -217,7 +217,8 @@ g_formats[] =
   { "vesc_status",
     "uint64_t timestamp;uint64_t timestamp_sample;int32_t tachometer;"
     "float current_a;float adc_volts;uint8_t controller_id;"
-    "uint8_t[3] _padding0;float speed_cps;uint16_t servo_us;" },
+    "uint8_t[3] _padding0;float speed_cps;uint16_t servo_us;"
+    "uint16_t rear_servo_us;" },
   { "vehicle_state_tx",
     "uint64_t timestamp;uint64_t timestamp_sample;"
     "uint64_t accel_timestamp_sample;uint64_t wire_timestamp_us;"
@@ -225,7 +226,7 @@ g_formats[] =
     "float[3] angular_velocity;float side_slip_rad;float[3] accel;"
     "float wheel_torque_nm;float steering_angle;float motor_speed_ms;"
     "uint32_t rc_status;uint8_t solution_status;uint8_t reset_counter;"
-    "uint8_t source_valid;" },
+    "uint8_t source_valid;uint8_t _padding0;float steering_angle_rear;" },
   { "estimator_diag",
     "uint64_t timestamp;uint64_t timestamp_sample;"
     "uint64_t extnav_timestamp;float[3] specific_force;"
@@ -296,8 +297,8 @@ static const struct log_topic_s g_topics[] =
   { NULL,            ORB_ID(vehicle_accel),      0, "vehicle_accel",   0, 30, "LOG_EKF"  },
   { NULL,            ORB_ID(vehicle_mag),        0, "vehicle_mag",     0, 34, "LOG_EKF"  },
   { NULL,            ORB_ID(vehicle_baro),       0, "vehicle_baro",    0, 24, "LOG_EKF"  },
-  { NULL,            ORB_ID(vesc_status),        0, "vesc_status",     0, 38, "LOG_EKF"  },
-  { NULL,            ORB_ID(vehicle_state_tx),   0, "vehicle_state_tx",0, 119,"LOG_EKF"  },
+  { NULL,            ORB_ID(vesc_status),        0, "vesc_status",     0, 40, "LOG_EKF"  },
+  { NULL,            ORB_ID(vehicle_state_tx),   0, "vehicle_state_tx",0, 124,"LOG_EKF"  },
   { NULL,            ORB_ID(estimator_diag),     0, "estimator_diag",  0, 285,"LOG_EKF"  },
   { NULL,            ORB_ID(estimator_health),   0, "estimator_health",0, 165,"LOG_EKF"  },
 };

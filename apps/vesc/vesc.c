@@ -20,6 +20,7 @@
 
 #include <nuttx/uorb.h>
 #include <uORB/uORB.h>
+#include <arch/board/board.h>
 
 #include "vesc.h"
 #include "vesc_cmd.h"
@@ -27,6 +28,9 @@
 #include "../param/param.h"
 #include "../rc_in/rc_in.h"
 #include "../uorb_msgs/uorb_msgs.h"
+#if defined(CONFIG_XXCAR_PX4IO) && !defined(CONFIG_XXCAR_BOARD_MATEKH743)
+#  include "../px4io/px4io.h"
+#endif
 
 #define VESC_PRIORITY   (SCHED_PRIORITY_DEFAULT + 10)
 #define VESC_STACK      2048
@@ -74,6 +78,7 @@ static volatile bool g_armed;
  */
 
 static uint32_t g_cmd_timeout_ms;
+static uint8_t g_steer_output_source;
 
 /* Board time of the last decoded STATUS_5, and the watchdog that acts on its
  * absence. Written by the daemon thread only.
@@ -189,6 +194,7 @@ static void vesc_handle(FAR const struct fdcan_frame_s *frame, int pub,
   out.adc_volts = decoded.adc_volts;
   out.controller_id = controller_id;
   out.servo_us = s->last_servo_us;
+  out.rear_servo_us = s->last_rear_servo_us;
 
   /* Differentiate and filter here, on every frame, before anything
    * downsamples this topic.
@@ -224,6 +230,7 @@ struct vesc_setpoint_s
   uint8_t  mode;
   float    motor;
   float    steering;
+  float    delta_rear;
   uint64_t stamp_us;
 };
 
@@ -265,6 +272,7 @@ static void vesc_take_setpoints(int sub, FAR struct vesc_daemon_status_s *s)
       g_setpoint.mode = message.mode;
       g_setpoint.motor = message.motor;
       g_setpoint.steering = message.steering;
+      g_setpoint.delta_rear = message.delta_rear;
       g_setpoint.stamp_us = message.timestamp;
       s->setpoints++;
 
@@ -350,10 +358,13 @@ static void vesc_transmit(FAR struct vesc_daemon_status_s *s)
 {
   struct vesc_cmd_out_s cmd;
   struct vesc_limits_s limits;
+  struct vesc_limits_s rear_limits;
   struct fdcan_frame_s frame;
   uint64_t now = vesc_now_us();
   uint64_t age = 0;
   bool ok;
+  bool rear_clamped = false;
+  uint16_t rear_servo_us;
 
   s->rc_trim_active = s->rc_trim_input_valid &&
                       s->rc_trim_stamp_us != 0 &&
@@ -369,6 +380,7 @@ static void vesc_transmit(FAR struct vesc_daemon_status_s *s)
 
   limits = s->limits;
   limits.steer_offset = (int16_t)(limits.steer_offset + s->rc_trim_us);
+  rear_limits = s->rear_limits;
 
   if (g_setpoint.valid && now > g_setpoint.stamp_us)
     {
@@ -378,6 +390,107 @@ static void vesc_transmit(FAR struct vesc_daemon_status_s *s)
   vesc_cmd_resolve(g_armed, g_setpoint.valid, g_setpoint.mode,
                    g_setpoint.motor, g_setpoint.steering,
                    age, s->cmd_timeout_ms, &limits, &cmd);
+
+  rear_servo_us = vesc_cmd_steering_us(
+    cmd.reason == VESC_CMD_ARMED ? g_setpoint.delta_rear : 0.0f,
+    &rear_limits, &rear_clamped);
+  cmd.clamped = cmd.clamped || rear_clamped;
+
+  if (s->steer_output_source == 1)
+    {
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+      int io_result;
+      int32_t neutral = (int32_t)limits.steer_trim +
+                        (int32_t)limits.steer_offset;
+      bool io_healthy = board_matek_s1_pwm_healthy();
+
+      if (neutral < VESC_SERVO_US_MIN)
+        {
+          neutral = VESC_SERVO_US_MIN;
+        }
+      else if (neutral > VESC_SERVO_US_MAX)
+        {
+          neutral = VESC_SERVO_US_MAX;
+        }
+
+      s->steer_io_healthy = io_healthy;
+      if (!io_healthy)
+        {
+          g_armed = false;
+          vesc_cmd_resolve(false, g_setpoint.valid, g_setpoint.mode,
+                           g_setpoint.motor, g_setpoint.steering,
+                           age, s->cmd_timeout_ms, &limits, &cmd);
+        }
+
+      io_result = board_matek_s1_pwm_set(cmd.servo_us, (uint16_t)neutral);
+      if (io_result < 0)
+        {
+          s->steer_io_healthy = false;
+          s->steer_io_errors++;
+          g_armed = false;
+          cmd.motor = 0.0f;
+          cmd.reason = VESC_CMD_DISARMED;
+        }
+#elif defined(CONFIG_XXCAR_PX4IO)
+      int io_result;
+      int32_t neutral = (int32_t)limits.steer_trim +
+                        (int32_t)limits.steer_offset;
+      int32_t rear_neutral = (int32_t)rear_limits.steer_trim +
+                             (int32_t)rear_limits.steer_offset;
+      bool io_healthy = px4io_output_healthy();
+
+      s->steer_io_healthy = io_healthy;
+
+      if (neutral < VESC_SERVO_US_MIN)
+        {
+          neutral = VESC_SERVO_US_MIN;
+        }
+      else if (neutral > VESC_SERVO_US_MAX)
+        {
+          neutral = VESC_SERVO_US_MAX;
+        }
+
+      if (rear_neutral < VESC_SERVO_US_MIN)
+        {
+          rear_neutral = VESC_SERVO_US_MIN;
+        }
+      else if (rear_neutral > VESC_SERVO_US_MAX)
+        {
+          rear_neutral = VESC_SERVO_US_MAX;
+        }
+
+      /* The motor may not drive when the only steering output is gone.
+       * Disarm, then recompute the neutral command before handing it to IO.
+       */
+
+      if (!io_healthy)
+        {
+          g_armed = false;
+          vesc_cmd_resolve(false, g_setpoint.valid, g_setpoint.mode,
+                           g_setpoint.motor, g_setpoint.steering,
+                           age, s->cmd_timeout_ms, &limits, &cmd);
+          rear_servo_us = (uint16_t)rear_neutral;
+        }
+
+      io_result = px4io_set_steering_pair(
+        s->steer_io_channel, cmd.servo_us, (uint16_t)neutral,
+        s->rear_steer_io_channel, rear_servo_us, (uint16_t)rear_neutral);
+      if (io_result < 0)
+        {
+          s->steer_io_healthy = false;
+          s->steer_io_errors++;
+          g_armed = false;
+          cmd.motor = 0.0f;
+          cmd.reason = VESC_CMD_DISARMED;
+        }
+#else
+      s->steer_io_healthy = false;
+      g_armed = false;
+      cmd.motor = 0.0f;
+      cmd.reason = VESC_CMD_DISARMED;
+      s->steer_io_errors++;
+#endif
+    }
 
   if (cmd.reason < VESC_CMD_NREASON)
     {
@@ -393,16 +506,23 @@ static void vesc_transmit(FAR struct vesc_daemon_status_s *s)
     }
 
   memset(&frame, 0, sizeof(frame));
-  frame.id = vesc_can_id(cmd.packet_id, s->filter_id);
-  frame.dlc = VESC_CMD_SERVO_DLC;
-
-  if (cmd.packet_id == VESC_PACKET_SET_CURRENT_SERVO)
+  if (s->steer_output_source == 1)
     {
-      ok = vesc_encode_current_servo(cmd.motor, cmd.servo_us, frame.data);
+      bool current = cmd.packet_id == VESC_PACKET_SET_CURRENT_SERVO;
+
+      frame.id = vesc_can_id(current ? VESC_PACKET_SET_CURRENT :
+                            VESC_PACKET_SET_DUTY, s->filter_id);
+      frame.dlc = VESC_CMD_MOTOR_DLC;
+      ok = current ? vesc_encode_current(cmd.motor, frame.data) :
+                     vesc_encode_duty(cmd.motor, frame.data);
     }
   else
     {
-      ok = vesc_encode_duty_servo(cmd.motor, cmd.servo_us, frame.data);
+      frame.id = vesc_can_id(cmd.packet_id, s->filter_id);
+      frame.dlc = VESC_CMD_SERVO_DLC;
+      ok = cmd.packet_id == VESC_PACKET_SET_CURRENT_SERVO ?
+        vesc_encode_current_servo(cmd.motor, cmd.servo_us, frame.data) :
+        vesc_encode_duty_servo(cmd.motor, cmd.servo_us, frame.data);
     }
 
   /* The encoder refusing means it wrote a zero motor value, which is still
@@ -417,6 +537,11 @@ static void vesc_transmit(FAR struct vesc_daemon_status_s *s)
 
   s->last_motor = cmd.motor;
   s->last_servo_us = cmd.servo_us;
+#if defined(CONFIG_XXCAR_PX4IO) && !defined(CONFIG_XXCAR_BOARD_MATEKH743)
+  s->last_rear_servo_us = s->steer_output_source == 1 ? rear_servo_us : 0u;
+#else
+  s->last_rear_servo_us = 0u;
+#endif
 
   if (fdcan_transmit(&frame) < 0)
     {
@@ -453,6 +578,62 @@ static int vesc_daemon(int argc, FAR char *argv[])
   status.limits.steer_trim = (uint16_t)param_i32("VESC_STEER_TRIM");
   status.limits.steer_max = (uint16_t)param_i32("VESC_STEER_MAX");
   status.limits.steer_offset = (int16_t)param_i32("VESC_STEER_OFS");
+  status.rear_limits.cur_max = status.limits.cur_max;
+  status.rear_limits.duty_max = status.limits.duty_max;
+  status.rear_limits.steer_min = (uint16_t)param_i32("REAR_ST_MIN");
+  status.rear_limits.steer_trim = (uint16_t)param_i32("REAR_ST_TRIM");
+  status.rear_limits.steer_max = (uint16_t)param_i32("REAR_ST_MAX");
+  status.rear_limits.steer_offset = (int16_t)param_i32("REAR_ST_OFS");
+  status.steer_output_source = (uint8_t)param_i32("STEER_OUT_SRC");
+  status.steer_io_channel = (uint8_t)param_i32("STEER_IO_CH");
+  status.rear_steer_io_channel = (uint8_t)param_i32("STEER_REAR_CH");
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+  if (status.steer_output_source == 1)
+    {
+      int32_t neutral = (int32_t)status.limits.steer_trim +
+                        (int32_t)status.limits.steer_offset;
+
+      if (neutral < VESC_SERVO_US_MIN)
+        {
+          neutral = VESC_SERVO_US_MIN;
+        }
+      else if (neutral > VESC_SERVO_US_MAX)
+        {
+          neutral = VESC_SERVO_US_MAX;
+        }
+
+      ret = board_matek_s1_pwm_start(
+        (uint16_t)param_i32("STEER_PWM_HZ"), (uint16_t)neutral);
+      if (ret < 0)
+        {
+          syslog(LOG_ERR, "[vesc] Matek S1 steering PWM failed: %d\n", ret);
+          goto out;
+        }
+
+      status.steer_io_channel = 1;
+      status.steer_io_healthy = board_matek_s1_pwm_healthy();
+    }
+#elif defined(CONFIG_XXCAR_PX4IO)
+  if (status.steer_output_source == 1 &&
+      status.steer_io_channel == status.rear_steer_io_channel)
+    {
+      syslog(LOG_ERR, "[vesc] front and rear steering channels must differ\n");
+      goto out;
+    }
+
+  if (status.steer_output_source == 1 && !px4io_output_healthy())
+    {
+      syslog(LOG_ERR,
+             "[vesc] PX4IO steering selected but IO link is not healthy\n");
+      goto out;
+    }
+#else
+  if (status.steer_output_source == 1)
+    {
+      syslog(LOG_ERR, "[vesc] PX4IO steering is unavailable on this board\n");
+      goto out;
+    }
+#endif
   vesc_speed_init(&g_speed, (float)param_i32("VESC_TLM_HZ"),
                   param_f32("VESC_SPD_LPF"));
 
@@ -513,6 +694,7 @@ static int vesc_daemon(int argc, FAR char *argv[])
   tx_period_us = 1000000ull / status.tx_rate;
   next_tx_us = vesc_now_us();
 
+  g_steer_output_source = status.steer_output_source;
   g_running = true;
   status.running = true;
   status_publish(&status);
@@ -587,6 +769,18 @@ static int vesc_daemon(int argc, FAR char *argv[])
         }
     }
 
+  /* A clean stop must not leave the last motor demand active until the VESC's
+   * own CAN timeout expires. Send zero motor and neutral steering once while
+   * the CAN link is still open; the IO daemon also has its own neutral
+   * watchdog if this final handoff cannot be delivered.
+   */
+
+  g_armed = false;
+  if (status.filter_id != 0)
+    {
+      vesc_transmit(&status);
+    }
+
   result = EXIT_SUCCESS;
 
 out:
@@ -632,6 +826,7 @@ int vesc_start(void)
   g_armed = false;
   g_last_tlm_us = 0;
   g_tlm_lost = false;
+  g_steer_output_source = 0;
   memset(&g_setpoint, 0, sizeof(g_setpoint));
   task = task_create("vesc", VESC_PRIORITY, VESC_STACK, vesc_daemon, NULL);
 
@@ -696,6 +891,18 @@ int vesc_arm(bool armed)
     {
       return -ENOLINK;
     }
+
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+  if (g_steer_output_source == 1 && !board_matek_s1_pwm_healthy())
+    {
+      return -ENOLINK;
+    }
+#elif defined(CONFIG_XXCAR_PX4IO)
+  if (g_steer_output_source == 1 && !px4io_output_healthy())
+    {
+      return -ENOLINK;
+    }
+#endif
 
   now = vesc_now_us();
 

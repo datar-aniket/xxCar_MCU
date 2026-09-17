@@ -64,8 +64,9 @@ static int print_status(void)
            : "");
   print_age("rc age", s.rc_age_us);
   print_age("auto age", s.auto_age_us);
-  printf("  output  motor=%+.3f steering=%+.3f\n",
-         (double)s.output_motor, (double)s.output_steering);
+  printf("  output  motor=%+.3f steering front/rear=%+.3f/%+.3f\n",
+         (double)s.output_motor, (double)s.output_steering,
+         (double)s.output_delta_rear);
   printf("  counts  pub=%" PRIu32 " err=%" PRIu32
          " arm=%" PRIu32 " refused=%" PRIu32 " disarm=%" PRIu32 "\n",
          s.publications, s.publish_errors, s.arm_success, s.arm_refused,

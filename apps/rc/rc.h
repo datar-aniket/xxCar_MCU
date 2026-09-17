@@ -8,9 +8,11 @@
  * This is the sibling of apps/px4io: a receiver plugged into the RC IN
  * connector is decoded by the PX4IO co-processor, which hands over finished
  * channels. A receiver plugged into TELEM/GPS instead arrives here as a raw
- * byte stream, and we decode it ourselves. Both publish the same `rc_in` uORB
- * topic and set `source`, so nothing downstream has to care which wire it came
- * in on.
+ * byte stream, and we decode it ourselves. Both backends use the same `rc_in`
+ * uORB topic and set `source`, so nothing downstream has to care which wire it
+ * came in on. They never publish it concurrently: assigning an FMU serial port
+ * the RC function makes the direct driver authoritative and leaves PX4IO RC
+ * available only through its private diagnostic snapshot.
  *
  * Protocols
  * ---------
@@ -19,10 +21,9 @@
  *       STM32's own RXINV does it, via TIOCSINVERT.
  * CRSF  420000 baud, 8N1, not inverted. This is what ELRS speaks.
  *
- * PPM is deliberately absent. It is a pulse train on a timer-capture pin, not a
- * UART protocol, so it cannot be decoded on a serial port at all. The 6C's
- * PPM/SBUS RC IN connector is wired to PX4IO, which already decodes PPM - see
- * apps/px4io. RC_PROT=PPM therefore says so rather than failing quietly.
+ * PPM is a pulse train, not UART data. Pixhawk 6C delegates it to PX4IO. On
+ * Matek, selecting RC_PROT=PPM changes R6/PC7 from USART6_RX to TIM3_CH2 input
+ * capture and decodes the channel intervals directly.
  *
  * Autodetection (RC_PROT=0) only has to choose between SBUS and CRSF, and it
  * does so the only way that is actually reliable: configure the port for one,
@@ -50,6 +51,7 @@
 #define RC_PROTO_NONE  0
 #define RC_PROTO_SBUS  1
 #define RC_PROTO_CRSF  2
+#define RC_PROTO_PPM   3
 
 /* SBUS: 25-byte frame at 100000 baud, 8E2, inverted. */
 

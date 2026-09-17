@@ -198,18 +198,21 @@ bool comp_control_trajectory_decode(FAR const uint8_t *payload, size_t len,
   for (i = 0; i < horizon; i++)
     {
       size_t pose = COMP_TRAJ_DATA_OFS + (size_t)i * 2u * sizeof(float);
-      size_t control = controls_offset + (size_t)i * 2u * sizeof(float);
+      size_t control = controls_offset + (size_t)i * 3u * sizeof(float);
 
       out->poses[i][0] = get_f32_le(payload + pose);
       out->poses[i][1] = get_f32_le(payload + pose + sizeof(float));
       out->controls[i][0] = get_f32_le(payload + control);
       out->controls[i][1] = get_f32_le(payload + control + sizeof(float));
+      out->controls[i][2] = get_f32_le(payload + control + 2u * sizeof(float));
 
       if (!isfinite(out->poses[i][0]) || !isfinite(out->poses[i][1]) ||
           !(out->controls[i][0] >= -COMP_DIRECT_STEER_MAX &&
             out->controls[i][0] <= COMP_DIRECT_STEER_MAX) ||
-          !(out->controls[i][1] >= -limit &&
-            out->controls[i][1] <= limit))
+          !(out->controls[i][1] >= -COMP_DIRECT_STEER_MAX &&
+            out->controls[i][1] <= COMP_DIRECT_STEER_MAX) ||
+          !(out->controls[i][2] >= -limit &&
+            out->controls[i][2] <= limit))
         {
           return false;
         }
@@ -249,6 +252,12 @@ bool comp_direct_control_valid(FAR const struct comp_direct_control_s *cmd)
 
   if (!(cmd->steering >= -COMP_DIRECT_STEER_MAX &&
         cmd->steering <= COMP_DIRECT_STEER_MAX))
+    {
+      return false;
+    }
+
+  if (!(cmd->delta_rear >= -COMP_DIRECT_STEER_MAX &&
+        cmd->delta_rear <= COMP_DIRECT_STEER_MAX))
     {
       return false;
     }

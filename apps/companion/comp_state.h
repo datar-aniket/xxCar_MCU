@@ -55,6 +55,8 @@ struct comp_state_inputs_s
   bool     steering_valid;
   bool     steering_measured; /* true for VESC ADC, false for sent command */
   float    steering_feedback; /* V for ADC; -0.5..+0.5 for sent command */
+  bool     rear_steering_valid;
+  float    rear_steering_feedback; /* sent command mapped to -0.5..+0.5 */
 
   bool     rc_valid;
   uint16_t rc_steering_pwm;

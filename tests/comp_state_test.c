@@ -447,12 +447,16 @@ static void test_sent_servo_feedback(void)
   in.steering_valid = true;
   in.steering_measured = false;
   in.steering_feedback = 0.25f;
+  in.rear_steering_valid = true;
+  in.rear_steering_feedback = -0.2f;
   in.steer_k = 100.0f;
 
   comp_state_build(&in, 0, &out);
 
   assert(CLOSE(out.steering_angle, 0.25f));
+  assert(CLOSE(out.steering_angle_rear, -0.2f));
   assert((out.source_valid & COMP_SRC_STEERING) != 0);
+  assert((out.source_valid & COMP_SRC_STEERING_REAR) != 0);
   assert((out.source_valid & COMP_SRC_VESC) == 0);
 }
 

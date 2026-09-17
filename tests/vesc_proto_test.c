@@ -369,6 +369,27 @@ static void test_encode_null(void)
 {
   assert(!vesc_encode_current_servo(1.0f, 1500, NULL));
   assert(!vesc_encode_duty_servo(1.0f, 1500, NULL));
+  assert(!vesc_encode_current(1.0f, NULL));
+  assert(!vesc_encode_duty(1.0f, NULL));
+}
+
+static void test_motor_only_frames(void)
+{
+  uint8_t current[VESC_CMD_MOTOR_DLC];
+  uint8_t duty[VESC_CMD_MOTOR_DLC];
+
+  assert(vesc_encode_current(-3.25f, current));
+  assert(current[0] == 0xff && current[1] == 0xff &&
+         current[2] == 0xf3 && current[3] == 0x4e);
+  assert(vesc_encode_duty(0.53f, duty));
+  assert(duty[0] == 0x00 && duty[1] == 0x00 &&
+         duty[2] == 0xcf && duty[3] == 0x08);
+  assert(!vesc_encode_current(NAN, current));
+  assert(current[0] == 0 && current[1] == 0 &&
+         current[2] == 0 && current[3] == 0);
+  assert(!vesc_encode_duty(INFINITY, duty));
+  assert(duty[0] == 0 && duty[1] == 0 &&
+         duty[2] == 0 && duty[3] == 0);
 }
 
 int main(void)
@@ -393,6 +414,7 @@ int main(void)
   test_encode_rejects_non_finite();
   test_encode_clamps();
   test_encode_null();
+  test_motor_only_frames();
 
   puts("vesc_proto: decode and encode, byte order, scaling, sign - OK");
   return 0;

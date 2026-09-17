@@ -32,6 +32,27 @@
 #ifndef __ASSEMBLY__
 #  include <stdbool.h>
 #  include <stdint.h>
+
+#  ifdef CONFIG_XXCAR_BOARD_MATEKH743
+#    define BOARD_RC_PPM_MAX_CHANNELS 18
+
+struct board_rc_ppm_frame_s
+{
+  uint16_t channel[BOARD_RC_PPM_MAX_CHANNELS];
+  uint64_t timestamp_us;
+  uint32_t sequence;
+  uint32_t errors;
+  uint8_t  count;
+};
+
+int  board_matek_s1_pwm_start(uint16_t rate_hz, uint16_t neutral_us);
+int  board_matek_s1_pwm_set(uint16_t pulse_us, uint16_t neutral_us);
+bool board_matek_s1_pwm_healthy(void);
+
+int  board_matek_rc_ppm_start(void);
+void board_matek_rc_ppm_stop(void);
+bool board_matek_rc_ppm_latest(struct board_rc_ppm_frame_s *frame);
+#  endif
 #endif
 
 /* Do not include STM32 H7 header files here */

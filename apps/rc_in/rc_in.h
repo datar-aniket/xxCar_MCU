@@ -8,9 +8,10 @@
  * This is deliberately its own tiny library rather than living inside a driver.
  * RC reaches this board two different ways - demodulated by the PX4IO
  * co-processor (the RC IN connector), or decoded by us from a raw SBUS/CRSF
- * byte stream on an FMU UART - and consumers should not care which. Both
- * publishers fill in the same struct and set `source` to say where it came
- * from.
+ * byte stream on an FMU UART - and consumers should not care which. The
+ * configured backend fills in the same struct and sets `source` to say where
+ * it came from. Only one backend publishes at a time; an FMU serial RC
+ * assignment takes precedence over PX4IO RC.
  *
  * Subscribers:  uorb_listener rc_in
  *

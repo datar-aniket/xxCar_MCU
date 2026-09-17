@@ -70,9 +70,11 @@ def decode_last(link):
     msg_id, body = got
     assert msg_id == comp_link.MSG_DIRECT_CONTROL, msg_id
 
-    stamp, steering, throttle, mode = comp_link.DIRECT_CONTROL.unpack(body)
+    stamp, steering, throttle, mode, delta_rear = \
+        comp_link.DIRECT_CONTROL.unpack(body)
     return {"timestamp_us": stamp, "steering": steering,
-            "throttle": throttle, "throttle_type": mode}
+            "throttle": throttle, "throttle_type": mode,
+            "delta_rear": delta_rear}
 
 
 def main():
@@ -111,6 +113,7 @@ def main():
 
     app.clock_offset_us = 0
     app.steer_var.set(-0.25)
+    app.rear_steer_var.set(0.15)
     app.throttle_var.set(0.4)
     app.throttle_mode.set(comp_link.THROTTLE_DUTY)
     app._send_drive()
@@ -120,6 +123,8 @@ def main():
     sent = decode_last(link)
     check(abs(sent["steering"] + 0.25) < 1e-6,
           f"steering must reach the wire, got {sent['steering']}")
+    check(abs(sent["delta_rear"] - 0.15) < 1e-6,
+          f"rear steering must reach the wire, got {sent['delta_rear']}")
     check(abs(sent["throttle"] - 0.4) < 1e-6,
           f"throttle must reach the wire, got {sent['throttle']}")
     check(sent["throttle_type"] == comp_link.THROTTLE_DUTY,
@@ -197,6 +202,7 @@ def main():
     sent = decode_last(link)
     check(sent["throttle"] == 0.0, "STOP must put zero throttle on the wire")
     check(sent["steering"] == 0.0, "STOP must centre the steering")
+    check(sent["delta_rear"] == 0.0, "STOP must centre rear steering")
     check(not app.drive_stream_var.get(), "STOP must end the stream")
     check(app._drive_job is None, "STOP must cancel the repeat timer")
 

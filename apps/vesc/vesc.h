@@ -56,6 +56,7 @@ struct vesc_daemon_status_s
   uint32_t tx_rate;                     /* Hz, as read at start */
   uint32_t cmd_timeout_ms;
   struct vesc_limits_s limits;
+  struct vesc_limits_s rear_limits;
 
   /* The fixed CH7 live trim is added after control routing, so it applies to
    * both RC and automatic steering. An unhealthy/stale RC sample contributes
@@ -85,6 +86,12 @@ struct vesc_daemon_status_s
   uint8_t  last_reason;
   float    last_motor;                  /* what actually went out */
   uint16_t last_servo_us;
+  uint16_t last_rear_servo_us;
+  uint8_t  steer_output_source; /* 0 VESC, 1 PX4IO */
+  uint8_t  steer_io_channel;    /* one-based PX4IO channel */
+  uint8_t  rear_steer_io_channel;
+  bool     steer_io_healthy;
+  uint32_t steer_io_errors;
 
   struct vesc_status5_s last;
   uint64_t last_us;

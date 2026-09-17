@@ -13,7 +13,7 @@
  * comes up at boot:
  *
  *   param set SER_TEL2_FUNC 4     (4 = RC)
- *   param set RC_PROT 0           (0 = auto, 1 = SBUS, 2 = CRSF)
+ *   param set RC_PROT 0           (0 auto, 1 SBUS, 2 CRSF, 3 Matek R6 PPM)
  *   param save
  *   reboot
  *
@@ -57,10 +57,10 @@ static void rc_usage(void)
          "\n"
          "Normally the serial manager starts this for you:\n"
          "  param set SER_TEL2_FUNC 4   (4 = RC)\n"
-         "  param set RC_PROT 0         (0 = auto, 1 = SBUS, 2 = CRSF)\n"
+         "  param set RC_PROT 0         (0 auto, 1 SBUS, 2 CRSF, 3 PPM)\n"
          "  param save && reboot\n"
          "\n"
-         "RC IN/PX4IO and FMU UART receivers share the 'rc_in' topic.\n"
+         "FMU UART RC overrides RC IN/PX4IO as the 'rc_in' publisher.\n"
          "Use `px4io rc` only for low-level PX4IO diagnostics.\n");
 }
 
@@ -70,6 +70,7 @@ static FAR const char *rc_protoname(uint8_t proto)
     {
       case RC_PROTO_SBUS: return "SBUS";
       case RC_PROTO_CRSF: return "CRSF/ELRS";
+      case RC_PROTO_PPM:  return "PPM";
       default:            return "-";
     }
 }
@@ -162,7 +163,8 @@ static int rc_do_status(void)
   rc_get_status(&s);
 
   /* `rc_in` is the system-level RC source. PX4IO and the direct UART driver
-   * both publish it, so prefer it over the private status of the UART driver.
+   * can provide it, with the configured FMU port taking precedence, so prefer
+   * it over the private status of the UART driver.
    */
 
   if (rc_topic_status(&input, &age_us, &fresh))
@@ -202,7 +204,8 @@ static int rc_do_status(void)
 
       if (s.running &&
           (input.source == RC_IN_SRC_SBUS ||
-           input.source == RC_IN_SRC_CRSF))
+           input.source == RC_IN_SRC_CRSF ||
+           input.source == RC_IN_SRC_PPM))
         {
           printf("  decoder errors=%" PRIu32 " timeouts=%" PRIu32 "\n",
                  s.errors, s.timeouts);

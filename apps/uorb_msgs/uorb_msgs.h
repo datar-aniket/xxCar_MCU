@@ -243,6 +243,8 @@ struct vehicle_state_tx_s
   uint8_t  reset_counter;         /* 117 */
   uint8_t  source_valid;          /* 118: COMP_SRC_* bit layout */
   uint8_t  pad;                   /* 119 */
+  float    steering_angle_rear;   /* 120: commanded rear steering */
+  uint8_t  pad2[4];               /* 124 */
 };
 
 #define VEHICLE_STATE_TX_QUEUE_SIZE 64u
@@ -277,7 +279,7 @@ struct vesc_status_s
 
   float    speed_cps;             /* 32 */
   uint16_t servo_us;              /* 36: pulse actually sent to the VESC */
-  uint8_t  pad2[2];               /* 38 */
+  uint16_t rear_servo_us;         /* 38: pulse sent to rear steering PWM */
 };
 
 /* A command for the actuators: one drive motor and one steering servo.
@@ -326,8 +328,9 @@ struct actuator_command_s
   uint64_t timestamp;             /*  0: us */
   float    motor;                 /*  8: duty ratio or amps, per mode */
   float    steering;              /* 12: normalised -1..+1, left positive */
-  uint8_t  mode;                  /* 16: ACTUATOR_MODE_* */
-  uint8_t  pad[7];                /* 17 */
+  float    delta_rear;            /* 16: rear normalised -1..+1, left + */
+  uint8_t  mode;                  /* 20: ACTUATOR_MODE_* */
+  uint8_t  pad[3];                /* 21 */
 };
 
 /* Command produced by the autonomous controller before safety/source
@@ -340,8 +343,9 @@ struct control_cmd_s
   uint64_t timestamp;             /*  0: us */
   float    motor;                 /*  8: duty ratio or amps, per mode */
   float    steering;              /* 12: normalised -1..+1, left positive */
-  uint8_t  mode;                  /* 16: ACTUATOR_MODE_* */
-  uint8_t  pad[7];                /* 17 */
+  float    delta_rear;            /* 16: rear normalised -1..+1, left + */
+  uint8_t  mode;                  /* 20: ACTUATOR_MODE_* */
+  uint8_t  pad[3];                /* 21 */
 };
 
 /* A finite-horizon plan from the companion. It is kept separate from
@@ -350,7 +354,7 @@ struct control_cmd_s
  * control_cmd selected for the current time.
  */
 
-#define CONTROL_TRAJECTORY_MAX_HORIZON 14u
+#define CONTROL_TRAJECTORY_MAX_HORIZON 11u
 
 struct control_trajectory_s
 {
@@ -359,7 +363,8 @@ struct control_trajectory_s
   uint64_t solution_time;         /* 16: source-pose time, in TIM5 */
   float    dt;                    /* 24: seconds between trajectory points */
   float    poses[CONTROL_TRAJECTORY_MAX_HORIZON][2];
-  float    controls[CONTROL_TRAJECTORY_MAX_HORIZON][2];
+  /* front steering, rear steering, then duty/current */
+  float    controls[CONTROL_TRAJECTORY_MAX_HORIZON][3];
   uint8_t  horizon;
   uint8_t  control_method;        /* ACTUATOR_MODE_DUTY or _CURRENT */
   uint8_t  pad[2];

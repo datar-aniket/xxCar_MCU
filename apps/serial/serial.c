@@ -324,6 +324,28 @@ int serial_port_count(void)
   return SERIAL_NPORTS;
 }
 
+bool serial_rc_input_configured(void)
+{
+  int i;
+
+  /* Use the same board-specific table as serial_manager_start().  This keeps
+   * RC ownership aligned with the actual port assignment and avoids a second,
+   * easily-stale list of SER_* parameters in PX4IO.
+   */
+
+  param_init();
+
+  for (i = 0; i < SERIAL_NPORTS; i++)
+    {
+      if (param_i32(g_ports[i].func_param) == SER_FUNC_RC_IN)
+        {
+          return true;
+        }
+    }
+
+  return false;
+}
+
 int serial_find(FAR const char *name)
 {
   int i;

@@ -94,6 +94,28 @@ static uint16_t cmd_steer_offset(uint16_t servo_us,
   return (uint16_t)corrected;
 }
 
+uint16_t vesc_cmd_steering_us(float steering,
+                              FAR const struct vesc_limits_s *lim,
+                              FAR bool *clamped)
+{
+  bool local_clamped = false;
+
+  if (clamped == NULL)
+    {
+      clamped = &local_clamped;
+    }
+
+  if (lim == NULL)
+    {
+      *clamped = true;
+      return 1500u;
+    }
+
+  return cmd_steer_offset(
+    cmd_steer_us(cmd_clamp(steering, -1.0f, 1.0f, clamped), lim),
+    lim, clamped);
+}
+
 int16_t vesc_cmd_rc_trim(uint16_t pwm)
 {
   float trim;
@@ -183,9 +205,7 @@ void vesc_cmd_resolve(bool armed, bool have_setpoint,
   out->reason = VESC_CMD_ARMED;
   out->clamped = false;
   out->motor = cmd_clamp(motor, -limit, limit, &out->clamped);
-  out->servo_us = cmd_steer_offset(
-    cmd_steer_us(cmd_clamp(steering, -1.0f, 1.0f, &out->clamped), lim),
-    lim, &out->clamped);
+  out->servo_us = vesc_cmd_steering_us(steering, lim, &out->clamped);
 }
 
 bool vesc_cmd_may_arm(bool have_setpoint, float motor,

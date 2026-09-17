@@ -180,6 +180,7 @@ static int control_router_daemon(int argc, FAR char *argv[])
           input.auto_timestamp = auto_cmd.timestamp;
           input.auto_motor = auto_cmd.motor;
           input.auto_steering = auto_cmd.steering;
+          input.auto_delta_rear = auto_cmd.delta_rear;
           input.auto_mode = auto_cmd.mode;
           input.auto_present = true;
         }
@@ -193,6 +194,7 @@ static int control_router_daemon(int argc, FAR char *argv[])
       output.timestamp = now;
       output.motor = routed.motor;
       output.steering = routed.steering;
+      output.delta_rear = routed.delta_rear;
       output.mode = routed.mode;
 
       if (actuator_command_publish(output_pub, &output) < 0)
@@ -251,6 +253,7 @@ static int control_router_daemon(int argc, FAR char *argv[])
       status.rc_steering = routed.rc_steering;
       status.output_motor = routed.motor;
       status.output_steering = routed.steering;
+      status.output_delta_rear = routed.delta_rear;
       status.rc_age_us = input.rc_timestamp != 0 && now >= input.rc_timestamp ?
                          now - input.rc_timestamp : UINT64_MAX;
       status.auto_age_us = input.auto_timestamp != 0 &&

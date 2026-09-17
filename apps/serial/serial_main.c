@@ -110,13 +110,18 @@ static int serial_do_status(void)
              ports[i].removable  ? "(needs a host attached)" : "");
     }
 
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+  printf("\n"
+         "R6/PC7 is RCIN above: SBUS/CRSF use USART6_RX; RC_PROT=3 remuxes\n"
+         "the same pad to TIM3_CH2 for PPM. S1 steering is not a serial port.\n");
+#else
   /* These two are not assignable, and saying so is more useful than leaving
    * someone to wonder why RC IN is missing from the table.
    */
-
   printf("\n"
          "RC IN and the 8 PWM rails are NOT FMU ports - they belong to the\n"
          "PX4IO co-processor, reached over USART6 (/dev/ttyS4). See `px4io`.\n");
+#endif
 
   return 0;
 }

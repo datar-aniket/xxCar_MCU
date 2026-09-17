@@ -211,6 +211,7 @@ class App(tk.Tk):
         drive.pack(fill="x", padx=12, pady=6)
 
         self.steer_var = tk.DoubleVar(value=0.0)
+        self.rear_steer_var = tk.DoubleVar(value=0.0)
         self.throttle_var = tk.DoubleVar(value=0.0)
         self.throttle_mode = tk.IntVar(value=comp_link.THROTTLE_DUTY)
 
@@ -227,14 +228,23 @@ class App(tk.Tk):
                   bg=PANEL, fg=FG, relief="flat",
                   padx=10).grid(row=0, column=2, padx=8)
 
-        self._label(drive, "throttle").grid(row=1, column=0, sticky="e",
+        self._label(drive, "rear steering left +").grid(
+            row=1, column=0, sticky="e", padx=(0, 8))
+        self.rear_steer_scale = tk.Scale(
+            drive, from_=-1.0, to=1.0, resolution=0.01,
+            orient="horizontal", variable=self.rear_steer_var, length=380,
+            bg=PANEL, fg=FG, troughcolor=BG, highlightthickness=0,
+            activebackground=ACCENT)
+        self.rear_steer_scale.grid(row=1, column=1, sticky="w")
+
+        self._label(drive, "throttle").grid(row=2, column=0, sticky="e",
                                             padx=(0, 8))
         self.throttle_scale = tk.Scale(
             drive, from_=-1.0, to=1.0, resolution=0.01,
             orient="horizontal", variable=self.throttle_var, length=380,
             bg=PANEL, fg=FG, troughcolor=BG, highlightthickness=0,
             activebackground=ACCENT)
-        self.throttle_scale.grid(row=1, column=1, sticky="w")
+        self.throttle_scale.grid(row=2, column=1, sticky="w")
 
         # Springs back the moment the mouse is let go, like a transmitter
         # stick. Steering deliberately does NOT: a car holds its lock, and
@@ -244,7 +254,7 @@ class App(tk.Tk):
                                  lambda _e: self.throttle_var.set(0.0))
 
         modes = tk.Frame(drive, bg=PANEL)
-        modes.grid(row=1, column=2, padx=8)
+        modes.grid(row=2, column=2, padx=8)
 
         for text, value in (("duty", comp_link.THROTTLE_DUTY),
                             ("amps", comp_link.THROTTLE_CURRENT)):
@@ -257,11 +267,11 @@ class App(tk.Tk):
         self._label(drive,
                     "VESC_DUTY_MAX and VESC_CUR_MAX still apply on the "
                     "board, and are lower than the wire range.",
-                    size=8).grid(row=2, column=0, columnspan=3, sticky="w",
+                    size=8).grid(row=3, column=0, columnspan=3, sticky="w",
                                  pady=(4, 0))
 
         drow = tk.Frame(drive, bg=PANEL)
-        drow.grid(row=3, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        drow.grid(row=4, column=0, columnspan=3, sticky="w", pady=(10, 0))
 
         tk.Button(drow, text="send once", command=self._send_drive,
                   bg=ACCENT, fg="#08111f", relief="flat",
@@ -498,6 +508,7 @@ class App(tk.Tk):
 
     def _centre_steering(self):
         self.steer_var.set(0.0)
+        self.rear_steer_var.set(0.0)
 
     def _throttle_mode_changed(self):
         """Rescale the slider, and zero it on the way.
@@ -540,6 +551,7 @@ class App(tk.Tk):
         self._drive_stream_toggled()
         self.throttle_var.set(0.0)
         self.steer_var.set(0.0)
+        self.rear_steer_var.set(0.0)
 
         if self.link:
             self._send_drive()
@@ -558,6 +570,7 @@ class App(tk.Tk):
         try:
             frame = encode_direct_control(
                 steering=self.steer_var.get(),
+                delta_rear=self.rear_steer_var.get(),
                 throttle=self.throttle_var.get(),
                 throttle_type=self.throttle_mode.get(),
                 timestamp_us=self.utc.now_us())
@@ -569,7 +582,8 @@ class App(tk.Tk):
 
         current = self.throttle_mode.get() == comp_link.THROTTLE_CURRENT
         self.drive_lbl_tx.configure(
-            text=(f"steer {self.steer_var.get():+.2f}   "
+            text=(f"front {self.steer_var.get():+.2f} rear "
+                  f"{self.rear_steer_var.get():+.2f}   "
                   f"throttle {self.throttle_var.get():+.2f}"
                   f"{' A' if current else ''}"),
             fg=GOOD if self.throttle_var.get() == 0.0 else ACCENT)
@@ -887,7 +901,8 @@ class App(tk.Tk):
                   f"slip {'--' if math.isnan(slip) else f'{slip*DEG:+.1f}'}"))
         self.drive_lbl.configure(
             text=(f"torque {pose['wheel_torque_nm']:+7.3f} Nm    "
-                  f"steer {pose['steering_angle']:+7.3f}    "
+                  f"steer F/R {pose['steering_angle']:+7.3f}/"
+                  f"{pose['steering_angle_rear']:+7.3f}    "
                   f"motor rate {pose['motor_speed_ms']:+10.3f} state-units"))
 
         # The solution's own timestamp, and how stale it is by the time it

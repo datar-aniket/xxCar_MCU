@@ -76,6 +76,7 @@ struct router_input_s
   uint64_t auto_timestamp;
   float auto_motor;
   float auto_steering;
+  float auto_delta_rear;
   uint8_t auto_mode;
   bool auto_present;
 };
@@ -113,6 +114,7 @@ struct router_output_s
 {
   float motor;
   float steering;
+  float delta_rear;
   float rc_throttle;
   float rc_steering;
   uint8_t source;

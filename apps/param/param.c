@@ -569,8 +569,13 @@ static const struct param_def_s g_params[] =
   { "PPS_MAX_COR_US", PARAM_TYPE_INT32, I32(10000), I32(100), I32(500000),
     "Largest PPS correction believed as a refinement (us)" },
 
-  { "PPS_EN", PARAM_TYPE_INT32, I32(1), I32(0), I32(1),
-    "Capture Jetson PPS on TELEM2 CTS at boot" },
+  { "PPS_EN", PARAM_TYPE_INT32,
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+    I32(0),
+#else
+    I32(1),
+#endif
+    I32(0), I32(1), "Capture companion PPS at boot" },
   { "EK3_EXT_M_NSE", PARAM_TYPE_FLOAT, F32(0.10f), F32(0.01f), F32(10.0f),
     "External position measurement noise floor (m)" },
   { "EK3_EXT_I_GATE", PARAM_TYPE_FLOAT, F32(5.0f), F32(1.0f), F32(100.0f),
@@ -873,6 +878,24 @@ static const struct param_def_s g_params[] =
     "Servo pulse at steering +1, full left (us)" },
   { "VESC_STEER_OFS", PARAM_TYPE_INT32, I32(0), I32(-300), I32(300),
     "Final steering servo pulse offset (us)" },
+  { "STEER_OUT_SRC", PARAM_TYPE_INT32,
+    I32(1),
+    I32(0), I32(1),
+    "Steering output: 0 VESC CAN, 1 board PWM", PARAM_RANGE_ENUM },
+  { "STEER_IO_CH", PARAM_TYPE_INT32, I32(1), I32(1), I32(8),
+    "Pixhawk PX4IO steering PWM output channel (1-8)" },
+  { "STEER_REAR_CH", PARAM_TYPE_INT32, I32(2), I32(1), I32(8),
+    "Pixhawk PX4IO rear steering PWM output channel (1-8)" },
+  { "REAR_ST_MIN", PARAM_TYPE_INT32, I32(1100), I32(900), I32(2100),
+    "Rear servo pulse at steering -1 (us)" },
+  { "REAR_ST_TRIM", PARAM_TYPE_INT32, I32(1500), I32(900), I32(2100),
+    "Rear servo pulse at steering 0 (us)" },
+  { "REAR_ST_MAX", PARAM_TYPE_INT32, I32(1900), I32(900), I32(2100),
+    "Rear servo pulse at steering +1 (us)" },
+  { "REAR_ST_OFS", PARAM_TYPE_INT32, I32(0), I32(-300), I32(300),
+    "Final rear steering servo pulse offset (us)" },
+  { "STEER_PWM_HZ", PARAM_TYPE_INT32, I32(50), I32(25), I32(400),
+    "Direct board steering PWM frame rate (Hz)" },
 
   /* Scalars turning VESC telemetry into the engineering units the companion
    * expects. All 1.0 until the vehicle is characterised - a guessed gear

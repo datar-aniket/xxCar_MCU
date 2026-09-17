@@ -23,6 +23,7 @@
 #include <sys/time.h>
 
 #include <nuttx/serial/tioctl.h>
+#include <arch/board/board.h>
 
 #include "rc.h"
 #include "../param/param.h"
@@ -157,6 +158,90 @@ static uint64_t rc_now_us(void)
   return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)(ts.tv_nsec / 1000);
 }
 
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+static int rc_ppm_daemon(int rcfd)
+{
+  struct board_rc_ppm_frame_s frame;
+  uint32_t last_sequence = 0;
+  uint64_t last_frame = 0;
+  int ret;
+
+  ret = board_matek_rc_ppm_start();
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "rc: cannot capture PPM on R6/PC7: %d\n", ret);
+      return ret;
+    }
+
+  pthread_mutex_lock(&g_lock);
+  g_status.proto = RC_PROTO_PPM;
+  g_status.locked = true;
+  pthread_mutex_unlock(&g_lock);
+  syslog(LOG_INFO, "rc: R6/PC7 PPM capture (TIM3_CH2)\n");
+
+  while (!g_should_stop)
+    {
+      memset(&frame, 0, sizeof(frame));
+      if (board_matek_rc_ppm_latest(&frame) &&
+          frame.sequence != last_sequence)
+        {
+          struct rc_in_s msg;
+          unsigned i;
+
+          last_sequence = frame.sequence;
+          last_frame = frame.timestamp_us;
+
+          pthread_mutex_lock(&g_lock);
+          g_status.frames = frame.sequence;
+          g_status.errors = frame.errors;
+          g_status.ok = true;
+          g_status.failsafe = false;
+          g_status.last.count = frame.count;
+          g_status.last.failsafe = false;
+          g_status.last.frame_lost = false;
+          for (i = 0; i < frame.count; i++)
+            {
+              g_status.last.channel[i] = frame.channel[i];
+            }
+          pthread_mutex_unlock(&g_lock);
+
+          if (rcfd >= 0)
+            {
+              memset(&msg, 0, sizeof(msg));
+              msg.timestamp = frame.timestamp_us;
+              msg.count = frame.count;
+              msg.ok = true;
+              msg.frames = (uint16_t)frame.sequence;
+              msg.rssi = 255;
+              msg.source = RC_IN_SRC_PPM;
+              for (i = 0; i < frame.count; i++)
+                {
+                  msg.channel[i] = frame.channel[i];
+                }
+              rc_in_publish(rcfd, &msg);
+            }
+        }
+
+      if (last_frame != 0 && rc_now_us() - last_frame > RC_TIMEOUT_US)
+        {
+          pthread_mutex_lock(&g_lock);
+          if (g_status.ok)
+            {
+              g_status.timeouts++;
+              syslog(LOG_WARNING, "rc: R6 PPM link lost\n");
+            }
+          g_status.ok = false;
+          pthread_mutex_unlock(&g_lock);
+        }
+
+      usleep(2000);
+    }
+
+  board_matek_rc_ppm_stop();
+  return OK;
+}
+#endif
+
 /* Listen on one protocol's line settings for RC_PROBE_MS and report whether a
  * valid frame turned up.
  *
@@ -220,6 +305,22 @@ static int rc_daemon(int argc, FAR char *argv[])
 
   UNUSED(argc);
   UNUSED(argv);
+
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+  if (g_proto_param == RC_PROT_PPM)
+    {
+      int result;
+
+      rcfd = rc_in_advertise();
+      result = rc_ppm_daemon(rcfd);
+      if (rcfd >= 0)
+        {
+          orb_unadvertise(rcfd);
+        }
+      g_running = false;
+      return result < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
+    }
+#endif
 
   fd = open(g_devpath, O_RDWR | O_NOCTTY);
   if (fd < 0)
@@ -377,17 +478,17 @@ int rc_start(FAR const char *devpath, int32_t proto_param)
       return -EINVAL;
     }
 
-  /* PPM cannot be done here, and saying so is more useful than trying.
-   *
-   * PPM is a pulse train measured with a timer's input capture, not a byte
-   * stream - a UART cannot see it at all. On this board the PPM/SBUS RC IN
-   * connector is wired to the PX4IO co-processor, which decodes PPM itself and
-   * hands over channels (px4io status shows RC_PPM when it does). So the answer
-   * to "I want PPM" is apps/px4io, not this driver.
-   */
-
   if (proto_param == RC_PROT_PPM)
     {
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+      if (strcmp(devpath, "/dev/ttyS4") != 0)
+        {
+          syslog(LOG_ERR,
+                 "rc: Matek PPM is physically available only on R6/PC7 "
+                 "(RCIN)\n");
+          return -ENOTSUP;
+        }
+#else
       syslog(LOG_ERR,
              "rc: PPM cannot be decoded on a serial port - it is a pulse "
              "train, not a byte stream.\n");
@@ -395,6 +496,7 @@ int rc_start(FAR const char *devpath, int32_t proto_param)
              "rc: plug the receiver into RC IN; PX4IO decodes PPM already "
              "(see `px4io status`).\n");
       return -ENOTSUP;
+#endif
     }
 
   strlcpy(g_devpath, devpath, sizeof(g_devpath));

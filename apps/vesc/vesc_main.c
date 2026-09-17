@@ -28,7 +28,7 @@ static void usage(void)
          "       vesc set duty|current <motor> <steering> [seconds]\n"
          "\n"
          "  Receives VESC telemetry on FDCAN1 and publishes vesc_status.\n"
-         "  Commands the motor and steering from routed actuator_command.\n"
+         "  Commands motor and steering from routed actuator_command.\n"
          "\n"
          "  <motor>     duty ratio -1..+1, or amps, per mode\n"
          "  <steering>  normalised -1..+1, POSITIVE IS LEFT\n"
@@ -47,7 +47,12 @@ static void usage(void)
          "  VESC_CMD_TO_MS  setpoint age before failsafe neutral\n"
          "  VESC_CUR_MAX    current ceiling, A\n"
          "  VESC_DUTY_MAX   duty ceiling, 0-1\n"
-         "  VESC_STEER_*    MIN / TRIM / MAX servo pulse, us\n");
+         "  VESC_STEER_*    MIN / TRIM / MAX servo pulse, us\n"
+         "  REAR_ST_*       rear MIN / TRIM / MAX / OFS pulse, us\n"
+         "  STEER_OUT_SRC   0 VESC CAN, 1 board PWM\n"
+         "  STEER_IO_CH     Pixhawk front PWM channel (default MAIN 1)\n"
+         "  STEER_REAR_CH   Pixhawk rear PWM channel (default MAIN 2)\n"
+         "  STEER_PWM_HZ    Matek S1 PWM frame rate\n");
 }
 
 static FAR const char *vesc_packet_name(uint8_t id)
@@ -129,9 +134,10 @@ static void print_status(void)
       printf("  tx      DISABLED - VESC_CAN_ID is 0 (discovery mode)\n");
     }
 
-  printf("  tx      fifo_full %" PRIu32 "  last %s  motor %.3f  servo %u us"
+  printf("  tx      fifo_full %" PRIu32 "  last %s  motor %.3f  servo F/R %u/%u us"
          "\n", s.bus.tx_full, vesc_cmd_reason_name(s.last_reason),
-         (double)s.last_motor, (unsigned)s.last_servo_us);
+         (double)s.last_motor, (unsigned)s.last_servo_us,
+         (unsigned)s.last_rear_servo_us);
 
   printf("  telemetry %s  timeout %" PRIu32 " ms  watchdog disarms %"
          PRIu32 "%s\n",
@@ -157,6 +163,26 @@ static void print_status(void)
          (unsigned)s.rc_trim_pwm, (int)s.rc_trim_us,
          s.rc_trim_active ? "" : " (inactive)",
          (int)s.limits.steer_offset + (int)s.rc_trim_us);
+  printf("  rear    steer %u/%u/%u offset %d us\n",
+         (unsigned)s.rear_limits.steer_min,
+         (unsigned)s.rear_limits.steer_trim,
+         (unsigned)s.rear_limits.steer_max,
+         (int)s.rear_limits.steer_offset);
+  if (s.steer_output_source == 1)
+    {
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+      printf("  steering Matek S1  link %s  errors %" PRIu32 "\n",
+             s.steer_io_healthy ? "ok" : "LOST", s.steer_io_errors);
+#else
+      printf("  steering PX4IO front/rear channels %u/%u  link %s  IO errors %"
+             PRIu32 "\n", s.steer_io_channel, s.rear_steer_io_channel,
+             s.steer_io_healthy ? "ok" : "LOST", s.steer_io_errors);
+#endif
+    }
+  else
+    {
+      printf("  steering VESC CAN combined packet\n");
+    }
 }
 
 /* Publish a setpoint at the daemon's rate for a bounded time, then stop.

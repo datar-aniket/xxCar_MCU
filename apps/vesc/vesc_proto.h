@@ -33,10 +33,9 @@
 
 /* Commands, host -> VESC.
  *
- * Only the two combined frames are encoded. They carry motor and steering in
- * one six-byte payload, which is the reason they exist: sending the standard
- * SET_DUTY plus a separate servo packet doubles the frame rate and puts a
- * variable skew between the two axes.
+ * The combined frames carry motor and steering in one six-byte payload for
+ * legacy VESC steering. The standard motor-only frames are used when the
+ * Pixhawk IO co-processor owns the steering servo instead.
  *
  * The other three are defined so the discovery listing can name what it
  * sees.
@@ -77,6 +76,7 @@ bool vesc_decode_status5(FAR const uint8_t *data, uint8_t dlc,
                          FAR struct vesc_status5_s *out);
 
 #define VESC_CMD_SERVO_DLC            6
+#define VESC_CMD_MOTOR_DLC            4
 
 /* The microsecond range docs/can_packet.md gives for the servo field. */
 
@@ -110,5 +110,10 @@ bool vesc_encode_current_servo(float amps, uint16_t servo_us,
                                FAR uint8_t *out);
 bool vesc_encode_duty_servo(float duty, uint16_t servo_us,
                             FAR uint8_t *out);
+
+/* Standard motor-only frames. Used when steering is owned by PX4IO. */
+
+bool vesc_encode_current(float amps, FAR uint8_t *out);
+bool vesc_encode_duty(float duty, FAR uint8_t *out);
 
 #endif /* __APPS_VESC_VESC_PROTO_H */

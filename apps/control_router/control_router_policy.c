@@ -170,6 +170,7 @@ void router_policy_step(const struct router_config_s *config,
   bool old_source;
   float selected_motor = 0.0f;
   float selected_steering = 0.0f;
+  float selected_rear = 0.0f;
   float arm_motor_fraction = 0.0f;
   uint8_t selected_mode;
 
@@ -222,6 +223,7 @@ void router_policy_step(const struct router_config_s *config,
                                  config->auto_timeout_us) &&
                        isfinite(input->auto_motor) &&
                        isfinite(input->auto_steering) &&
+                       isfinite(input->auto_delta_rear) &&
                        input->auto_mode <= ROUTER_MODE_CURRENT;
 
   if (!output->rc_valid)
@@ -322,6 +324,7 @@ void router_policy_step(const struct router_config_s *config,
                               selected_mode == ROUTER_MODE_CURRENT ?
                                 config->current_max : config->duty_max);
       selected_steering = clampf(input->auto_steering, -1.0f, 1.0f);
+      selected_rear = clampf(input->auto_delta_rear, -1.0f, 1.0f);
       if (selected_mode == ROUTER_MODE_CURRENT && config->current_max > 0.0f)
         {
           arm_motor_fraction = fabsf(selected_motor) / config->current_max;
@@ -344,6 +347,7 @@ void router_policy_step(const struct router_config_s *config,
                        (selected_mode == ROUTER_MODE_CURRENT ?
                           config->current_max : config->duty_max);
       selected_steering = output->rc_steering;
+      selected_rear = 0.0f;
       arm_motor_fraction = fabsf(output->rc_throttle);
     }
 
@@ -436,5 +440,6 @@ void router_policy_step(const struct router_config_s *config,
 
   output->motor = selected_motor;
   output->steering = selected_steering;
+  output->delta_rear = selected_rear;
   output->reason = ROUTER_REASON_OK;
 }

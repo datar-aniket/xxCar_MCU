@@ -60,19 +60,19 @@ DIRECT_STEER_MAX = 1.0
 DIRECT_DUTY_MAX = 1.0
 DIRECT_CURRENT_MAX = 50.0
 
-TRAJECTORY_MAX_HORIZON = 14
+TRAJECTORY_MAX_HORIZON = 11
 CONTROL_TRAJECTORY_HEADER = struct.Struct("<QQBeB")
 
 # struct comp_external_pose_s - 48 bytes
 EXTERNAL_POSE = struct.Struct("<Q3f6fBB2x")
 
-# struct comp_vehicle_state_s - 96 bytes
+# struct comp_vehicle_state_s - 104 bytes
 #
 # Frames are NOT all the same, following ROS nav_msgs/Odometry: pose in the
 # world frame, twist in the body frame.
 #   position, quaternion  local ENU
 #   velocity, angular_velocity, accel   body FLU
-VEHICLE_STATE = struct.Struct("<Q3f4f3f3ff3ffffBBBxI")
+VEHICLE_STATE = struct.Struct("<Q3f4f3f3ff3ffffBBBxIf4x")
 
 RC_PWM_MASK = 0x0FFF
 RC_STEER_SHIFT = 0
@@ -89,15 +89,17 @@ SRC_GYRO = 1 << 1
 SRC_ACCEL = 1 << 2
 SRC_VESC = 1 << 3
 SRC_RC = 1 << 4
+SRC_STEERING = 1 << 5
+SRC_STEERING_REAR = 1 << 6
 
 assert EXTERNAL_POSE.size == 48, EXTERNAL_POSE.size
-assert VEHICLE_STATE.size == 96, VEHICLE_STATE.size
+assert VEHICLE_STATE.size == 104, VEHICLE_STATE.size
 
-# struct comp_direct_control_s - 24 bytes
-DIRECT_CONTROL = struct.Struct("<QffB7x")
+# Original 24-byte prefix plus an appended rear steering command.
+DIRECT_CONTROL = struct.Struct("<QffB7xf4x")
 DATUM_RESET = struct.Struct("<I")
 
-assert DIRECT_CONTROL.size == 24, DIRECT_CONTROL.size
+assert DIRECT_CONTROL.size == 32, DIRECT_CONTROL.size
 assert DATUM_RESET.size == 4, DATUM_RESET.size
 
 # struct comp_timesync_req_s / _rep_s
@@ -127,7 +129,7 @@ PAYLOAD_LEN = {
 def trajectory_payload_size(horizon: int) -> int:
     if not 1 <= int(horizon) <= TRAJECTORY_MAX_HORIZON:
         return 0
-    return CONTROL_TRAJECTORY_HEADER.size + int(horizon) * 16
+    return CONTROL_TRAJECTORY_HEADER.size + int(horizon) * 20
 
 _CRC_TAB = (0x0000, 0x1021, 0x2042, 0x3063, 0x4084, 0x50A5, 0x60C6, 0x70E7,
             0x8108, 0x9129, 0xA14A, 0xB16B, 0xC18C, 0xD1AD, 0xE1CE, 0xF1EF)
@@ -226,7 +228,8 @@ def decode_link_test(payload: bytes) -> dict:
 
 
 
-def encode_direct_control(steering, throttle, throttle_type, timestamp_us):
+def encode_direct_control(steering, throttle, throttle_type, timestamp_us,
+                          delta_rear=0.0):
     """Frame a DIRECT_CONTROL.
 
     timestamp_us is UTC microseconds and is NOT optional, unlike the pose
@@ -252,11 +255,16 @@ def encode_direct_control(steering, throttle, throttle_type, timestamp_us):
     if not abs(float(steering)) <= DIRECT_STEER_MAX:
         raise ValueError(f"steering {steering} outside +/-{DIRECT_STEER_MAX}")
 
+    if not abs(float(delta_rear)) <= DIRECT_STEER_MAX:
+        raise ValueError(f"delta_rear {delta_rear} outside "
+                         f"+/-{DIRECT_STEER_MAX}")
+
     if int(timestamp_us) <= 0:
         raise ValueError("direct_control needs a real UTC timestamp")
 
     body = DIRECT_CONTROL.pack(int(timestamp_us), float(steering),
-                               float(throttle), int(throttle_type))
+                               float(throttle), int(throttle_type),
+                               float(delta_rear))
     return encode(MSG_DIRECT_CONTROL, body)
 
 
@@ -264,7 +272,8 @@ def encode_control_trajectory(timestamp_us, solution_time_us, dt, poses,
                               controls, control_method=THROTTLE_DUTY):
     """Frame a finite-horizon plan without directly actuating it.
 
-    poses is [(x, y), ...]; controls is [(steering, duty_or_amps), ...].
+    poses is [(x, y), ...]; controls is
+    [(front_steering, rear_steering, duty_or_amps), ...].
     Both arrays have exactly `horizon` entries. dt is encoded as IEEE binary16
     on the wire; all coordinates and controls remain float32.
     """
@@ -273,7 +282,7 @@ def encode_control_trajectory(timestamp_us, solution_time_us, dt, poses,
     horizon = len(poses)
 
     if horizon != len(controls) or not trajectory_payload_size(horizon):
-        raise ValueError("poses and controls need the same 1..14 length")
+        raise ValueError("poses and controls need the same 1..11 length")
     if int(timestamp_us) <= 0 or int(solution_time_us) <= 0:
         raise ValueError("trajectory timestamps must be UTC microseconds")
     if not math.isfinite(float(dt)) or not float(dt) > 0.0:
@@ -287,18 +296,20 @@ def encode_control_trajectory(timestamp_us, solution_time_us, dt, poses,
     flat_controls = []
 
     for pose, control in zip(poses, controls):
-        if len(pose) != 2 or len(control) != 2:
-            raise ValueError("each pose and control must contain two values")
+        if len(pose) != 2 or len(control) != 3:
+            raise ValueError("each pose needs two and each control three values")
         x, y = map(float, pose)
-        steering, motor = map(float, control)
+        steering, delta_rear, motor = map(float, control)
         if not (math.isfinite(x) and math.isfinite(y)):
             raise ValueError("trajectory poses must be finite")
         if not abs(steering) <= DIRECT_STEER_MAX:
             raise ValueError("trajectory steering is outside +/-1")
+        if not abs(delta_rear) <= DIRECT_STEER_MAX:
+            raise ValueError("trajectory rear steering is outside +/-1")
         if not abs(motor) <= limit:
             raise ValueError("trajectory motor value is outside mode range")
         flat_poses.extend((x, y))
-        flat_controls.extend((steering, motor))
+        flat_controls.extend((steering, delta_rear, motor))
 
     try:
         header = CONTROL_TRAJECTORY_HEADER.pack(
@@ -312,7 +323,7 @@ def encode_control_trajectory(timestamp_us, solution_time_us, dt, poses,
     if not math.isfinite(encoded_dt) or not encoded_dt > 0.0:
         raise ValueError("trajectory dt rounds outside positive float16")
 
-    values = struct.pack(f"<{horizon * 4}f", *(flat_poses + flat_controls))
+    values = struct.pack(f"<{horizon * 5}f", *(flat_poses + flat_controls))
     return encode(MSG_CONTROL_TRAJ, header + values)
 
 
@@ -323,11 +334,13 @@ def decode_control_trajectory(payload: bytes):
         CONTROL_TRAJECTORY_HEADER.unpack_from(payload)
     if len(payload) != trajectory_payload_size(horizon):
         raise ValueError("CONTROL_TRAJ length does not match horizon")
-    values = struct.unpack_from(f"<{horizon * 4}f", payload,
+    values = struct.unpack_from(f"<{horizon * 5}f", payload,
                                 CONTROL_TRAJECTORY_HEADER.size)
     split = horizon * 2
     poses = tuple(zip(values[:split:2], values[1:split:2]))
-    controls = tuple(zip(values[split::2], values[split + 1::2]))
+    controls_flat = values[split:]
+    controls = tuple(zip(controls_flat[::3], controls_flat[1::3],
+                         controls_flat[2::3]))
     return {"timestamp_us": timestamp_us,
             "solution_time_us": solution_time_us,
             "horizon": horizon, "dt": dt,
@@ -435,6 +448,7 @@ def decode_vehicle_state(payload: bytes) -> dict:
         "reset_counter": f[22],
         "source_valid": f[23],
         "rc_status": rc_status,
+        "steering_angle_rear": f[25],
         "rc_steering_pwm": ((rc_status >> RC_STEER_SHIFT) & RC_PWM_MASK),
         "rc_throttle_pwm": ((rc_status >> RC_THROTTLE_SHIFT) & RC_PWM_MASK),
         "armed": bool(rc_status & RC_ARMED),

@@ -76,6 +76,15 @@ struct serial_port_s
 FAR const struct serial_port_s *serial_ports(void);
 int serial_port_count(void);
 
+/* Is any FMU-side port assigned to the RC receiver function?
+ *
+ * PX4IO uses this to arbitrate the system `rc_in` topic.  The IO daemon must
+ * keep running for PWM output even when RC is wired to an FMU UART, but in
+ * that configuration only the direct RC driver may publish `rc_in`.
+ */
+
+bool serial_rc_input_configured(void);
+
 /* Look a port up by connector name, case-insensitively ("telem1"). <0 if
  * unknown.
  */

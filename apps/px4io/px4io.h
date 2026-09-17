@@ -205,6 +205,21 @@ int  px4io_daemon_rate(void);
 
 int px4io_set_setpoint(FAR const uint16_t *values, unsigned count);
 
+/* Steering owner: update one configured channel without zeroing the other
+ * rails. The daemon changes a stale steering demand to neutral after the
+ * timeout, including when the VESC command task stops unexpectedly.
+ */
+
+int px4io_set_steering(unsigned channel, uint16_t pulse_us,
+                       uint16_t neutral_us);
+int px4io_set_steering_pair(unsigned front_channel,
+                            uint16_t front_pulse_us,
+                            uint16_t front_neutral_us,
+                            unsigned rear_channel,
+                            uint16_t rear_pulse_us,
+                            uint16_t rear_neutral_us);
+bool px4io_output_healthy(void);
+
 /* Latest RC frame the daemon saw. -EAGAIN if it has not seen one yet. Cheap:
  * does not touch the wire.
  */

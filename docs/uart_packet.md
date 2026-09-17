@@ -52,15 +52,15 @@ direction fails to route rather than half-working.
 | Id | Name | Direction | Payload |
 |---|---|---|---|
 | 1 | `EXTERNAL_POSE` | companion → board | 48 |
-| 2 | `CONTROL_TRAJ` | companion → board | `20 + 16*horizon`, max 244 |
+| 2 | `CONTROL_TRAJ` | companion → board | `20 + 20*horizon`, max 240 |
 | 3 | `TIMESYNC_REQ` | companion → board | 8 |
 | 4 | `TIMESYNC_REP` | board → companion | 24 |
 | 5 | `TIMESYNC_START` | companion → board | 8 |
 | 6 | `TIMESYNC_END` | companion → board | 16 |
-| 7 | `DIRECT_CONTROL` | companion → board | 24 |
+| 7 | `DIRECT_CONTROL` | companion → board | 32 |
 | 8 | `DATUM_RESET` | companion → board | 4 |
 | 9 | `LINK_TEST_REQ` | companion → board | 16..244 |
-| 16 | `VEHICLE_STATE` | board → companion | 96 |
+| 16 | `VEHICLE_STATE` | board → companion | 104 |
 | 17 | `LINK_TEST_REP` | board → companion | same as request |
 
 An unknown id is counted and ignored — that is a companion newer than the
@@ -292,7 +292,7 @@ fe 01 30 00 b0 94 c7 29 3c 06 00 00 00 c0 3f 00
 If your encoder reproduces this exactly, the framing, the little-endian
 layout and the CRC are all correct.
 
-## 7. VEHICLE_STATE (id 16, 96 bytes)
+## 7. VEHICLE_STATE (id 16, 104 bytes)
 
 What the board sends back, at `EXT_TX_RATE` (default 200 Hz), driven by a
 hardware timer.
@@ -314,6 +314,8 @@ hardware timer.
 | 90 | `uint8` | `source_valid` | — | which inputs were fresh |
 | 91 | `uint8` | pad | — | zero |
 | 92 | `uint32` | `rc_status` | — | packed RC/control state |
+| 96 | `float32` | `steering_angle_rear` | — | mapped rear servo command |
+| 100 | `uint8[4]` | pad | — | zero |
 
 ### rc_status
 
@@ -392,6 +394,9 @@ raw 9.8 m/s² as vehicle acceleration.
 | `motor_speed_ms` | tachometer rate | `VESC_STATE_K` | 1.0 |
 | (filter cutoff) | — | `VESC_SPD_LPF` | 100 Hz |
 | (expected telemetry rate) | — | `VESC_TLM_HZ` | 400 Hz |
+
+`steering_angle_rear` is command-derived feedback from the pulse actually
+sent to the PX4IO rear channel, mapped from 1000–2000 us to -0.5–+0.5.
 
 `VESC_STEER_OFS` accepts -300 to +300 us and is added to the mapped servo pulse after
 `VESC_STEER_MIN/TRIM/MAX`. The transmitted result is bounded to 900–2100 us,
@@ -535,6 +540,7 @@ hard for a rate loop, EKF3 is unaffected.
 | 3 | `COMP_SRC_VESC` | VESC current and motor speed are real |
 | 4 | `COMP_SRC_RC` | packed steering/throttle PWM values are fresh |
 | 5 | `COMP_SRC_STEERING` | selected steering feedback is valid |
+| 6 | `COMP_SRC_STEERING_REAR` | rear commanded steering is valid |
 
 **Check this before trusting a zero.** A stopped VESC and a stationary
 vehicle both report zero wheel torque, and only one of them means the vehicle
@@ -589,8 +595,8 @@ condemned rather than adopted, so there is no jump to announce.
 ```python
 import struct, math
 
-VEHICLE_STATE = struct.Struct("<Q3f4f3f3ff3ffffBBB5x")
-assert VEHICLE_STATE.size == 96
+VEHICLE_STATE = struct.Struct("<Q3f4f3f3ff3ffffBBBxIf4x")
+assert VEHICLE_STATE.size == 104
 
 f = VEHICLE_STATE.unpack(payload)
 state = {
@@ -608,6 +614,7 @@ state = {
     "reset_counter": f[22],
     "source_valid": f[23],
     "rc_status": f[24],
+    "steering_angle_rear": f[25],
 }
 ```
 
@@ -622,23 +629,23 @@ the vehicle. A trajectory follower can later select the time-appropriate
 element and publish an immediate `control_cmd` through the safety router.
 
 The payload is a 20-byte header, followed by exactly `horizon` pose pairs and
-then exactly `horizon` control pairs:
+then exactly `horizon` control triples:
 
 | Offset | Type | Field | Meaning |
 |---|---|---|---|
 | 0 | `uint64` | `timestamp_us` | UTC µs, sender's current time |
 | 8 | `uint64` | `solution_time_us` | UTC µs of the pose used to solve the plan |
-| 16 | `uint8` | `horizon` | number of pose and control entries, 1..14 |
+| 16 | `uint8` | `horizon` | number of pose and control entries, 1..11 |
 | 17 | `float16` | `dt` | seconds between trajectory entries |
 | 19 | `uint8` | `control_method` | 0 = duty, 1 = current |
 | 20 | `float32[horizon][2]` | `poses` | `(x, y)` in local ENU, metres |
-| `20 + 8*horizon` | `float32[horizon][2]` | `controls` | `(steering, duty_or_amps)` |
+| `20 + 8*horizon` | `float32[horizon][3]` | `controls` | `(front_steering, rear_steering, duty_or_amps)` |
 
 `dt` is IEEE-754 binary16, little-endian. Every other floating-point field is
 IEEE-754 binary32. Pose and control arrays have the same count: horizon `N`
 means `N` poses and `N` controls, not `N+1` poses.
 
-The maximum horizon is 14 because `20 + 16*14 = 244`, the protocol payload
+The maximum horizon is 11 because `20 + 20*11 = 240`, the protocol payload
 ceiling. Both timestamps are required and converted back to TIM5 with the
 affine clock relation. A plan is rejected when its current timestamp is stale
 or far in the future, its solution time is in the future relative to current
@@ -646,8 +653,8 @@ time, `dt` is invalid, or any pose/control is non-finite or out of range.
 
 `control_method` uses the board actuator enum:
 
-- `0`: steering −1..+1 and duty −1..+1.
-- `1`: steering −1..+1 and current −50..+50 A.
+- `0`: both steering values −1..+1 and duty −1..+1.
+- `1`: both steering values −1..+1 and current −50..+50 A.
 
 ```python
 frame = comp_link.encode_control_trajectory(
@@ -655,12 +662,12 @@ frame = comp_link.encode_control_trajectory(
     solution_time_us=localization_pose_utc_us,
     dt=0.05,
     poses=[(1.0, 2.0), (1.1, 2.0)],
-    controls=[(0.1, 0.20), (0.08, 0.18)],
+    controls=[(0.1, -0.05, 0.20), (0.08, -0.04, 0.18)],
     control_method=comp_link.THROTTLE_DUTY,
 )
 ```
 
-## 9. DIRECT_CONTROL (id 7, 24 bytes)
+## 9. DIRECT_CONTROL (id 7, 32 bytes)
 
 An immediate actuator command. This is the higher-priority half of the
 autonomous input; `CONTROL_TRAJ` carries a complete non-actuating plan.
@@ -672,6 +679,8 @@ autonomous input; `CONTROL_TRAJ` carries a complete non-actuating plan.
 | 12 | `float32` | `throttle` | duty −1.0 … +1.0, or amps −50.0 … +50.0 |
 | 16 | `uint8` | `throttle_type` | 0 = duty, 1 = current |
 | 17 | `uint8[7]` | `pad` | zero |
+| 24 | `float32` | `delta_rear` | −1.0 … +1.0, left positive |
+| 28 | `uint8[4]` | `pad2` | zero |
 
 ```c
 struct comp_direct_control_s
@@ -681,6 +690,8 @@ struct comp_direct_control_s
   float    throttle;
   uint8_t  throttle_type;
   uint8_t  pad[7];
+  float    delta_rear;
+  uint8_t  pad2[4];
 };
 ```
 

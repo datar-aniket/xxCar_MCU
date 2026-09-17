@@ -51,6 +51,7 @@
 
 #include "px4io.h"
 #include "../rc_in/rc_in.h"
+#include "../serial/serial.h"
 
 /****************************************************************************
  * Pre-processor Definitions
@@ -76,6 +77,8 @@
  */
 
 #define PX4IO_KEEPALIVE_US 100000
+#define PX4IO_STEERING_TIMEOUT_US 200000
+#define PX4IO_LINK_HEALTH_US 250000
 
 /* The daemon nests a fair amount: px4io_reg_read builds two 68-byte IOPackets on
  * the stack, px4io_drain adds a 64-byte scratch buffer, then poll()/read() and a
@@ -109,6 +112,10 @@ static int               g_rate_hz = 50;
  */
 
 static uint16_t          g_pwm[PX4IO_SERVO_COUNT];
+static unsigned          g_steering_channel[2];
+static uint16_t          g_steering_neutral[2];
+static uint64_t          g_steering_update_us;
+static uint64_t          g_last_pwm_success_us;
 
 /* Last RC frame the daemon saw. */
 
@@ -690,6 +697,82 @@ int px4io_set_setpoint(FAR const uint16_t *values, unsigned count)
   return OK;
 }
 
+int px4io_set_steering(unsigned channel, uint16_t pulse_us,
+                       uint16_t neutral_us)
+{
+  return px4io_set_steering_pair(channel, pulse_us, neutral_us,
+                                 0, 0, 0);
+}
+
+int px4io_set_steering_pair(unsigned front_channel, uint16_t front_pulse_us,
+                            uint16_t front_neutral_us,
+                            unsigned rear_channel, uint16_t rear_pulse_us,
+                            uint16_t rear_neutral_us)
+{
+  uint64_t now = px4io_now_us();
+  bool healthy;
+  unsigned channels[2] = {front_channel, rear_channel};
+  uint16_t pulses[2] = {front_pulse_us, rear_pulse_us};
+  uint16_t neutrals[2] = {front_neutral_us, rear_neutral_us};
+  unsigned i;
+
+  if (front_channel == 0 || front_channel > PX4IO_SERVO_COUNT ||
+      front_pulse_us < 900 || front_pulse_us > 2100 ||
+      front_neutral_us < 900 || front_neutral_us > 2100 ||
+      rear_channel > PX4IO_SERVO_COUNT ||
+      (rear_channel != 0 &&
+       (rear_channel == front_channel || rear_pulse_us < 900 ||
+        rear_pulse_us > 2100 || rear_neutral_us < 900 ||
+        rear_neutral_us > 2100)))
+    {
+      return -EINVAL;
+    }
+
+  pthread_mutex_lock(&g_lock);
+  for (i = 0; i < 2; i++)
+    {
+      unsigned old = g_steering_channel[i];
+
+      if (old != 0 && old != front_channel && old != rear_channel)
+        {
+          g_pwm[old - 1] = 0;
+        }
+    }
+
+  g_steering_channel[0] = front_channel;
+  g_steering_channel[1] = rear_channel;
+  g_steering_neutral[0] = front_neutral_us;
+  g_steering_neutral[1] = rear_neutral_us;
+  g_steering_update_us = now;
+  healthy = g_running && g_last_pwm_success_us != 0 &&
+            now >= g_last_pwm_success_us &&
+            now - g_last_pwm_success_us <= PX4IO_LINK_HEALTH_US;
+
+  for (i = 0; i < 2; i++)
+    {
+      if (channels[i] != 0)
+        {
+          g_pwm[channels[i] - 1] = healthy ? pulses[i] : neutrals[i];
+        }
+    }
+
+  pthread_mutex_unlock(&g_lock);
+  return healthy ? OK : -ENOLINK;
+}
+
+bool px4io_output_healthy(void)
+{
+  uint64_t now = px4io_now_us();
+  bool healthy;
+
+  pthread_mutex_lock(&g_lock);
+  healthy = g_running && g_last_pwm_success_us != 0 &&
+            now >= g_last_pwm_success_us &&
+            now - g_last_pwm_success_us <= PX4IO_LINK_HEALTH_US;
+  pthread_mutex_unlock(&g_lock);
+  return healthy;
+}
+
 int px4io_arm(FAR struct px4io_s *io, bool armed)
 {
   if (armed)
@@ -837,7 +920,7 @@ static int px4io_daemon(int argc, FAR char *argv[])
   int period_ms;
   int rc_divisor;
   int cycle = 0;
-  int rcfd;
+  int rcfd = -1;
   int ret;
 
   UNUSED(argc);
@@ -855,12 +938,37 @@ static int px4io_daemon(int argc, FAR char *argv[])
 
   /* Raise INIT_OK, without which the outputs can never arm. */
 
-  px4io_init(&io);
-
-  rcfd = rc_in_advertise();
-  if (rcfd < 0)
+  ret = px4io_init(&io);
+  if (ret < 0)
     {
-      syslog(LOG_ERR, "px4io: cannot advertise rc_in: %d\n", rcfd);
+      syslog(LOG_ERR, "px4io: initialization failed: %d\n", ret);
+      px4io_close(&io);
+      g_running = false;
+      return EXIT_FAILURE;
+    }
+
+  /* There must be exactly one publisher on the canonical RC topic.  PX4IO
+   * still has to run when RC is assigned to an FMU UART because this same
+   * daemon keeps the steering outputs alive.  In that configuration continue
+   * polling IO for `px4io rc` diagnostics, but leave `rc_in` exclusively to
+   * the direct RC driver.
+   *
+   * Port assignments are boot configuration: serial_manager_start() and this
+   * daemon consume the same saved parameter values during bring-up.
+   */
+
+  if (!serial_rc_input_configured())
+    {
+      rcfd = rc_in_advertise();
+      if (rcfd < 0)
+        {
+          syslog(LOG_ERR, "px4io: cannot advertise rc_in: %d\n", rcfd);
+        }
+    }
+  else
+    {
+      syslog(LOG_INFO,
+             "px4io: FMU RC port selected; IO RC is diagnostic-only\n");
     }
 
   /* Snap the period to whole system ticks, and publish the rate we can actually
@@ -937,6 +1045,22 @@ static int px4io_daemon(int argc, FAR char *argv[])
        */
 
       pthread_mutex_lock(&g_lock);
+      now = px4io_now_us();
+      if (g_steering_channel[0] != 0 &&
+          (g_steering_update_us == 0 || now < g_steering_update_us ||
+           now - g_steering_update_us > PX4IO_STEERING_TIMEOUT_US))
+        {
+          unsigned i;
+
+          for (i = 0; i < 2; i++)
+            {
+              if (g_steering_channel[i] != 0)
+                {
+                  g_pwm[g_steering_channel[i] - 1] = g_steering_neutral[i];
+                }
+            }
+        }
+
       memcpy(pwm, g_pwm, sizeof(pwm));
       pthread_mutex_unlock(&g_lock);
 
@@ -950,6 +1074,9 @@ static int px4io_daemon(int argc, FAR char *argv[])
             {
               memcpy(sent, pwm, sizeof(sent));
               last_pwm_us = now;
+              pthread_mutex_lock(&g_lock);
+              g_last_pwm_success_us = now;
+              pthread_mutex_unlock(&g_lock);
             }
         }
 
@@ -993,6 +1120,9 @@ static int px4io_daemon(int argc, FAR char *argv[])
     }
 
   px4io_close(&io);
+  pthread_mutex_lock(&g_lock);
+  g_last_pwm_success_us = 0;
+  pthread_mutex_unlock(&g_lock);
   g_running = false;
   return EXIT_SUCCESS;
 }
@@ -1028,6 +1158,13 @@ int px4io_start(int rate_hz)
 
   g_rate_hz     = rate_hz;
   g_should_stop = false;
+  pthread_mutex_lock(&g_lock);
+  memset(g_pwm, 0, sizeof(g_pwm));
+  memset(g_steering_channel, 0, sizeof(g_steering_channel));
+  memset(g_steering_neutral, 0, sizeof(g_steering_neutral));
+  g_steering_update_us = 0;
+  g_last_pwm_success_us = 0;
+  pthread_mutex_unlock(&g_lock);
 
   pid = task_create("px4io", PX4IO_DAEMON_PRIO, PX4IO_DAEMON_STACK,
                     px4io_daemon, NULL);
@@ -1040,12 +1177,12 @@ int px4io_start(int rate_hz)
    * than a hopeful one.
    */
 
-  for (i = 0; i < 100 && !g_running; i++)
+  for (i = 0; i < 100 && !px4io_output_healthy(); i++)
     {
       usleep(10000);
     }
 
-  return g_running ? OK : -EIO;
+  return px4io_output_healthy() ? OK : -EIO;
 }
 
 void px4io_stop(void)

@@ -47,8 +47,9 @@ int main(void)
   unsigned char link_test[COMP_MAX_PAYLOAD];
   uint64_t traj_timestamp = 1234567890123ull;
   uint64_t solution_timestamp = 1234567880000ull;
-  float traj_values[8] = {1.0f, 2.0f, 1.5f, 2.5f,
-                          -0.25f, 0.2f, 0.5f, -0.1f};
+  float traj_values[10] = {1.0f, 2.0f, 1.5f, 2.5f,
+                           -0.25f, 0.1f, 0.2f,
+                            0.5f, -0.15f, -0.1f};
   int n;
   int i;
   uint64_t link_timestamp = 987654321ull;
@@ -87,6 +88,7 @@ int main(void)
   est.source_valid = 0x0f;
   est.rc_status = 1520u | (1480u << COMP_RC_THROTTLE_SHIFT) |
                   COMP_RC_ARMED | COMP_RC_AUTO | COMP_RC_TRIGGER_HIGH;
+  est.steering_angle_rear = 0.2f;
   n = comp_encode(COMP_MSG_VEHICLE_STATE, &est, sizeof(est), frame,
                   sizeof(frame));
   dump(frame, n);
@@ -96,6 +98,7 @@ int main(void)
   cmd.steering = -0.25f;
   cmd.throttle = 12.5f;
   cmd.throttle_type = COMP_THROTTLE_CURRENT;
+  cmd.delta_rear = 0.125f;
   n = comp_encode(COMP_MSG_DIRECT_CONTROL, &cmd, sizeof(cmd), frame,
                   sizeof(frame));
   dump(frame, n);
@@ -193,7 +196,8 @@ def main():
             0x4f, 3, 0x0f,
             1520 | (1480 << comp_link.RC_THROTTLE_SHIFT) |
             comp_link.RC_ARMED | comp_link.RC_AUTO |
-            comp_link.RC_TRIGGER_HIGH))
+            comp_link.RC_TRIGGER_HIGH,
+            0.2))
     assert py_est == c_est_frame, (
         f"VEHICLE_STATE bytes differ\n  C:  {c_est_frame.hex()}\n"
         f"  py: {py_est.hex()}")
@@ -201,7 +205,8 @@ def main():
     # This one carries an actuator command, so a disagreement about field
     # order or padding is a disagreement about which number is the throttle.
     py_cmd = comp_link.encode_direct_control(
-        -0.25, 12.5, comp_link.THROTTLE_CURRENT, 1234567890123)
+        -0.25, 12.5, comp_link.THROTTLE_CURRENT, 1234567890123,
+        delta_rear=0.125)
     assert py_cmd == c_cmd_frame, (
         f"DIRECT_CONTROL bytes differ\n  C:  {c_cmd_frame.hex()}\n"
         f"  py: {py_cmd.hex()}")
@@ -214,7 +219,7 @@ def main():
     py_traj = comp_link.encode_control_trajectory(
         1234567890123, 1234567880000, 0.05,
         [(1.0, 2.0), (1.5, 2.5)],
-        [(-0.25, 0.2), (0.5, -0.1)],
+        [(-0.25, 0.1, 0.2), (0.5, -0.15, -0.1)],
         comp_link.THROTTLE_DUTY)
     assert py_traj == c_traj_frame, (
         f"CONTROL_TRAJ bytes differ\n  C:  {c_traj_frame.hex()}\n"
@@ -254,6 +259,7 @@ def main():
     assert abs(pose["wheel_torque_nm"] - 2.75) < 1e-6
     assert abs(pose["steering_angle"] + 0.35) < 1e-6
     assert abs(pose["motor_speed_ms"] - 4.5) < 1e-6
+    assert abs(pose["steering_angle_rear"] - 0.2) < 1e-6
     assert pose["source_valid"] == 0x0f
     assert pose["rc_steering_pwm"] == 1520
     assert pose["rc_throttle_pwm"] == 1480

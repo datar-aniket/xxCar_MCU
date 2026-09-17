@@ -49,6 +49,11 @@ Decoder Implementation:
 
 
 4. Standard VESC Command Frames Used
+
+When `STEER_OUT_SRC=1`, steering is sent to the board PWM output (Pixhawk
+PX4IO or Matek S1) and the MCU sends these standard four-byte motor-only frames
+to VESC instead of the custom combined motor/servo packets. This avoids driving
+two steering outputs at once.
 CAN_PACKET_SET_DUTY (ID 0 / 0x00)
 
 DLC: 4 Bytes

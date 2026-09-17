@@ -8,6 +8,7 @@ config XXCAR_PX4IO
 	default n
 	depends on STM32H7_USART6 && SERIAL_TERMIOS
 	select XXCAR_RC_IN
+	select XXCAR_SERIAL
 	---help---
 		Client for the PX4IO co-processor (STM32F103) on the Pixhawk 6C,
 		over USART6 (/dev/ttyS4) at 1.5 Mbaud.
@@ -15,7 +16,9 @@ config XXCAR_PX4IO
 		The 6C's RC IN connector and its 8 PWM servo rails belong to the IO
 		chip, not to the FMU - talking to IO is the only way to reach them.
 		IO demodulates SBUS/DSM/PPM itself and hands over decoded channels,
-		so no protocol autodetection is needed for that connector.
+		so no protocol autodetection is needed for that connector. If an FMU
+		serial port is assigned the RC function, PX4IO remains active for PWM
+		output but does not publish the system RC topic.
 
 		Not every FMUv6C is fitted with the IO chip; the client probes for it
 		and fails cleanly when it is absent.

@@ -143,6 +143,29 @@ static bool vesc_encode_servo_frame(float motor, float scale, float limit,
   return true;
 }
 
+static bool vesc_encode_motor_frame(float motor, float scale, float limit,
+                                    FAR uint8_t *out)
+{
+  if (out == NULL)
+    {
+      return false;
+    }
+
+  if (!(motor >= -limit && motor <= limit))
+    {
+      if (!isfinite(motor))
+        {
+          vesc_put_be32(out, 0);
+          return false;
+        }
+
+      motor = vesc_clampf(motor, -limit, limit);
+    }
+
+  vesc_put_be32(out, (int32_t)lroundf(motor * scale));
+  return true;
+}
+
 uint32_t vesc_can_id(uint8_t packet_id, uint8_t controller_id)
 {
   return ((uint32_t)packet_id << 8) | (uint32_t)controller_id;
@@ -159,4 +182,16 @@ bool vesc_encode_duty_servo(float duty, uint16_t servo_us, FAR uint8_t *out)
 {
   return vesc_encode_servo_frame(duty, 100000.0f, VESC_PROTO_DUTY_LIMIT,
                                  servo_us, out);
+}
+
+bool vesc_encode_current(float amps, FAR uint8_t *out)
+{
+  return vesc_encode_motor_frame(amps, 1000.0f,
+                                 VESC_PROTO_CUR_LIMIT_A, out);
+}
+
+bool vesc_encode_duty(float duty, FAR uint8_t *out)
+{
+  return vesc_encode_motor_frame(duty, 100000.0f,
+                                 VESC_PROTO_DUTY_LIMIT, out);
 }

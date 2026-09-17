@@ -25,6 +25,47 @@ bootloader with board ID 1013 and an application start address of `0x08020000`. 
 installed bootloader rejects the `.px4` file, install the matching Matek H743-SLIM
 bootloader first; do not force an image with a mismatched board ID.
 
+## Pixhawk 6C front and rear steering outputs
+
+On Pixhawk 6C, steering defaults to the PX4IO PWM rail instead of the VESC CAN
+servo command. Connect the front servo to **MAIN 1** (`STEER_IO_CH`) and rear
+servo to **MAIN 2** (`STEER_REAR_CH`). Both channels are configurable from 1–8
+and must differ. Use an appropriate servo supply and common ground.
+The VESC still receives motor-only duty/current commands; the same RC and Auto
+steering path, pulse endpoints, trim, and RC channel 7 live trim are retained.
+
+```text
+param set STEER_OUT_SRC 1   # 0 restores VESC CAN steering
+param set STEER_IO_CH 1     # choose the connected MAIN output, 1 through 8
+param set STEER_REAR_CH 2   # rear steering output
+param save                  # Pixhawk 6C needs microSD for persistence
+reboot
+px4io status
+vesc status
+```
+
+`PX4IO_EN=1` is required. `PX4IO_RATE` controls how often new steering
+setpoints can reach the IO chip (50 Hz by default); `PX4IO_PWM_HZ` controls the
+PWM frame rate the servo sees (50 Hz by default for analog servos). Both output
+selection and front/rear calibration parameters are read when `vesc` starts,
+so reboot after changing
+them. Without microSD, the parameters remain RAM-only; use `vesc stop` then
+`vesc start` to apply them for this session. Test with the wheels clear of the
+ground and verify that positive
+steering commands turn left before driving. If PX4IO stops responding, the
+motor is disarmed; a stopped VESC daemon leaves the IO output at neutral after
+its 200 ms steering-command timeout. Steering feedback remains selected
+independently by `STEER_FB_SRC`: 0 uses the VESC ADC (only if its feedback
+sensor is still wired there), while 1 reports the requested servo pulse as
+an estimate, not a measured angle.
+
+RC input has one deterministic owner. With no FMU port assigned function 4,
+PX4IO publishes the receiver connected to the Pixhawk RC IN connector. If any
+`SER_*_FUNC` is set to 4, that direct UART/PPM driver is the sole `rc_in`
+publisher. PX4IO continues servicing MAIN outputs and `px4io rc` diagnostics,
+but it no longer publishes its receiver stream. Reboot after changing a port
+function so all services consume the same saved assignment.
+
 ## Matek H743-SLIM-V4 wiring
 
 The Matek is not connector- or pin-compatible with the Pixhawk 6C. Rebuild the harness using
@@ -35,16 +76,41 @@ TX to RX and connect a common ground. Check the Jetson carrier's UART voltage be
 |---|---|---|---|
 | Jetson companion | T4/R4 | UART4 PB9/PB8 | `TELEM2`, 921600 baud |
 | NSH console | T7/R7 | UART7 PE8/PE7 | `TELEM1`, 115200 baud |
-| RC serial | T6/R6 | USART6 PC6/PC7 | RC auto-detect, 420000 baud |
+| RC input | R6 (T6 unused for receivers) | USART6_RX / TIM3_CH2 PC7 | SBUS/CRSF auto-detect; explicit PPM |
 | VESC | CAN H/L/GND | FDCAN1 PD1/PD0 | 1 Mbit/s |
-| PPS input | S1 + GND | TIM5_CH1 PA0 | rising-edge capture |
+| Steering servo | S1 + servo rail/GND | TIM2_CH1 PA0 | 50 Hz PWM, 900–2100 us |
+| Optional PPS | S1 + GND | TIM5_CH1 PA0 | only when S1 steering is disabled |
 | External IST8310 | I2C1 SCL/SDA | PB6/PB7 | optional compass |
 | microSD | onboard slot | SDMMC1 | logs; optional text parameter mirror |
 
-S1 is reserved for PPS while `PPS_EN=1`; do not also use S1 as a PWM output. The firmware
-does not currently expose the Matek S1-S12 PWM outputs because vehicle actuation is sent to
-the VESC over CAN. There is no PX4IO co-processor on the Matek, so the Pixhawk RC-IN/PWM
-architecture does not carry over; use the dedicated R6/T6 serial RC pads.
+Matek defaults to `STEER_OUT_SRC=1`, which sends steering PWM to S1 and sends
+motor-only CAN commands to VESC. `STEER_PWM_HZ` sets the S1 frame rate (default
+50 Hz); the same `VESC_STEER_MIN/TRIM/MAX/OFS` mapping and RC channel 7 trim
+used on Pixhawk are applied. A 200 ms hardware watchdog returns S1 to neutral
+if command updates stop. S1 steering and S1 PPS are physically mutually
+exclusive, so `PPS_EN` defaults to 0 on Matek and boot suppresses PPS if board
+PWM steering is selected.
+
+R6 is RC input by default (`SER_RC_FUNC=4`). With `RC_PROT=0`, firmware
+alternates between SBUS and CRSF settings until valid frames are decoded. PPM
+cannot be autodetected as UART data; set `RC_PROT=3` to remux R6/PC7 to
+TIM3_CH2 input capture. PPM accepts 4–18 channels with 750–2250 us intervals
+and treats an interval of at least 2700 us as frame sync.
+
+```text
+param set STEER_OUT_SRC 1
+param set STEER_PWM_HZ 50
+param set SER_RC_FUNC 4
+param set RC_PROT 0       # SBUS/CRSF auto; use 3 for PPM
+param save
+reboot
+vesc status
+rc status
+```
+
+There is no PX4IO co-processor on Matek. Power the servo rail with a suitable
+BEC and connect signal, supply, and ground correctly; the MCU does not provide
+servo power from PA0 itself.
 
 Power the board through a regulator/BEC and wiring that meets the Matek power-input
 specification. Do not transplant a Pixhawk POWER connector by color or position. For CAN,

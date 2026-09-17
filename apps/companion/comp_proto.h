@@ -135,13 +135,14 @@ struct comp_datum_reset_s
 #define COMP_DIRECT_CURRENT_MAX  50.0f
 
 /* CONTROL_TRAJ has a variable payload. Its 20-byte header is followed by
- * `horizon` pose pairs and then `horizon` control pairs. Each pair is two
- * float32 values, so 14 steps exactly fit the protocol's 244-byte ceiling.
+ * `horizon` pose pairs and then `horizon` control triples. A control is
+ * front steering, rear steering, and duty/current. Eleven steps fit the
+ * protocol's 244-byte ceiling.
  */
 
 #define COMP_TRAJ_HEADER_SIZE     20u
-#define COMP_TRAJ_STEP_SIZE       16u
-#define COMP_TRAJ_MAX_HORIZON     14u
+#define COMP_TRAJ_STEP_SIZE       20u
+#define COMP_TRAJ_MAX_HORIZON     11u
 
 #define COMP_TRAJ_TIMESTAMP_OFS    0u
 #define COMP_TRAJ_SOLUTION_OFS     8u
@@ -151,7 +152,7 @@ struct comp_datum_reset_s
 #define COMP_TRAJ_DATA_OFS        20u
 
 /* Decoded representation. The arrays contain only the first `horizon`
- * entries. controls[][0] is steering and controls[][1] is duty/current.
+ * entries. controls are front steering, rear steering, and duty/current.
  */
 
 struct comp_control_trajectory_s
@@ -160,7 +161,7 @@ struct comp_control_trajectory_s
   uint64_t solution_time_us;
   float    dt;
   float    poses[COMP_TRAJ_MAX_HORIZON][2];
-  float    controls[COMP_TRAJ_MAX_HORIZON][2];
+  float    controls[COMP_TRAJ_MAX_HORIZON][3];
   uint8_t  horizon;
   uint8_t  control_method;
 };
@@ -183,11 +184,9 @@ struct comp_direct_control_s
   float    steering;       /*  8: -1..+1, left positive */
   float    throttle;       /* 12: duty -1..+1, or amps -50..+50 */
   uint8_t  throttle_type;  /* 16: COMP_THROTTLE_* */
-  uint8_t  pad[7];         /* 17: a uint64 first member forces 8-byte
-                            *     alignment, so this pads to 24 whatever
-                            *     it says. Declared, so the wire format is
-                            *     what the struct says rather than what the
-                            *     compiler decided. */
+  uint8_t  pad[7];         /* 17: retain the original 24-byte prefix */
+  float    delta_rear;     /* 24: rear normalised -1..+1, left positive */
+  uint8_t  pad2[4];        /* 28: explicit 32-byte wire layout */
 };
 
 /* The vehicle's full state, sent at EXT_TX_RATE.
@@ -243,6 +242,8 @@ struct comp_vehicle_state_s
   uint8_t  source_valid;      /* 90: COMP_SRC_* - which inputs were fresh */
   uint8_t  pad;               /* 91: align the packed status */
   uint32_t rc_status;         /* 92: raw PWM and control state, bits below */
+  float    steering_angle_rear; /* 96: commanded rear steering */
+  uint8_t  pad2[4];           /* 100: explicit 104-byte wire layout */
 };
 
 /* rc_status: the two raw PWM values consume 12 bits each; four booleans use
@@ -272,6 +273,7 @@ struct comp_vehicle_state_s
 #define COMP_SRC_VESC        (1u << 3)
 #define COMP_SRC_RC          (1u << 4)
 #define COMP_SRC_STEERING    (1u << 5)
+#define COMP_SRC_STEERING_REAR (1u << 6)
 
 /* Clock synchronisation, request and reply.
  *

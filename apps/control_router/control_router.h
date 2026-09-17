@@ -32,6 +32,7 @@ struct control_router_status_s
   float rc_steering;
   float output_motor;
   float output_steering;
+  float output_delta_rear;
   uint32_t publications;
   uint32_t publish_errors;
   uint32_t arm_success;

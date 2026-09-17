@@ -207,6 +207,12 @@ void comp_state_build(FAR const struct comp_state_inputs_s *in,
       out->source_valid |= COMP_SRC_STEERING;
     }
 
+  if (in->rear_steering_valid)
+    {
+      out->steering_angle_rear = in->rear_steering_feedback;
+      out->source_valid |= COMP_SRC_STEERING_REAR;
+    }
+
   if (in->rc_valid)
     {
       out->rc_status =

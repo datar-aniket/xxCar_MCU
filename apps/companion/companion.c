@@ -610,6 +610,7 @@ static void comp_route(int id, FAR const struct comp_parser_s *parser,
       out.timestamp = 0;
       out.motor = wire.throttle;
       out.steering = wire.steering;
+      out.delta_rear = wire.delta_rear;
       out.mode = wire.throttle_type;
 
       if (control_cmd_publish(control_pub, &out) < 0)
@@ -1039,9 +1040,10 @@ static void comp_transmit(int fd, int state_pub, int est_sub, int gyro_sub,
 
       if (g_steer_source == COMP_STEER_SOURCE_COMMAND)
         {
-          /* This is the pulse after the router, VESC mapping, safety state,
-           * and clamp. It therefore describes what was actually transmitted,
-           * whether the selected control source was RC or autonomous.
+          /* This is the pulse after the router, steering mapping, safety
+           * state, and clamp. It describes the requested output for either
+           * RC or Auto, but is not a measurement of the servo's actual angle
+           * or proof that PX4IO physically emitted the pulse.
            */
 
           if (vesc.servo_us != 0)
@@ -1057,6 +1059,13 @@ static void comp_transmit(int fd, int state_pub, int est_sub, int gyro_sub,
           in.steering_valid = true;
           in.steering_measured = true;
           in.steering_feedback = vesc.adc_volts;
+        }
+
+      if (vesc.rear_servo_us != 0)
+        {
+          in.rear_steering_valid = true;
+          in.rear_steering_feedback =
+            comp_state_servo_feedback(vesc.rear_servo_us);
         }
     }
 
@@ -1149,6 +1158,7 @@ static void comp_transmit(int fd, int state_pub, int est_sub, int gyro_sub,
   logged.wheel_torque_nm = wire.wheel_torque_nm;
   logged.steering_angle = wire.steering_angle;
   logged.motor_speed_ms = wire.motor_speed_ms;
+  logged.steering_angle_rear = wire.steering_angle_rear;
   logged.solution_status = wire.solution_status;
   logged.reset_counter = wire.reset_counter;
   logged.source_valid = wire.source_valid;

@@ -221,6 +221,7 @@ static void test_auto_and_source_hold(void)
   in.auto_timestamp = in.now_us;
   in.auto_motor = 0.1f;
   in.auto_steering = -0.25f;
+  in.auto_delta_rear = 0.4f;
   in.auto_mode = ROUTER_MODE_DUTY;
   in.rc_channel[4] = 2000;             /* auto */
   in.now_us += 1000;
@@ -235,6 +236,7 @@ static void test_auto_and_source_hold(void)
   assert(out.source == ROUTER_SOURCE_AUTO);
   assert(fabsf(out.motor - 0.1f) < 1e-6f);
   assert(fabsf(out.steering + 0.25f) < 1e-6f);
+  assert(fabsf(out.delta_rear - 0.4f) < 1e-6f);
 
   /* AUTO duty is already normalized duty, so the limit must only clip it;
    * it must never rescale the whole -1..1 command range.  With a 30% limit,

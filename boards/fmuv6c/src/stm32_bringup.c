@@ -876,7 +876,11 @@ int stm32_bringup(void)
    * estimator clock or UTC.
    */
 
-  if (param_i32("PPS_EN") != 0)
+  if (param_i32("PPS_EN") != 0
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+      && param_i32("STEER_OUT_SRC") != 1
+#endif
+     )
     {
       ret = pps_start();
       if (ret < 0 && ret != -EALREADY)
@@ -895,6 +899,13 @@ int stm32_bringup(void)
                  );
         }
     }
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+  else if (param_i32("PPS_EN") != 0 && param_i32("STEER_OUT_SRC") == 1)
+    {
+      syslog(LOG_WARNING,
+             "[pps] disabled: Matek S1 is selected for steering PWM\n");
+    }
+#endif
 #endif
 
 #ifdef CONFIG_XXCAR_COMPANION

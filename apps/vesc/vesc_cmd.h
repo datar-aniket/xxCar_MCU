@@ -72,7 +72,8 @@ struct vesc_limits_s
 
 struct vesc_cmd_out_s
 {
-  uint8_t  packet_id;    /* VESC_PACKET_SET_DUTY_SERVO or _CURRENT_SERVO */
+  uint8_t  packet_id;    /* internal duty/current choice; transport selects
+                         * combined or motor-only CAN packet */
   float    motor;        /* clamped, in the units the packet id implies */
   uint16_t servo_us;
   uint8_t  reason;       /* VESC_CMD_* */
@@ -93,6 +94,14 @@ void vesc_cmd_resolve(bool armed, bool have_setpoint,
                       uint64_t age_us, uint32_t timeout_ms,
                       FAR const struct vesc_limits_s *lim,
                       FAR struct vesc_cmd_out_s *out);
+
+/* Map one normalized steering command through an independently calibrated
+ * servo. Safe for front or rear steering; non-finite input maps to trim.
+ */
+
+uint16_t vesc_cmd_steering_us(float steering,
+                              FAR const struct vesc_limits_s *lim,
+                              FAR bool *clamped);
 
 /* Map RC channel 7 from 1000..2000 us to -100..+100 us. */
 

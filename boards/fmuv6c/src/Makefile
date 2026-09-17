@@ -24,6 +24,10 @@ include $(TOPDIR)/Make.defs
 
 CSRCS = stm32_boot.c stm32_bringup.c
 
+ifeq ($(CONFIG_XXCAR_BOARD_MATEKH743),y)
+CSRCS += matekh743_io.c
+endif
+
 # DMA-capable pool for the FAT sector buffers. Exactly the arrangement every
 # in-tree STM32H7 board with an SDMMC card uses - see
 # boards/arm/stm32h7/weact-stm32h743/src/stm32_dma_alloc.c, which this is a

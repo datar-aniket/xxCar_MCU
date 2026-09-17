@@ -58,8 +58,9 @@ static size_t sample_trajectory(uint8_t *payload)
 {
   uint64_t timestamp = 1234567890123ull;
   uint64_t solution = 1234567880000ull;
-  float values[8] = {1.0f, 2.0f, 1.5f, 2.5f,
-                     -0.25f, 0.2f, 0.5f, -0.1f};
+  float values[10] = {1.0f, 2.0f, 1.5f, 2.5f,
+                      -0.25f, 0.10f, 0.2f,
+                       0.5f, -0.15f, -0.1f};
 
   memset(payload, 0, COMP_MAX_PAYLOAD);
   memcpy(payload + COMP_TRAJ_TIMESTAMP_OFS, &timestamp, sizeof(timestamp));
@@ -79,23 +80,24 @@ static size_t sample_trajectory(uint8_t *payload)
 static void test_layout(void)
 {
   assert(sizeof(struct comp_external_pose_s) == 48);
-  assert(sizeof(struct comp_vehicle_state_s) == 96);
+  assert(sizeof(struct comp_vehicle_state_s) == 104);
   assert(offsetof(struct comp_vehicle_state_s, rc_status) == 92);
+  assert(offsetof(struct comp_vehicle_state_s, steering_angle_rear) == 96);
   assert(comp_payload_len(COMP_MSG_EXTERNAL_POSE) == 48);
-  assert(comp_payload_len(COMP_MSG_VEHICLE_STATE) == 96);
+  assert(comp_payload_len(COMP_MSG_VEHICLE_STATE) == 104);
   assert(comp_payload_len(COMP_MSG_TIMESYNC_REQ) == 8);
   assert(comp_payload_len(COMP_MSG_TIMESYNC_REP) == 24);
   assert(sizeof(struct comp_timesync_req_s) == 8);
   assert(sizeof(struct comp_timesync_rep_s) == 24);
-  assert(sizeof(struct comp_direct_control_s) == 24);
-  assert(comp_payload_len(COMP_MSG_DIRECT_CONTROL) == 24);
+  assert(sizeof(struct comp_direct_control_s) == 32);
+  assert(comp_payload_len(COMP_MSG_DIRECT_CONTROL) == 32);
   assert(sizeof(struct comp_datum_reset_s) == 4);
   assert(comp_payload_len(COMP_MSG_DATUM_RESET) == 4);
   assert(comp_payload_len(COMP_MSG_CONTROL_TRAJ) == 0);
-  assert(comp_control_trajectory_payload_size(1) == 36);
-  assert(comp_control_trajectory_payload_size(14) == 244);
+  assert(comp_control_trajectory_payload_size(1) == 40);
+  assert(comp_control_trajectory_payload_size(11) == 240);
   assert(comp_control_trajectory_payload_size(0) == 0);
-  assert(comp_control_trajectory_payload_size(15) == 0);
+  assert(comp_control_trajectory_payload_size(12) == 0);
   assert(comp_payload_len(200) == 0);
 }
 
@@ -139,7 +141,8 @@ static void test_control_trajectory_round_trip(void)
   assert(decoded.poses[0][0] == 1.0f);
   assert(decoded.poses[1][1] == 2.5f);
   assert(decoded.controls[0][0] == -0.25f);
-  assert(decoded.controls[1][1] == -0.1f);
+  assert(decoded.controls[0][1] == 0.10f);
+  assert(decoded.controls[1][2] == -0.1f);
 }
 
 static void test_control_trajectory_rejects_bad_length_and_values(void)
@@ -176,6 +179,7 @@ static struct comp_direct_control_s sample_command(void)
   c.steering = -0.25f;
   c.throttle = 12.5f;
   c.throttle_type = COMP_THROTTLE_CURRENT;
+  c.delta_rear = 0.125f;
   return c;
 }
 
@@ -198,6 +202,7 @@ static void test_direct_control_round_trip(void)
   assert(out.steering == in.steering);
   assert(out.throttle == in.throttle);
   assert(out.throttle_type == in.throttle_type);
+  assert(out.delta_rear == in.delta_rear);
 }
 
 /* The wire enum must be the topic enum.
