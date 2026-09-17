@@ -91,9 +91,18 @@ static int serial_do_status(void)
 
       /* USB has no baud: the host owns the line coding and the device ignores
        * it. Printing a number there would just be a lie.
+       *
+       * An RC port is the same kind of lie for a different reason: the RC
+       * driver picks the line settings from RC_PROT - 100000 8E2 for SBUS,
+       * 420000 8N1 for CRSF - and never consults SER_*_BAUD. Showing that
+       * parameter invites someone to "fix" a mismatch that does not exist.
        */
 
-      if (ports[i].baud_param != NULL)
+      if (func == SER_FUNC_RC_IN)
+        {
+          strlcpy(baud, "-", sizeof(baud));
+        }
+      else if (ports[i].baud_param != NULL)
         {
           snprintf(baud, sizeof(baud), "%" PRId32,
                    param_i32(ports[i].baud_param));

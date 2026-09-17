@@ -874,6 +874,55 @@ int px4io_set_disarmed_pwm(FAR struct px4io_s *io, FAR const uint16_t *values,
   return px4io_reg_write(io, PX4IO_PAGE_DISARMED_PWM, 0, values, count);
 }
 
+int px4io_set_steering_hold(FAR struct px4io_s *io,
+                           unsigned front_channel, uint16_t front_us,
+                           unsigned rear_channel, uint16_t rear_us)
+{
+  uint16_t values[PX4IO_SERVO_COUNT];
+  unsigned count = 0;
+  int ret;
+
+  if (io == NULL || front_channel == 0 ||
+      front_channel > PX4IO_SERVO_COUNT ||
+      rear_channel > PX4IO_SERVO_COUNT ||
+      front_us < 900 || front_us > 2100 ||
+      (rear_channel != 0 &&
+       (rear_channel == front_channel || rear_us < 900 || rear_us > 2100)))
+    {
+      return -EINVAL;
+    }
+
+  /* Zero everywhere else is deliberate and means different things on the two
+   * pages: IO ignores a zero on the failsafe page, so those rails keep
+   * whatever they had, and honours it on the disarmed page as "no pulses",
+   * which is what an unused rail should emit. Only the steering rails are
+   * named, so nothing else is disturbed.
+   */
+
+  memset(values, 0, sizeof(values));
+  values[front_channel - 1] = front_us;
+  count = front_channel;
+
+  if (rear_channel != 0)
+    {
+      values[rear_channel - 1] = rear_us;
+
+      if (rear_channel > count)
+        {
+          count = rear_channel;
+        }
+    }
+
+  ret = px4io_set_failsafe_pwm(io, values, count);
+
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  return px4io_set_disarmed_pwm(io, values, count);
+}
+
 int px4io_rc_latest(FAR struct px4io_rc_s *rc)
 {
   int ret = -EAGAIN;

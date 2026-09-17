@@ -193,6 +193,29 @@ static void fmuv6c_boot_stage_end(FAR struct fmuv6c_boot_report_s *report,
     }
 }
 
+#ifdef CONFIG_XXCAR_PX4IO
+/* Where a steering servo sits with no command: its calibrated trim plus the
+ * saved offset, bounded to what the servo output can represent.
+ */
+
+static uint16_t fmuv6c_servo_neutral_us(FAR const char *trim_param,
+                                        FAR const char *offset_param)
+{
+  int32_t us = param_i32(trim_param) + param_i32(offset_param);
+
+  if (us < 900)
+    {
+      us = 900;
+    }
+  else if (us > 2100)
+    {
+      us = 2100;
+    }
+
+  return (uint16_t)us;
+}
+#endif
+
 static void fmuv6c_boot_required_failure(
   FAR struct fmuv6c_boot_report_s *report)
 {
@@ -957,7 +980,6 @@ int stm32_bringup(void)
             {
               ret = px4io_set_pwm_rate(
                 &io, (uint16_t)param_i32("PX4IO_PWM_HZ"));
-              px4io_close(&io);
 
               if (ret < 0)
                 {
@@ -965,6 +987,37 @@ int stm32_bringup(void)
                          "[px4io] failed to configure PWM rate: %d\n", ret);
                   fmuv6c_boot_required_failure(&boot);
                 }
+
+              /* Tell IO where to hold the steering when we are not driving
+               * it. These pages survive nothing either, and until they are
+               * written IO falls back to its own defaults - which for a
+               * steering servo can be a rail at full lock. A vehicle whose
+               * FMU has gone quiet should coast straight.
+               *
+               * Only meaningful when the rails actually carry steering;
+               * with STEER_OUT_SRC=0 the servo hangs off the VESC instead.
+               */
+
+              if (param_i32("STEER_OUT_SRC") == 1)
+                {
+                  ret = px4io_set_steering_hold(
+                    &io,
+                    (unsigned)param_i32("STEER_IO_CH"),
+                    fmuv6c_servo_neutral_us("VESC_STEER_TRIM",
+                                            "VESC_STEER_OFS"),
+                    (unsigned)param_i32("STEER_REAR_CH"),
+                    fmuv6c_servo_neutral_us("REAR_ST_TRIM", "REAR_ST_OFS"));
+
+                  if (ret < 0)
+                    {
+                      syslog(LOG_ERR,
+                             "[px4io] steering failsafe/disarmed hold not "
+                             "set: %d\n", ret);
+                      fmuv6c_boot_optional_failure(&boot);
+                    }
+                }
+
+              px4io_close(&io);
             }
           else
             {

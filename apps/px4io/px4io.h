@@ -175,6 +175,19 @@ int px4io_set_failsafe_pwm(FAR struct px4io_s *io, FAR const uint16_t *values,
 int px4io_set_disarmed_pwm(FAR struct px4io_s *io, FAR const uint16_t *values,
                            unsigned count);
 
+/* Park the steering rails on both of those pages at one call.
+ *
+ * Without it IO holds whatever its own defaults are if the FMU stops talking,
+ * which for a steering servo is a rail that may sit at full lock. A vehicle
+ * whose autopilot has died should coast straight, not turn.
+ *
+ * rear_channel may be 0 on a vehicle with no rear steering.
+ */
+
+int px4io_set_steering_hold(FAR struct px4io_s *io,
+                            unsigned front_channel, uint16_t front_us,
+                            unsigned rear_channel, uint16_t rear_us);
+
 /****************************************************************************
  * The daemon
  *
