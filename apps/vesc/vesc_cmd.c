@@ -125,6 +125,30 @@ void vesc_cmd_trim_idle(FAR struct vesc_trim_state_s *state)
     }
 }
 
+int32_t vesc_cmd_trim_fold(int32_t saved_us, int32_t live_us,
+                           int32_t limit_us)
+{
+  int32_t sum = saved_us + live_us;
+
+  if (limit_us < 0)
+    {
+      limit_us = 0;
+    }
+
+  if (sum > limit_us)
+    {
+      return limit_us;
+    }
+
+  return sum < -limit_us ? -limit_us : sum;
+}
+
+bool vesc_cmd_trim_save_due(bool was_armed, bool armed,
+                            int32_t front_live_us, int32_t rear_live_us)
+{
+  return was_armed && !armed && (front_live_us != 0 || rear_live_us != 0);
+}
+
 int16_t vesc_cmd_trim_nudge(FAR struct vesc_trim_state_s *state,
                             uint16_t pwm, uint64_t now_us,
                             FAR const struct vesc_trim_cfg_s *cfg)

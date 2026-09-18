@@ -11,6 +11,7 @@
 #include <inttypes.h>
 #include <pthread.h>
 #include <sched.h>
+#include <semaphore.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
@@ -92,20 +93,48 @@ static struct vesc_daemon_status_s g_status;
 
 static struct vesc_speed_s g_speed;
 
-/* The accumulated nudges. Shared because the CLI both reads them (status)
- * and clears them (trim save/reset) while the transmit loop is stepping
- * them, so every access is under g_lock.
+/* The accumulated nudges. Shared because the CLI and the save task both read
+ * and fold them while the transmit loop is stepping them, so every access is
+ * under g_lock.
  *
- * g_trim_fold is how a save reaches the transmit loop: the CLI writes the
- * parameters, then asks the loop to reload its limits and zero the nudges in
- * the same pass. Doing those two together is what keeps the servo still at
- * the moment of saving - zeroing first would drop the offset for a cycle,
- * which on a 300 us trim is a visible twitch.
+ * g_trim_fold is how a save reaches the transmit loop. The save writes the
+ * parameters, then asks the loop to reload its limits and take the saved
+ * amount off the nudges in the same pass. Doing those two together is what
+ * keeps the servo still at the moment of saving - done apart, the offset the
+ * servo sees would jump for a cycle, and on a 300 us trim that is a visible
+ * twitch. The amount is subtracted rather than the nudge zeroed, so a nudge
+ * made while the card was being written survives the save.
  */
 
 static struct vesc_trim_state_s g_trim_front;
 static struct vesc_trim_state_s g_trim_rear;
 static bool g_trim_fold;
+static int32_t g_trim_fold_front_us;
+static int32_t g_trim_fold_rear_us;
+
+/* Saves run in their own short-lived task: param_save() goes through stdio
+ * and FAT to the card, which needs the stack the `param` command is given,
+ * and which must never block the CAN transmit loop or the router. At most
+ * one exists at a time. A disarm that arrives while one is running sets
+ * g_trim_save_again, so its trim is saved by the same task rather than
+ * dropped.
+ */
+
+#define VESC_TRIM_SAVE_PRIORITY  SCHED_PRIORITY_DEFAULT
+#define VESC_TRIM_SAVE_STACK     4096
+#define VESC_TRIM_FOLD_WAIT_US   10000
+#define VESC_TRIM_FOLD_WAITS     50
+
+static bool g_trim_saving;
+static bool g_trim_save_again;
+static sem_t g_trim_save_done;
+static bool g_trim_save_waiter;
+static int g_trim_save_result;
+static uint32_t g_trim_saves;
+static uint32_t g_trim_save_errors;
+static int g_trim_save_last;
+
+static int trim_request_save(bool wait);
 
 static uint64_t vesc_now_us(void)
 {
@@ -458,16 +487,15 @@ static void vesc_transmit(FAR struct vesc_daemon_status_s *s)
 
   if (g_trim_fold)
     {
-      /* A save has already written the parameters. Pick them up and drop the
-       * nudges in the same breath, so the sum the servo sees never changes.
+      /* A save has already written the parameters. Pick them up and take
+       * the saved amount off the nudges in the same breath, so the sum the
+       * servo sees never changes.
        */
 
       s->limits.steer_offset = (int16_t)param_i32("VESC_STEER_OFS");
       s->rear_limits.steer_offset = (int16_t)param_i32("REAR_ST_OFS");
-      g_trim_front.offset_us = 0;
-      g_trim_rear.offset_us = 0;
-      vesc_cmd_trim_idle(&g_trim_front);
-      vesc_cmd_trim_idle(&g_trim_rear);
+      g_trim_front.offset_us -= g_trim_fold_front_us;
+      g_trim_rear.offset_us -= g_trim_fold_rear_us;
       g_trim_fold = false;
     }
 
@@ -686,6 +714,7 @@ static int vesc_daemon(int argc, FAR char *argv[])
   bool can_ready = false;
   uint64_t next_tx_us;
   uint64_t tx_period_us;
+  bool was_armed = false;
   int ret;
 
   memset(&status, 0, sizeof(status));
@@ -874,6 +903,31 @@ static int vesc_daemon(int argc, FAR char *argv[])
       fdcan_stats(&status.bus);
       status_publish(&status);
 
+      /* Save the trim when the vehicle disarms, whatever disarmed it. A fault
+       * disarm is no reason to lose it: a lost link has already frozen the
+       * nudges, so what is saved is what the operator last set. Only queued
+       * here - the write itself happens in the save task.
+       */
+
+      {
+        bool armed_now = g_armed;
+        int32_t front_live;
+        int32_t rear_live;
+
+        pthread_mutex_lock(&g_lock);
+        front_live = g_trim_front.offset_us;
+        rear_live = g_trim_rear.offset_us;
+        pthread_mutex_unlock(&g_lock);
+
+        if (vesc_cmd_trim_save_due(was_armed, armed_now,
+                                   front_live, rear_live))
+          {
+            trim_request_save(false);
+          }
+
+        was_armed = armed_now;
+      }
+
       /* RX wakes this task immediately. With a configured controller the
        * timeout is the time left to the transmit deadline; discovery mode
        * uses only a bounded stop/status watchdog.
@@ -990,48 +1044,46 @@ int vesc_stop(void)
   return g_running ? -ETIMEDOUT : 0;
 }
 
-static int32_t trim_clamp_ofs(int32_t value)
-{
-  if (value > VESC_TRIM_LIMIT_US)
-    {
-      return VESC_TRIM_LIMIT_US;
-    }
+/* One fold of the live trim into the saved parameters. Runs only in the
+ * save task, never in the transmit loop.
+ */
 
-  return value < -VESC_TRIM_LIMIT_US ? -VESC_TRIM_LIMIT_US : value;
-}
-
-int vesc_trim_commit(void)
+static int trim_commit_once(void)
 {
+  int32_t front_live;
+  int32_t rear_live;
   int32_t front_old;
   int32_t rear_old;
   int32_t front_new;
   int32_t rear_new;
+  int wait;
   int ret;
 
-  if (g_armed)
+  pthread_mutex_lock(&g_lock);
+
+  if (g_trim_fold)
     {
-      /* Saving reloads the daemon's limits, and doing that under power is a
-       * way to move a steering servo nobody asked to move.
+      /* The previous save's fold has not been taken yet. Folding again now
+       * would count the same nudge twice.
        */
 
-      return -EPERM;
+      pthread_mutex_unlock(&g_lock);
+      return -EBUSY;
     }
 
-  pthread_mutex_lock(&g_lock);
-  front_new = g_trim_front.offset_us;
-  rear_new = g_trim_rear.offset_us;
+  front_live = g_trim_front.offset_us;
+  rear_live = g_trim_rear.offset_us;
   pthread_mutex_unlock(&g_lock);
 
   front_old = param_i32("VESC_STEER_OFS");
   rear_old = param_i32("REAR_ST_OFS");
-  front_new = trim_clamp_ofs(front_old + front_new);
-  rear_new = trim_clamp_ofs(rear_old + rear_new);
+  front_new = vesc_cmd_trim_fold(front_old, front_live, VESC_TRIM_LIMIT_US);
+  rear_new = vesc_cmd_trim_fold(rear_old, rear_live, VESC_TRIM_LIMIT_US);
 
   if (front_new == front_old && rear_new == rear_old)
     {
-      /* Nothing moved, so nothing is written. A parameter save erases and
-       * rewrites a flash journal slot; doing that to store the values
-       * already there would spend the board's write endurance on a no-op.
+      /* Nothing moved, so nothing is written. A parameter save rewrites a
+       * file on the card, and every disarm would otherwise pay for one.
        */
 
       return -EALREADY;
@@ -1050,8 +1102,8 @@ int vesc_trim_commit(void)
   if (ret < 0)
     {
       /* Put the in-RAM values back so what the daemon would reload matches
-       * what is actually on the card. Losing the save is recoverable; a
-       * board running an offset it did not persist is the confusing case.
+       * what is actually on the card. The nudges were never touched, so the
+       * trim stays live and the next disarm tries again.
        */
 
       param_set_i32("VESC_STEER_OFS", front_old);
@@ -1059,31 +1111,185 @@ int vesc_trim_commit(void)
       return ret;
     }
 
-  /* Hand the fold to the transmit loop. It reloads the limits and zeroes the
-   * nudges together, which is what keeps the servo still across the save.
-   */
-
   pthread_mutex_lock(&g_lock);
-  g_trim_fold = true;
+  g_trim_fold_front_us = front_new - front_old;
+  g_trim_fold_rear_us = rear_new - rear_old;
+
+  if (g_running)
+    {
+      g_trim_fold = true;
+    }
+  else
+    {
+      /* No loop to hand it to, and no limits of its own to reload. */
+
+      g_trim_front.offset_us -= g_trim_fold_front_us;
+      g_trim_rear.offset_us -= g_trim_fold_rear_us;
+    }
+
   pthread_mutex_unlock(&g_lock);
 
-  if (!g_running)
-    {
-      /* No loop to do it, so there is nothing live to fold either. */
+  /* Stay until the loop has taken it, so the next save sees the reduced
+   * nudges. If the loop never gets there, the fold stays pending and the
+   * next save refuses with -EBUSY rather than folding twice.
+   */
 
-      pthread_mutex_lock(&g_lock);
-      memset(&g_trim_front, 0, sizeof(g_trim_front));
-      memset(&g_trim_rear, 0, sizeof(g_trim_rear));
-      g_trim_fold = false;
-      pthread_mutex_unlock(&g_lock);
+  for (wait = 0; wait < VESC_TRIM_FOLD_WAITS && g_trim_fold; wait++)
+    {
+      usleep(VESC_TRIM_FOLD_WAIT_US);
     }
 
   return 0;
 }
 
+static int trim_save_task(int argc, FAR char *argv[])
+{
+  bool again;
+  bool waiter;
+  int ret;
+
+  UNUSED(argc);
+  UNUSED(argv);
+
+  do
+    {
+      ret = trim_commit_once();
+
+      pthread_mutex_lock(&g_lock);
+
+      if (ret == 0)
+        {
+          g_trim_saves++;
+        }
+      else if (ret != -EALREADY)
+        {
+          g_trim_save_errors++;
+        }
+
+      g_trim_save_last = ret;
+      again = g_trim_save_again;
+      g_trim_save_again = false;
+      pthread_mutex_unlock(&g_lock);
+
+      if (ret == 0)
+        {
+          syslog(LOG_INFO, "[vesc] trim saved: VESC_STEER_OFS %" PRIi32
+                 " REAR_ST_OFS %" PRIi32 " us\n",
+                 param_i32("VESC_STEER_OFS"), param_i32("REAR_ST_OFS"));
+        }
+      else if (ret != -EALREADY)
+        {
+          /* Almost always a missing or unwritable card. It has to be said
+           * somewhere: nobody is at a prompt to see it on an automatic save.
+           */
+
+          syslog(LOG_ERR, "[vesc] trim NOT saved (%d); still live, will be "
+                 "lost on reboot\n", ret);
+        }
+    }
+  while (again);
+
+  pthread_mutex_lock(&g_lock);
+  g_trim_save_result = ret;
+  waiter = g_trim_save_waiter;
+  g_trim_save_waiter = false;
+  g_trim_saving = false;
+  pthread_mutex_unlock(&g_lock);
+
+  if (waiter)
+    {
+      sem_post(&g_trim_save_done);
+    }
+
+  return ret == 0 || ret == -EALREADY ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
+/* Start a save, or fold this request into the one already running. With
+ * wait set, block until it finishes and return its result.
+ */
+
+static int trim_request_save(bool wait)
+{
+  static bool sem_ready;
+  int pid;
+
+  pthread_mutex_lock(&g_lock);
+
+  if (!sem_ready)
+    {
+      sem_init(&g_trim_save_done, 0, 0);
+      sem_ready = true;
+    }
+
+  if (g_trim_saving)
+    {
+      g_trim_save_again = true;
+      pthread_mutex_unlock(&g_lock);
+      return wait ? -EBUSY : 0;
+    }
+
+  g_trim_saving = true;
+  g_trim_save_again = false;
+  g_trim_save_waiter = wait;
+  pthread_mutex_unlock(&g_lock);
+
+  pid = task_create("vesc_trim", VESC_TRIM_SAVE_PRIORITY,
+                    VESC_TRIM_SAVE_STACK, trim_save_task, NULL);
+
+  if (pid < 0)
+    {
+      int err = -errno;
+
+      pthread_mutex_lock(&g_lock);
+      g_trim_saving = false;
+      g_trim_save_waiter = false;
+      g_trim_save_errors++;
+      g_trim_save_last = err;
+      pthread_mutex_unlock(&g_lock);
+      syslog(LOG_ERR, "[vesc] cannot start trim save task (%d)\n", err);
+      return err;
+    }
+
+  if (!wait)
+    {
+      return 0;
+    }
+
+  while (sem_wait(&g_trim_save_done) < 0 && errno == EINTR)
+    {
+    }
+
+  return g_trim_save_result;
+}
+
+int vesc_trim_commit(void)
+{
+  if (g_armed)
+    {
+      /* The fold itself cannot move the servo, but a manual save under power
+       * is an odd enough request to be worth refusing: disarm first.
+       */
+
+      return -EPERM;
+    }
+
+  return trim_request_save(true);
+}
+
 int vesc_trim_reset(void)
 {
   pthread_mutex_lock(&g_lock);
+
+  if (g_trim_saving || g_trim_fold)
+    {
+      /* A save has already decided how much it is taking off the nudges.
+       * Zeroing them underneath it would leave them at minus that amount.
+       */
+
+      pthread_mutex_unlock(&g_lock);
+      return -EBUSY;
+    }
+
   memset(&g_trim_front, 0, sizeof(g_trim_front));
   memset(&g_trim_rear, 0, sizeof(g_trim_rear));
   pthread_mutex_unlock(&g_lock);
@@ -1153,5 +1359,14 @@ void vesc_status(FAR struct vesc_daemon_status_s *out)
 {
   pthread_mutex_lock(&g_lock);
   *out = g_status;
+
+  /* Saves are counted by the save task, not the daemon, so they are merged
+   * here rather than carried through status_publish().
+   */
+
+  out->trim_saves = g_trim_saves;
+  out->trim_save_errors = g_trim_save_errors;
+  out->trim_save_last = g_trim_save_last;
+  out->trim_saving = g_trim_saving;
   pthread_mutex_unlock(&g_lock);
 }

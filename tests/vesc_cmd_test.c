@@ -538,6 +538,69 @@ static void test_reason_names(void)
   assert(vesc_cmd_reason_name(200) != NULL);
 }
 
+/* Folding a live nudge into the saved offset must never move the servo:
+ * saved + live is what it sees, so that sum has to be the same after the
+ * save as before it. Checked with the residual the daemon leaves live.
+ */
+
+static void check_fold_preserves(int32_t saved, int32_t live,
+                                 int32_t expect_saved)
+{
+  int32_t folded = vesc_cmd_trim_fold(saved, live, VESC_TRIM_LIMIT_US);
+  int32_t residual = live - (folded - saved);
+
+  assert(folded == expect_saved);
+  assert(folded + residual == saved + live);
+}
+
+static void test_trim_fold_keeps_the_servo_still(void)
+{
+  check_fold_preserves(25, 6, 31);
+  check_fold_preserves(0, -2, -2);
+  check_fold_preserves(40, 0, 40);
+
+  /* Over the limit the saved value stops at the bound and the excess stays
+   * live, rather than being thrown away and jumping the servo back.
+   */
+
+  check_fold_preserves(295, 10, VESC_TRIM_LIMIT_US);
+  check_fold_preserves(-290, -30, -VESC_TRIM_LIMIT_US);
+
+  /* A nudge made while the card was being written: the save consumed 6 of
+   * the 8 now live, so 2 must remain, not 0.
+   */
+
+  {
+    int32_t folded = vesc_cmd_trim_fold(25, 6, VESC_TRIM_LIMIT_US);
+    int32_t live_now = 8;
+
+    assert(live_now - (folded - 25) == 2);
+  }
+}
+
+static void test_trim_save_only_on_the_disarm_edge(void)
+{
+  /* The edge with something to save. */
+
+  assert(vesc_cmd_trim_save_due(true, false, 6, 0));
+  assert(vesc_cmd_trim_save_due(true, false, 0, -2));
+
+  /* Nothing live: nothing to write. */
+
+  assert(!vesc_cmd_trim_save_due(true, false, 0, 0));
+
+  /* Staying disarmed is the case that matters most. The router re-asserts
+   * disarm on every cycle, and this must not become a write per cycle.
+   */
+
+  assert(!vesc_cmd_trim_save_due(false, false, 6, 0));
+
+  /* Arming, or staying armed, never saves. */
+
+  assert(!vesc_cmd_trim_save_due(false, true, 6, 0));
+  assert(!vesc_cmd_trim_save_due(true, true, 6, 0));
+}
+
 int main(void)
 {
   test_disarmed_is_neutral();
@@ -556,6 +619,8 @@ int main(void)
   test_trim_clamps_at_the_limit();
   test_trim_idle_and_unconfigured_are_inert();
   test_trim_front_and_rear_are_independent();
+  test_trim_fold_keeps_the_servo_still();
+  test_trim_save_only_on_the_disarm_edge();
   test_non_finite_is_neutral();
   test_may_arm();
   test_telemetry_lost();

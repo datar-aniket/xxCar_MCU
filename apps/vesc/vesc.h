@@ -79,6 +79,15 @@ struct vesc_daemon_status_s
   bool     rc_trim_input_valid;
   bool     rc_trim_active;
 
+  /* Trim saves, manual and on disarm. Filled in by vesc_status() from the
+   * save task's own counters. A skipped save (nothing changed) is neither.
+   */
+
+  uint32_t trim_saves;
+  uint32_t trim_save_errors;
+  int      trim_save_last;      /* 0, -EALREADY, or the failure */
+  bool     trim_saving;
+
   uint32_t setpoints;                   /* actuator_command messages taken */
   uint32_t tx_sent;                     /* frames handed to the driver */
   uint32_t tx_errors;                   /* driver refused the frame */
@@ -121,10 +130,12 @@ int  vesc_arm(bool armed);
 /* Fold the live trim nudges into VESC_STEER_OFS / REAR_ST_OFS and persist
  * them, or discard them.
  *
- * Commit must be called from a context that may block on flash: it writes
- * parameters, which the CAN transmit loop must never do. It refuses while
- * armed, and reports -EALREADY when the saved values would not change so a
- * bench session does not wear the journal for nothing.
+ * The daemon also does this on its own on every disarm. Either way the write
+ * happens in a separate task, so the CAN transmit loop never blocks on the
+ * card. Commit waits for that task and returns its result: -EPERM while
+ * armed, -EALREADY when the saved values would not change (nothing is
+ * written), -EBUSY while another save is running. Reset returns -EBUSY
+ * during a save.
  */
 
 int  vesc_trim_commit(void);

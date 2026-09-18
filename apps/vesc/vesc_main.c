@@ -29,6 +29,8 @@ static void usage(void)
   printf("Usage: vesc start | stop | status | arm | disarm\n"
          "       vesc set duty|current <motor> <steering> [seconds]\n"
          "       vesc trim save | reset\n"
+         "  Trim is saved on every disarm when it has changed; 'trim save'\n"
+         "  does the same by hand. 'trim reset' discards unsaved trim.\n"
          "\n"
          "  Receives VESC telemetry on FDCAN1 and publishes vesc_status.\n"
          "  Commands motor and steering from routed actuator_command.\n"
@@ -186,6 +188,11 @@ static void print_status(void)
          (int)s.trim_rear_us,
          s.rc_trim_active ? "" : "  (RC stale, frozen)",
          (int)s.limits.steer_offset, (int)s.rear_limits.steer_offset);
+  printf("  saves   %" PRIu32 " ok  %" PRIu32 " failed  last %s%s\n",
+         s.trim_saves, s.trim_save_errors,
+         s.trim_save_last == 0 ? "ok" :
+         s.trim_save_last == -EALREADY ? "unchanged" : "FAILED",
+         s.trim_saving ? "  (saving now)" : "");
   printf("  rear    steer %u/%u/%u offset %d us\n",
          (unsigned)s.rear_limits.steer_min,
          (unsigned)s.rear_limits.steer_trim,
@@ -236,7 +243,12 @@ static int do_trim(int argc, FAR char *argv[])
 
   if (strcmp(argv[2], "reset") == 0)
     {
-      vesc_trim_reset();
+      if (vesc_trim_reset() == -EBUSY)
+        {
+          printf("vesc: a trim save is in progress - try again\n");
+          return EXIT_FAILURE;
+        }
+
       printf("vesc: live trim discarded; the saved offsets are unchanged\n");
       return EXIT_SUCCESS;
     }
@@ -251,8 +263,14 @@ static int do_trim(int argc, FAR char *argv[])
 
   if (ret == -EPERM)
     {
-      printf("vesc: refused - disarm first. Saving reloads the steering\n"
-             "      limits, and doing that under power moves the servo.\n");
+      printf("vesc: refused - disarm first. Disarming saves the trim on\n"
+             "      its own anyway.\n");
+      return EXIT_FAILURE;
+    }
+
+  if (ret == -EBUSY)
+    {
+      printf("vesc: a trim save is already in progress - try again\n");
       return EXIT_FAILURE;
     }
 

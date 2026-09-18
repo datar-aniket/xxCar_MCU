@@ -405,8 +405,9 @@ so command-derived feedback includes the applied offset. The channels named by
 `RC_MAP_TRIM_F` and `RC_MAP_TRIM_R` add a live trim on top in both RC and Auto
 modes, front offset to the front servo and rear to the rear. They are nudge
 switches, not knobs: each engaging edge steps the accumulated offset by
-`VESC_TRIM_STEP` us, repeating while held, bounded to ±300 us. `vesc trim save`
-folds the live offsets into `VESC_STEER_OFS` / `REAR_ST_OFS`. If RC is stale or
+`VESC_TRIM_STEP` us, repeating while held, bounded to ±300 us. The live
+offsets are folded into `VESC_STEER_OFS` / `REAR_ST_OFS` and saved every time
+the vehicle disarms, if they changed; `vesc trim save` does the same by hand. If RC is stale or
 in failsafe the offsets freeze where they are rather than stepping or
 resetting.
 

@@ -141,6 +141,31 @@ int16_t vesc_cmd_trim_nudge(FAR struct vesc_trim_state_s *state,
 
 void vesc_cmd_trim_idle(FAR struct vesc_trim_state_s *state);
 
+/* The saved offset that results from folding a live nudge into it, bounded
+ * to +/-limit_us.
+ *
+ * The caller subtracts (result - saved_us) from the live nudge rather than
+ * zeroing it. That keeps saved + live - the offset the servo actually sees -
+ * identical across a save, both when the sum overruns the limit (the excess
+ * simply stays live) and when the operator nudges again while the save is
+ * still writing to the card.
+ */
+
+int32_t vesc_cmd_trim_fold(int32_t saved_us, int32_t live_us,
+                           int32_t limit_us);
+
+/* Should this loop pass queue an automatic trim save?
+ *
+ * Only on the edge from armed to disarmed. The router asserts disarm on every
+ * cycle while the arm switch is low, so a test of the level would ask for a
+ * flash write fifty times a second. A zero live trim is skipped here as a
+ * cheap filter; whether the saved values would actually change is decided
+ * later, by the save itself.
+ */
+
+bool vesc_cmd_trim_save_due(bool was_armed, bool armed,
+                            int32_t front_live_us, int32_t rear_live_us);
+
 /* May the daemon be armed right now?
  *
  * Refuses exactly one thing: arming into a live non-zero motor demand. A
