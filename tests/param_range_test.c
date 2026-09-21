@@ -662,6 +662,29 @@ static void test_control_router_parameters(void)
     }
 }
 
+static void test_steering_offset_alias(void)
+{
+  int idx = param_find("STEER_OFS");
+  int32_t value = 0;
+
+  if (idx < 0 || idx != param_find("VESC_STEER_OFS") ||
+      strcmp(param_def(idx)->name, "STEER_OFS") != 0)
+    {
+      fail("steering offset: canonical name/legacy alias mismatch");
+      return;
+    }
+
+  if (param_set_i32("VESC_STEER_OFS", 125) < 0 ||
+      param_get_i32("STEER_OFS", &value) < 0 || value != 125 ||
+      param_set_i32("STEER_OFS", -200) < 0 ||
+      param_get_i32("VESC_STEER_OFS", &value) < 0 || value != -200)
+    {
+      fail("steering offset: alias must share one calibration value");
+    }
+
+  param_set_i32("STEER_OFS", 0);
+}
+
 int main(void)
 {
   param_init();
@@ -677,6 +700,7 @@ int main(void)
   test_magnetic_heading_bounds();
   test_companion_parameters();
   test_vesc_parameters();
+  test_steering_offset_alias();
   test_control_router_parameters();
 
   if (g_fail != 0)

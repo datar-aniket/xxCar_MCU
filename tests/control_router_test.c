@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include "control_router_policy.h"
+#include "vesc_cmd.h"
 
 static struct router_config_s config_default(void)
 {
@@ -519,6 +520,48 @@ static void test_steering_filter_safety(void)
   assert(!out.request_arm); /* Recovery requires a deliberate arm cycle. */
 }
 
+static void test_source_independent_steering_offset(void)
+{
+  struct router_config_s c = config_default();
+  struct router_state_s s;
+  struct router_input_s in = input_default(1000000);
+  struct router_output_s out;
+  struct vesc_cmd_out_s cmd;
+  struct vesc_limits_s limits =
+    { .cur_max = 20.0f, .duty_max = 0.3f, .steer_min = 1100,
+      .steer_trim = 1500, .steer_max = 1900, .steer_offset = 125 };
+
+  c.steering.deadzone = 0;
+  router_state_init(&s);
+  arm_manual(&c, &s, &in, &out);
+  in.rc_channel[0] = 1750;
+  in.now_us += 1000;
+  step(&c, &s, &in, &out);
+  assert(out.source == ROUTER_SOURCE_RC && out.reason == ROUTER_REASON_OK);
+  vesc_cmd_resolve(s.actual_armed, true, out.mode, out.motor, out.steering,
+                   0, 200, &limits, &cmd);
+  assert(cmd.reason == VESC_CMD_ARMED && cmd.servo_us == 1825);
+
+  in.rc_channel[4] = 2000;
+  in.auto_present = true;
+  in.auto_steering = 0.5f;
+  in.auto_mode = ROUTER_MODE_DUTY;
+  in.auto_timestamp = in.now_us;
+  step(&c, &s, &in, &out);
+  in.now_us += ROUTER_NEUTRAL_HOLD_US + 1000;
+  in.auto_timestamp = in.now_us;
+  step(&c, &s, &in, &out);
+  assert(out.source == ROUTER_SOURCE_AUTO && out.reason == ROUTER_REASON_OK);
+  vesc_cmd_resolve(s.actual_armed, true, out.mode, out.motor, out.steering,
+                   0, 200, &limits, &cmd);
+  assert(cmd.reason == VESC_CMD_ARMED && cmd.servo_us == 1825);
+
+  limits.steer_offset = -125;
+  vesc_cmd_resolve(s.actual_armed, true, out.mode, out.motor, out.steering,
+                   0, 200, &limits, &cmd);
+  assert(cmd.servo_us == 1575);
+}
+
 int main(void)
 {
   struct router_config_s c = config_default();
@@ -536,6 +579,7 @@ int main(void)
   test_rc_safety_overrides_external_arm();
   test_unused_channel_may_be_absent();
   test_steering_filter_safety();
+  test_source_independent_steering_offset();
   puts("control_router: mapping, selection and safety transitions - OK");
   return 0;
 }

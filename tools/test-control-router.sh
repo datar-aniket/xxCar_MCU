@@ -3,13 +3,17 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="$(mktemp -d)"; trap 'rm -rf "$OUT"' EXIT
 
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -DFAR= \
+  -I"$REPO/apps/vesc" \
+  "$REPO/apps/vesc/vesc_cmd.c" "$REPO/apps/vesc/vesc_proto.c" \
   -I"$REPO/apps/control_router" \
   "$REPO/tests/control_router_test.c" \
   "$REPO/apps/control_router/control_router_policy.c" -lm -o "$OUT/test"
 "$OUT/test"
 
-cc -std=c11 -Wall -Wextra -Werror \
+cc -std=c11 -Wall -Wextra -Werror -DFAR= \
+  -I"$REPO/apps/vesc" \
+  "$REPO/apps/vesc/vesc_cmd.c" "$REPO/apps/vesc/vesc_proto.c" \
   -fsanitize=address,undefined -fno-sanitize-recover=all \
   -I"$REPO/apps/control_router" \
   "$REPO/tests/control_router_test.c" \

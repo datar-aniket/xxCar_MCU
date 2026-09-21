@@ -881,8 +881,8 @@ static const struct param_def_s g_params[] =
     "Servo pulse at steering 0, straight (us)" },
   { "VESC_STEER_MAX", PARAM_TYPE_INT32, I32(1900), I32(900), I32(2100),
     "Servo pulse at steering +1, full left (us)" },
-  { "VESC_STEER_OFS", PARAM_TYPE_INT32, I32(0), I32(-300), I32(300),
-    "Final steering servo pulse offset (us)" },
+  { "STEER_OFS", PARAM_TYPE_INT32, I32(0), I32(-300), I32(300),
+    "Front steering offset, all sources/outputs (us)" },
   { "STEER_OUT_SRC", PARAM_TYPE_INT32,
     I32(1),
     I32(0), I32(1),
@@ -1244,6 +1244,15 @@ static enum param_fix_e param_clamp(int idx, FAR union param_value_u *v)
 int param_find(FAR const char *name)
 {
   int i;
+
+  /* Preserve calibration in existing flash/SD records and old clients.
+   * Enumeration and subsequent saves use only the canonical name.
+   */
+
+  if (strcmp(name, "VESC_STEER_OFS") == 0)
+    {
+      name = "STEER_OFS";
+    }
 
   for (i = 0; i < PARAM_COUNT; i++)
     {

@@ -605,7 +605,7 @@ static int vesc_daemon(int argc, FAR char *argv[])
   status.limits.steer_min = (uint16_t)param_i32("VESC_STEER_MIN");
   status.limits.steer_trim = (uint16_t)param_i32("VESC_STEER_TRIM");
   status.limits.steer_max = (uint16_t)param_i32("VESC_STEER_MAX");
-  status.limits.steer_offset = (int16_t)param_i32("VESC_STEER_OFS");
+  status.limits.steer_offset = (int16_t)param_i32("STEER_OFS");
   status.rear_limits.cur_max = status.limits.cur_max;
   status.rear_limits.duty_max = status.limits.duty_max;
   status.rear_limits.steer_min = (uint16_t)param_i32("REAR_ST_MIN");

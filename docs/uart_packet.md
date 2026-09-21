@@ -413,8 +413,14 @@ raw 9.8 m/s² as vehicle acceleration.
 `steering_angle_rear` is command-derived feedback from the pulse actually
 sent to the PX4IO rear channel, mapped from 1000–2000 us to -0.5–+0.5.
 
-`VESC_STEER_OFS` accepts -300 to +300 us and is added to the mapped servo pulse after
-`VESC_STEER_MIN/TRIM/MAX`. The transmitted result is bounded to 900–2100 us,
+`STEER_OFS` accepts -300 to +300 us and is added to the front servo pulse after
+`VESC_STEER_MIN/TRIM/MAX`, in both RC and Auto modes, for either CAN or board
+PWM output. It also corrects disarmed/failsafe neutral. `VESC_STEER_OFS` remains
+a compatibility alias for saved calibration and old clients; enumeration and
+new saves use `STEER_OFS`. Rear steering uses its separate `REAR_ST_OFS`.
+These calibration parameters are read when the VESC daemon starts; save and
+restart/reboot while safely disarmed to apply changes.
+The transmitted result is bounded to 900–2100 us,
 so command-derived feedback includes the applied offset. A valid, fresh RC
 channel 7 adds a live trim on top in both RC and Auto modes: 1000–2000 us maps
 linearly to -100–+100 us. If RC is stale, in failsafe, or CH7 is unavailable,

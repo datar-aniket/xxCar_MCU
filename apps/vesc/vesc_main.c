@@ -158,7 +158,7 @@ static void print_status(void)
          s.reason_count[VESC_CMD_BAD_MODE]);
 
   printf("  setpts  %" PRIu32 "  limits cur %.1f A  duty %.2f  "
-         "steer %u/%u/%u offset %d us\n",
+         "steer %u/%u/%u STEER_OFS %d us\n",
          s.setpoints, (double)s.limits.cur_max, (double)s.limits.duty_max,
          (unsigned)s.limits.steer_min, (unsigned)s.limits.steer_trim,
          (unsigned)s.limits.steer_max, (int)s.limits.steer_offset);
