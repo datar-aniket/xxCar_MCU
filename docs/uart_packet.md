@@ -7,6 +7,9 @@ sends to feed the estimator.
 Implemented in `apps/companion/comp_proto.h` and `.c`; the Python side of the
 same format is `tools/comp_link.py`.
 
+ROS driver authors: sections 11 and 14 specify clock acquisition and ROS
+integration. This is a **custom protocol**, not MAVLink or MAVLink TIMESYNC.
+
 ## 1. Port
 
 The board claims whichever serial port has its `SER_*_FUNC` parameter set to
@@ -14,10 +17,17 @@ The board claims whichever serial port has its `SER_*_FUNC` parameter set to
 
 | Connector | Device | Func param | Baud param | Default baud |
 |---|---|---|---|---|
-| TELEM2 | `/dev/ttyS3` (UART5) | `SER_TEL2_FUNC` | `SER_TEL2_BAUD` | 921600 |
+| Matek TELEM2 | `/dev/ttyS3` (UART4) | `SER_TEL2_FUNC` | `SER_TEL2_BAUD` | 921600 |
+| Pixhawk 6C TELEM2 | `/dev/ttyS3` (UART5) | `SER_TEL2_FUNC` | `SER_TEL2_BAUD` | 921600 |
+| USB CDC 0 | `/dev/ttyACM0` (board side) | `SER_USB_FUNC` | — | — |
+| USB CDC 1 | `/dev/ttyACM1` (board side) | `SER_USB2_FUNC` | — | — |
 
-8N1, no flow control on the data lines. TELEM2's CTS pin is repurposed as the
-PPS input — see section 11 — so hardware flow control must stay off.
+UART uses 8N1, no hardware flow control. On Pixhawk 6C, TELEM2 CTS is the
+PPS input (section 11). USB CDC uses the same packets; its host baud setting
+does not set a physical UART rate. Device names above are on the MCU, not
+the Linux companion. Use stable host udev aliases: on the tested Matek,
+`/dev/v4w_io` is the data link and `/dev/v4w_consol` is the NSH console.
+Only one process should own the data port; close the GUI before ROS opens it.
 
 The link starts at boot when `COMP_EN` is 1, which is the default, along with
 the estimator (`EKF3_EN`), the IMU integrator (`IMU_DELTA_EN`) and the sensor
@@ -46,8 +56,8 @@ costs one message rather than wedging the stream.
 
 ## 3. Message ids
 
-Inbound ids are low, outbound ids are high, so a message sent in the wrong
-direction fails to route rather than half-working.
+Direction is defined per message below; `TIMESYNC_REP` is a low-ID outbound
+message. Do not infer direction solely from the numeric ID.
 
 | Id | Name | Direction | Payload |
 |---|---|---|---|
@@ -135,7 +145,11 @@ Three distinct cases, and the difference matters:
 |---|---|
 | Non-zero, clocks synced | **UTC microseconds** since the Unix epoch. Converted to the board's monotonic clock on arrival. |
 | Zero | "Not timestamped." The board stamps it on arrival. |
-| Non-zero, clocks **not** synced | Cannot be converted, so it is treated as zero and counted as `rx_unsynced_stamp`. |
+| Non-zero, no usable UTC mapping | Treated as zero and counted as `rx_unsynced_stamp`. |
+
+An RTC seed can provide a usable but inaccurate mapping **before host sync**.
+In that case a non-zero timestamp is converted using that coarse mapping,
+not necessarily arrival-stamped. Mapping availability is not clock lock.
 
 Sending zero is legitimate and costs the entire link latency as position
 error — at 200 Hz over a 921600 link that is a few milliseconds, which at 1
@@ -144,9 +158,9 @@ separately from a working sync (`companion status` shows both) precisely so
 that a timesync which has quietly stopped working is never mistaken for a
 source that never timestamped at all.
 
-Complete a timesync (section 11) before sending UTC timestamps. Sending them
-beforehand is worse than sending zero: the board counts them and falls back
-to arrival stamping anyway.
+Complete clock acquisition (section 11) before sending timestamped poses.
+Use the original sensor measurement time, not the ROS callback or serial send
+time. Zero is an explicit latency-losing fallback, not a sync workaround.
 
 ### Acceptance window
 
@@ -555,9 +569,11 @@ The **IMU sample time** of the solution, not the time the message was sent.
 So the age you measure on arrival legitimately includes the estimator's own
 output latency; it is not all transport.
 
-Guaranteed never to be in the future — clamped to the board's own UTC before
-sending, and the PPS discipline in section 11 keeps that clock aligned to
-yours.
+Clamped against the board's mapped current time before sending, not against
+the host clock: a sync error can still make it appear future-dated to ROS.
+With a valid mapping this is UTC microseconds; before one exists it is raw
+TIM5 time. An RTC-seeded mapping can look like UTC without host sync. There
+is no wire clock-lock flag. Do not add another offset to already-mapped UTC.
 
 ### solution_status
 
@@ -814,8 +830,33 @@ still `WAITING FOR VALID POSE`. Actual EKF application is visible in
 
 ## 11. Clock synchronisation
 
-Timestamps are only meaningful once the clocks are related. Two mechanisms
-work together.
+Timestamps are only meaningful once the clocks are related. Serial timesync
+works without PPS; PPS is optional and currently unavailable on Matek.
+
+### Exact timesync payloads
+
+Offsets below are payload-relative; all integers are little-endian. Reserved
+bytes must be zero. These layouts contain no implicit padding.
+
+| Message | Offset | Type | Field |
+|---|---|---|---|
+| START, ID 5, 8 bytes (`<II`) | 0 | uint32 | requested exchange count |
+| | 4 | uint32 | zero |
+| REQ, ID 3, 8 bytes (`<Q`) | 0 | uint64 | `host_tx_us`, UTC |
+| REP, ID 4, 24 bytes (`<QQQ`) | 0 | uint64 | echoed `host_tx_us` |
+| | 8 | uint64 | `board_rx_us`, raw TIM5 |
+| | 16 | uint64 | `board_tx_us`, raw TIM5 |
+| END2, ID 10, 24 bytes (`<qIIQ`) | 0 | int64 | `utc_offset_us` = UTC minus TIM5 |
+| | 8 | uint32 | selected `trip_us` |
+| | 12 | uint32 | usable returned sample count |
+| | 16 | uint64 | `sample_mono_us`, selected board midpoint |
+| END, ID 6, 16 bytes (`<qII`) | 0..15 | same prefix | legacy, no midpoint |
+
+There is no END/END2 acknowledgement or protocol-version negotiation.
+Writing END2 does not prove acceptance. Verify deployed firmware supports
+ID 10; use explicit legacy mode only for older firmware. `companion status`
+is currently the authoritative out-of-band clock diagnostic; neither
+`source_valid` nor `solution_status` acknowledges clock acquisition.
 
 ### Timesync burst
 
@@ -857,13 +898,75 @@ estimator delay from clock/transport effects in the GUI's arrival age.
 With four timestamps per exchange:
 
 ```
-offset     = ((board_rx - host_tx) + (board_tx - host_rx)) / 2
-round_trip = (host_rx - host_tx) - (board_tx - board_rx)
+board_minus_host = ((board_rx - host_tx) + (board_tx - host_rx)) // 2
+round_trip       = (host_rx - host_tx) - (board_tx - board_rx)
+utc_offset_us    = -board_minus_host
+sample_mono_us   = (board_rx + board_tx) // 2
 ```
 
 Keep the exchange with the **smallest** round trip. The offset is only as
 good as the path is symmetric, and the least-delayed exchange is the least
 asymmetric one.
+
+Use signed 64-bit intermediates (or Python integers), not unsigned timestamp
+subtraction or floating-point epoch seconds. `//` means floor division as in
+the reference Python codec. Send the offset, RTT and midpoint from the **same**
+selected exchange; `samples` counts all usable replies, not just the winner.
+
+### Host acquisition procedure
+
+1. Establish a stable host UTC basis: snapshot host UTC `utc0_us` and steady
+   time `steady0_us` close together. Define
+   `H(steady_us) = utc0_us + steady_us - steady0_us`. Schedule timeouts with
+   the steady clock; raw steady-clock epochs must never be sent as UTC.
+2. Send START with count 10. For each request, acquire the shared TX lock,
+   capture `host_tx_us = H(now_steady_us)`, encode, and write the whole frame
+   under that lock. Use approximately 40 ms spacing and a bounded reply wait
+   (the headless probe uses 250 ms per request). Do not overlap bursts.
+3. Capture receive steady time in the serial reader, not a queued ROS callback;
+   convert it through H for `host_rx_us`. Match REP to its echoed request
+   timestamp. Reject unmatched, duplicate, old-burst or malformed replies,
+   `board_tx < board_rx`, negative RTT and RTT above 20,000 µs.
+4. With at least three usable replies, send END2 for the minimum-RTT exchange.
+   With fewer, report failure and retry; the reference client sends legacy
+   END `(0, 0, 0)`, which cannot acquire or erase an existing clock model.
+5. Wait 1.2 seconds **after each completed burst** for the first six bursts,
+   then refresh every 30 seconds. The first accepted burst installs phase
+   immediately; the next plausible observation supplies the first drift fit.
+   One burst alone cannot measure oscillator drift.
+
+Firmware additionally requires `3 <= samples <= replies_sent_in_this_burst`,
+a selected sample no later than END receipt and no more than 10 seconds old.
+Rate observations must advance by at least one second in board time. START
+resets burst counters/status, not the acquired clock model.
+
+Board RX is stamped when the complete request is parsed, not at an electrical
+edge; board TX is stamped after acquiring its frame lock, before encoding and
+writing. UART/USB buffering and asymmetric transport still contribute error.
+The first sync fixes phase promptly, but cannot guarantee sub-10-ms arrival
+age: telemetry age also includes estimator and transport latency.
+
+#### Deterministic solver example (microseconds)
+
+```python
+import struct
+
+host_tx = 1700000001000000
+board_rx, board_tx = 2000100, 2000150
+host_rx = 1700000001000250
+board_minus_host = ((board_rx - host_tx) + (board_tx - host_rx)) // 2
+trip = (host_rx - host_tx) - (board_tx - board_rx)
+offset = -board_minus_host
+midpoint = (board_rx + board_tx) // 2
+assert (offset, trip, midpoint) == (1699999999000000, 200, 2000125)
+# Three usable replies assumed; these fields belong to the best one.
+payload = struct.pack('<qIIQ', offset, trip, 3, midpoint)  # ID 10
+```
+
+Wrap this 24-byte payload with the framing and CRC in sections 2 and 5.
+The executable reference is `tools/comp_link.py:timesync_solve` together with
+`encode_timesync_end(..., sample_mono_us=midpoint)`; omitting that argument
+deliberately selects legacy ID 6.
 
 A single burst establishes phase only; it cannot measure relative oscillator
 rate. Repeat the burst after at least one second, then periodically while the
@@ -883,10 +986,11 @@ What it buys is that the *board* knows what the companion concluded, so
 `companion status` can show the agreed offset instead of having no idea
 whether its peer thinks the clocks are aligned.
 
-**The board never adopts UTC as its own timebase.** Every internal timestamp
-stays in TIM5, because monotonic is the only clock that cannot step. UTC is a
-wire format: converted going out, converted back through the exact inverse,
-and never seen by the estimator. `CLOCK_REALTIME`/RTC is set only by the first
+**UTC is a wire timebase, not the sensor/estimator timebase.** Sensor and
+estimator sample timestamps stay in TIM5; OS/control timeout logic uses its
+own monotonic clock domains. Do not interchange those raw epochs. UTC is
+converted going out and back through the exact inverse on receipt.
+`CLOCK_REALTIME`/RTC is set only by the first
 authoritative sync and then free-runs; it is not used in either conversion.
 
 ### PPS
@@ -949,7 +1053,7 @@ the board.
 | `crc_errors` | framing or wiring problem |
 | `bad_length` | a known id at the wrong size — a format disagreement |
 | `unknown_id` | benign; a companion newer than the firmware |
-| `rx_unsynced_stamp` | UTC arrived before a sync could use it |
+| `rx_unsynced_stamp` | non-zero UTC arrived without a usable UTC-to-TIM5 mapping |
 | `pps` | lock state, corrections applied, last residual |
 | `tx_future_clamped` | a stamp that would have led the clock |
 
@@ -974,6 +1078,91 @@ guard has engaged and the filter is protecting itself; if `health` then goes
 the companion explicitly sends `DATUM_RESET`, a `redatum` count that is not
 increasing during disagreement is the design working: an uncommanded bad
 source is never adopted.
+
+## 14. ROS driver integration contract
+
+### Clock domains and message stamps
+
+Use hardware-mode ROS time for this link. ROS time normally follows system
+time, but `use_sim_time` enables a different clock which may pause or jump;
+steady clocks are appropriate for driver timeouts. See the official
+[ROS 2 clock design](https://design.ros2.org/articles/clock_and_time.html).
+Do not send `/clock` simulation timestamps as Unix UTC to a real MCU. An
+explicit simulation-to-hardware clock adapter would be a separate feature.
+
+Keep the acquisition UTC basis and sensor stamps consistent. Detect host
+wall-clock steps relative to the steady/UTC mapping; stop timestamp-dependent
+traffic and re-establish a consistent mapping instead of mixing pre-step
+and post-step timestamps. Do not replace a sensor's capture stamp with `now()`.
+
+| ROS-facing data | Wire time / conversion |
+|---|---|
+| External pose input | Original capture time in UTC µs; MCU performs the inverse mapping to TIM5 |
+| Vehicle state output | Estimator sample UTC µs after acquisition; use directly as `header.stamp` |
+| Direct control | Current UTC send time, non-zero; synchronization does not bypass arming/freshness gates |
+| Control trajectory | UTC sender stamp and UTC solution stamp as defined in section 8 |
+| Serial timeout / reconnect / sync schedule | Host steady time, never ROS simulation time |
+
+Integer conversion, after validating the clock domain and representable range:
+
+```python
+# UTC microseconds -> ROS sec/nanosec (check signed int32 sec range for ROS 2)
+sec, remainder_us = divmod(timestamp_us, 1_000_000)
+nanosec = remainder_us * 1_000
+# ROS sec/nanosec -> wire microseconds; reject negative UTC or invalid nanosec
+timestamp_us = sec * 1_000_000 + nanosec // 1_000
+```
+
+Do not run a second affine correction on `VEHICLE_STATE`, or pre-convert
+`EXTERNAL_POSE` to TIM5: firmware already owns both conversions. The first
+phase install and one permitted startup rate correction may step wire UTC.
+Gate downstream timestamp-sensitive fusion during acquisition and reset its
+time history if a discontinuity is observed. There is no in-band lock bit;
+driver readiness based on repeated exchanges is an estimate, not an MCU ACK.
+
+On reconnect, timeout or a backwards board timestamp indicating reboot,
+invalidate pending replies and host clock confidence, restart fast bursts,
+and inhibit autonomous output until normal readiness checks pass. A host
+reconnect alone does not reset an already acquired MCU clock. Continue to
+monitor minimum RTT, sync freshness, fitted drift (when console diagnostics
+are available), negative ages and timestamp discontinuities.
+
+### Serial and coordinate handling
+
+- Use one reader and serialize all writers with a full-frame TX lock. Handle
+  partial reads/writes; bound queues and discard stale control messages.
+  Never wait for sync replies inside the ROS executor that must deliver them.
+- Decode explicit little-endian offsets, not native struct padding. Check
+  length and CRC before dispatch. A payload byte `0xFE` is not a new packet.
+- Align external poses to the documented ENU world frame. An arbitrary ROS
+  `map` frame is not automatically geographic ENU; apply the configured
+  transform. Body axes are FLU. Wire quaternion order is **w,x,y,z**; ROS
+  geometry messages use **x,y,z,w**. Vehicle linear/angular velocity is body
+  frame data, suitable for odometry twist with an appropriate child frame.
+- Configure world/body frame IDs explicitly. Honor estimator validity bits;
+  a zero-filled unavailable field is not a valid measurement. Vehicle-state
+  covariance is not transmitted: do not represent invented zero covariance
+  as measured certainty. Keep datum-reset generation separate from sync state.
+
+### Driver acceptance tests
+
+Before enabling controls, verify codec round-trips against `tools/comp_link.py`,
+including the solver example above, fragmented/concatenated frames, embedded
+`0xFE`, bad CRC, wrong lengths and duplicate/out-of-order replies. Exercise
+fresh MCU boot, host-only reconnect, dropped sync replies and host clock jumps.
+Confirm the first successful burst establishes phase and the second eligible
+observation corrects startup drift; verify periodic updates do not introduce
+steps after acquisition.
+
+Record arrival age as `H(receive_steady_us) - state.timestamp_us`. This is
+**sample age**, not pure synchronization error. Compare it with the TIM5-only
+sample age in `companion status`; do not bias clock offset to force age to
+zero. An extra matched REQ/REP after END2 is an ordering barrier useful for
+draining pre-sync telemetry, but is still not an END2 acceptance ACK.
+
+Reference implementations: [`comp_link.py`](../tools/comp_link.py),
+[`companion_gui.py`](../tools/companion_gui.py), and the
+[fast-acquisition hardware report](matek-fast-sync-acquisition-2026-09-21.md).
 
 ## Related
 
