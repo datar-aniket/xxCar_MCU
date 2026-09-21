@@ -79,9 +79,13 @@ static volatile bool g_armed;
 
 static uint32_t g_cmd_timeout_ms;
 static uint8_t g_steer_output_source;
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+static bool g_matek_pwm_ready;
+#endif
 
-/* Board time of the last decoded STATUS_5, and the watchdog that acts on its
- * absence. Written by the daemon thread only.
+/* CLOCK_MONOTONIC receive time of the last decoded STATUS_5, and the watchdog
+ * that acts on its absence. Written by the daemon thread only.  Keep this in
+ * the same domain as vesc_now_us(); frame sample timestamps use TIM5.
  */
 
 static uint64_t g_last_tlm_us;
@@ -149,20 +153,10 @@ static void vesc_handle(FAR const struct fdcan_frame_s *frame, int pub,
 {
   uint8_t packet_id = vesc_packet_id(frame->id);
   uint8_t controller_id = vesc_controller_id(frame->id);
-  uint64_t now = vesc_now_us();
-  uint64_t sample_us = frame->ts != 0 ? frame->ts : now;
+  uint64_t receive_us = vesc_now_us();
+  uint64_t sample_us = frame->ts != 0 ? frame->ts : receive_us;
   struct vesc_status5_s decoded;
   struct vesc_status_s out;
-
-  /* CLOCK_MONOTONIC is tick-quantized on this configuration while the ISR
-   * timestamp is not. Do not publish a reception time that appears to occur
-   * before its sample by the sub-tick remainder.
-   */
-
-  if (now < sample_us)
-    {
-      now = sample_us;
-    }
 
   vesc_note_seen(s, packet_id, controller_id, sample_us);
 
@@ -186,8 +180,15 @@ static void vesc_handle(FAR const struct fdcan_frame_s *frame, int pub,
       return;
     }
 
+  /* The watchdog compares against vesc_now_us(), so record the monotonic
+   * receive time, not the frame's high-resolution TIM5 sample time. Without
+   * this separation clock drift can look like missing CAN telemetry.
+   */
+
+  g_last_tlm_us = receive_us;
+
   memset(&out, 0, sizeof(out));
-  out.timestamp = now;
+  out.timestamp = receive_us;
   out.timestamp_sample = sample_us;
   out.tachometer = decoded.tachometer;
   out.current_a = decoded.current_a;
@@ -402,7 +403,11 @@ static void vesc_transmit(FAR struct vesc_daemon_status_s *s)
       int io_result;
       int32_t neutral = (int32_t)limits.steer_trim +
                         (int32_t)limits.steer_offset;
-      bool io_healthy = board_matek_s1_pwm_healthy();
+      int32_t rear_neutral = (int32_t)rear_limits.steer_trim +
+                             (int32_t)rear_limits.steer_offset;
+      uint16_t pulse[BOARD_MATEK_PWM_CHANNELS] = {0};
+      uint16_t safe[BOARD_MATEK_PWM_CHANNELS] = {0};
+      bool io_healthy = g_matek_pwm_ready && board_matek_steering_pwm_healthy();
 
       if (neutral < VESC_SERVO_US_MIN)
         {
@@ -413,6 +418,15 @@ static void vesc_transmit(FAR struct vesc_daemon_status_s *s)
           neutral = VESC_SERVO_US_MAX;
         }
 
+      if (rear_neutral < VESC_SERVO_US_MIN)
+        {
+          rear_neutral = VESC_SERVO_US_MIN;
+        }
+      else if (rear_neutral > VESC_SERVO_US_MAX)
+        {
+          rear_neutral = VESC_SERVO_US_MAX;
+        }
+
       s->steer_io_healthy = io_healthy;
       if (!io_healthy)
         {
@@ -420,9 +434,23 @@ static void vesc_transmit(FAR struct vesc_daemon_status_s *s)
           vesc_cmd_resolve(false, g_setpoint.valid, g_setpoint.mode,
                            g_setpoint.motor, g_setpoint.steering,
                            age, s->cmd_timeout_ms, &limits, &cmd);
+          rear_servo_us = (uint16_t)rear_neutral;
         }
 
-      io_result = board_matek_s1_pwm_set(cmd.servo_us, (uint16_t)neutral);
+      /* Physical S1-S8 numbering, independent of the timer channel. Invalid
+       * configuration leaves CAN telemetry alive but can never arm.
+       */
+      if (g_matek_pwm_ready && s->steer_io_channel >= 1 && s->steer_io_channel <= 8 &&
+          s->rear_steer_io_channel >= 1 && s->rear_steer_io_channel <= 8 &&
+          s->steer_io_channel != s->rear_steer_io_channel)
+        {
+          pulse[s->steer_io_channel - 1] = cmd.servo_us;
+          safe[s->steer_io_channel - 1] = neutral;
+          pulse[s->rear_steer_io_channel - 1] = rear_servo_us;
+          safe[s->rear_steer_io_channel - 1] = rear_neutral;
+          io_result = board_matek_pwm_set(pulse, safe);
+        }
+      else io_result = -EINVAL;
       if (io_result < 0)
         {
           s->steer_io_healthy = false;
@@ -537,7 +565,7 @@ static void vesc_transmit(FAR struct vesc_daemon_status_s *s)
 
   s->last_motor = cmd.motor;
   s->last_servo_us = cmd.servo_us;
-#if defined(CONFIG_XXCAR_PX4IO) && !defined(CONFIG_XXCAR_BOARD_MATEKH743)
+#if defined(CONFIG_XXCAR_PX4IO) || defined(CONFIG_XXCAR_BOARD_MATEKH743)
   s->last_rear_servo_us = s->steer_output_source == 1 ? rear_servo_us : 0u;
 #else
   s->last_rear_servo_us = 0u;
@@ -592,6 +620,18 @@ static int vesc_daemon(int argc, FAR char *argv[])
     {
       int32_t neutral = (int32_t)status.limits.steer_trim +
                         (int32_t)status.limits.steer_offset;
+      int32_t rear_neutral = (int32_t)status.rear_limits.steer_trim +
+                             (int32_t)status.rear_limits.steer_offset;
+
+      uint16_t safe[BOARD_MATEK_PWM_CHANNELS] = {0};
+      if (status.steer_io_channel < 1 || status.steer_io_channel > 8 ||
+          status.rear_steer_io_channel < 1 || status.rear_steer_io_channel > 8 ||
+          status.steer_io_channel == status.rear_steer_io_channel)
+        {
+          syslog(LOG_ERR,
+                 "[vesc] steering requires distinct S1-S8; CAN remains available, arming blocked\n");
+          goto steering_done;
+        }
 
       if (neutral < VESC_SERVO_US_MIN)
         {
@@ -602,17 +642,29 @@ static int vesc_daemon(int argc, FAR char *argv[])
           neutral = VESC_SERVO_US_MAX;
         }
 
-      ret = board_matek_s1_pwm_start(
-        (uint16_t)param_i32("STEER_PWM_HZ"), (uint16_t)neutral);
-      if (ret < 0)
+      if (rear_neutral < VESC_SERVO_US_MIN)
         {
-          syslog(LOG_ERR, "[vesc] Matek S1 steering PWM failed: %d\n", ret);
-          goto out;
+          rear_neutral = VESC_SERVO_US_MIN;
+        }
+      else if (rear_neutral > VESC_SERVO_US_MAX)
+        {
+          rear_neutral = VESC_SERVO_US_MAX;
         }
 
-      status.steer_io_channel = 1;
-      status.steer_io_healthy = board_matek_s1_pwm_healthy();
+      safe[status.steer_io_channel - 1] = neutral;
+      safe[status.rear_steer_io_channel - 1] = rear_neutral;
+      ret = board_matek_pwm_start((uint16_t)param_i32("STEER_PWM_HZ"),
+        (1u << (status.steer_io_channel - 1)) |
+        (1u << (status.rear_steer_io_channel - 1)), safe);
+      if (ret < 0)
+        {
+          syslog(LOG_ERR, "[vesc] Matek PWM failed: %d; CAN remains available, arming blocked\n", ret);
+        }
+      g_matek_pwm_ready = ret == OK;
+      status.steer_io_healthy = g_matek_pwm_ready && board_matek_steering_pwm_healthy();
     }
+steering_done:
+  ;
 #elif defined(CONFIG_XXCAR_PX4IO)
   if (status.steer_output_source == 1 &&
       status.steer_io_channel == status.rear_steer_io_channel)
@@ -637,7 +689,7 @@ static int vesc_daemon(int argc, FAR char *argv[])
   vesc_speed_init(&g_speed, (float)param_i32("VESC_TLM_HZ"),
                   param_f32("VESC_SPD_LPF"));
 
-  ret = fdcan_init(status.bitrate);
+  ret = fdcan_init(status.bitrate, status.filter_id);
 
   if (ret < 0)
     {
@@ -647,18 +699,6 @@ static int vesc_daemon(int argc, FAR char *argv[])
     }
 
   can_ready = true;
-
-  /* fdcan_init leaves the filter accept-any. Narrowing it is a separate
-   * call so discovery and normal operation take the same path.
-   */
-
-  ret = fdcan_set_filter(status.filter_id);
-
-  if (ret < 0)
-    {
-      syslog(LOG_ERR, "[vesc] cannot set FDCAN1 filter (%d)\n", -ret);
-      goto out;
-    }
 
   pub = vesc_status_advertise();
 
@@ -703,10 +743,21 @@ static int vesc_daemon(int argc, FAR char *argv[])
          status.bitrate,
          status.filter_id == 0 ? "accept-any" : "one id");
 
+  uint32_t observed_bus_off = 0;
   while (!g_should_stop)
     {
       struct fdcan_frame_s frame;
       int drained = 0;
+
+      fdcan_stats(&status.bus);
+      if (status.bus.bus_off_count != observed_bus_off)
+        {
+          observed_bus_off = status.bus.bus_off_count;
+          g_armed = false;
+          g_setpoint.valid = false;
+          fdcan_abort_tx();
+          syslog(LOG_ERR, "[vesc] CAN bus-off - DISARMED\n");
+        }
 
       /* Drain the complete software ring after every wake. Taking only one
        * frame would leave the remainder queued until another interrupt or
@@ -769,21 +820,48 @@ static int vesc_daemon(int argc, FAR char *argv[])
         }
     }
 
-  /* A clean stop must not leave the last motor demand active until the VESC's
-   * own CAN timeout expires. Send zero motor and neutral steering once while
-   * the CAN link is still open; the IO daemon also has its own neutral
-   * watchdog if this final handoff cannot be delivered.
+  /* Cancel stale demand, then give neutral a bounded opportunity to complete.
+   * An unacknowledged frame is NOT a confirmed motor stop. The ESC's own
+   * independently configured command timeout is still essential.
    */
 
   g_armed = false;
   if (status.filter_id != 0)
     {
-      vesc_transmit(&status);
+      struct fdcan_stats_s before;
+      struct fdcan_stats_s after;
+      uint64_t deadline = vesc_now_us() + 50000;
+      bool queued = false;
+      fdcan_abort_tx();
+      while (!fdcan_tx_idle() && vesc_now_us() < deadline)
+        {
+          usleep(1000);
+        }
+      fdcan_stats(&before);
+      if (fdcan_tx_idle())
+        {
+          uint32_t sent = status.tx_sent;
+          vesc_transmit(&status);
+          queued = status.tx_sent != sent;
+        }
+      while (!fdcan_tx_idle() && vesc_now_us() < deadline)
+        {
+          usleep(1000);
+        }
+      fdcan_stats(&after);
+      if (!queued || after.tx_completed == before.tx_completed)
+        {
+          syslog(LOG_WARNING, "[vesc] stop neutral NOT confirmed on CAN\n");
+        }
     }
 
   result = EXIT_SUCCESS;
 
 out:
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+  if (g_matek_pwm_ready) board_matek_pwm_stop();
+  g_matek_pwm_ready = false;
+#endif
   status.running = false;
   status_publish(&status);
 
@@ -827,6 +905,9 @@ int vesc_start(void)
   g_last_tlm_us = 0;
   g_tlm_lost = false;
   g_steer_output_source = 0;
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+  g_matek_pwm_ready = false;
+#endif
   memset(&g_setpoint, 0, sizeof(g_setpoint));
   task = task_create("vesc", VESC_PRIORITY, VESC_STACK, vesc_daemon, NULL);
 
@@ -879,6 +960,7 @@ int vesc_arm(bool armed)
        */
 
       g_armed = false;
+      fdcan_abort_tx();
       return 0;
     }
 
@@ -887,13 +969,16 @@ int vesc_arm(bool armed)
    * arm command would make the watchdog a suggestion.
    */
 
-  if (g_tlm_lost)
+  struct fdcan_stats_s bus;
+  fdcan_stats(&bus);
+  if (g_tlm_lost || !bus.ready || bus.bus_off)
     {
       return -ENOLINK;
     }
 
 #ifdef CONFIG_XXCAR_BOARD_MATEKH743
-  if (g_steer_output_source == 1 && !board_matek_s1_pwm_healthy())
+  if (g_steer_output_source == 1 &&
+      (!g_matek_pwm_ready || !board_matek_steering_pwm_healthy()))
     {
       return -ENOLINK;
     }
@@ -926,4 +1011,9 @@ void vesc_status(FAR struct vesc_daemon_status_s *out)
   pthread_mutex_lock(&g_lock);
   *out = g_status;
   pthread_mutex_unlock(&g_lock);
+}
+
+bool vesc_is_armed(void)
+{
+  return g_armed;
 }

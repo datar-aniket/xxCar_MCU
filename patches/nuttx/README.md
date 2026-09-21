@@ -12,6 +12,15 @@ safe to re-run, and it survives a `git submodule update` reverting the tree.
 
 ## Patches
 
+### 0012-stm32h7-restore-i2c-after-failed-bus-reset.patch
+
+`stm32_i2c_reset()` previously jumped past GPIO/controller restoration when
+SDA or SCL stayed stuck. Releasing the electrical fault afterwards still left
+the bus deinitialized. All paths now restore the pinmux and controller, retain
+the original reset failure, and report a controller reinitialization failure.
+`tools/test-i2c-reset.sh` runs the production function for normal/stuck-line/init
+failure paths and proves that the original implementation fails the same test.
+
 ### 0001-cdcacm-do-not-treat-usb-suspend-as-a-disconnect.patch
 
 Without this, opening `/dev/ttyACM0` on the host fails with **errno 107 (ENOTCONN)**.
@@ -93,3 +102,15 @@ and `DTCM_END` come from `stm32_dtcm.h`, which `stm32_sdmmc.c` already includes.
 
 Upstreamable as-is; the alignment half is a genuine upstream bug for any
 write-through-cache H7 board with an SD card.
+
+### 0011-stm32h7-clear-the-pclk1-prescaler-field.patch
+
+The STM32H7 standard clock setup cleared the APB2 (`D2PPRE2`) field immediately
+before programming APB1 (`D2PPRE1`).  It then ORed the requested APB1 value into
+whatever prescaler the bootloader left behind.  APB1 timers could consequently run
+at a bootloader-dependent rate even though the board clock constants assumed a
+fixed rate.  This affects the Matek H743's TIM3 PPM capture and shared TIM5
+microsecond timebase, producing invalid PPM widths and rapid time-sync drift.
+
+The patch clears the matching `D2PPRE1` field on both STM32H7 RCC implementations
+before setting it.  It is upstreamable as-is.

@@ -1,0 +1,5 @@
+config XXCAR_DIAG
+	bool "diag: passive peripheral health and progress tests"
+	default n
+	depends on XXCAR_RC && XXCAR_VESC && SENSORS
+

@@ -25,3 +25,7 @@ cp "$REPO/tests/rc_decode_test.c" "$OUT/test.c"
 cc -std=c11 -Wall -Wextra -Wno-unused-parameter -I"$OUT" -DFAR= \
    -o "$OUT/rctest" "$OUT/test.c" "$OUT/rc_decode.c"
 "$OUT/rctest"
+cc -std=c11 -Wall -Wextra -Wno-unused-parameter -I"$OUT" -DFAR= \
+   -fsanitize=address,undefined -fno-sanitize-recover=all \
+   -o "$OUT/rctest-san" "$OUT/test.c" "$OUT/rc_decode.c"
+ASAN_OPTIONS=detect_leaks=0 "$OUT/rctest-san"

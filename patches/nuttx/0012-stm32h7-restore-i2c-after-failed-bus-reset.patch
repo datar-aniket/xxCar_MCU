@@ -1,0 +1,42 @@
+diff --git a/arch/arm/src/stm32h7/stm32_i2c.c b/arch/arm/src/stm32h7/stm32_i2c.c
+index 7f1ecdae..16d8befb 100644
+--- a/arch/arm/src/stm32h7/stm32_i2c.c
++++ b/arch/arm/src/stm32h7/stm32_i2c.c
+@@ -2598,6 +2598,15 @@ static int stm32_i2c_reset(struct i2c_master_s *dev)
+   stm32_gpiowrite(sda_gpio, 1);
+   up_udelay(10);
+ 
++  ret = OK;
++
++out:
++
++  /* Always restore pinmux and the controller, including when SDA/SCL stays
++   * stuck. Leaving the bus deinitialized makes every later retry fail even
++   * after the external fault has gone away.
++   */
++
+   /* Revert the GPIO configuration. */
+ 
+   stm32_unconfiggpio(sda_gpio);
+@@ -2605,15 +2614,16 @@ static int stm32_i2c_reset(struct i2c_master_s *dev)
+ 
+   /* Re-init the port */
+ 
+-  stm32_i2c_init(priv);
++  int initret = stm32_i2c_init(priv);
++  if (initret < 0)
++    {
++      nxmutex_unlock(&priv->lock);
++      return initret;
++    }
+ 
+   /* Restore the frequency */
+ 
+   stm32_i2c_setclock(priv, frequency);
+-  ret = OK;
+-
+-out:
+-
+   /* Release the port for reuse by other clients */
+ 
+   nxmutex_unlock(&priv->lock);

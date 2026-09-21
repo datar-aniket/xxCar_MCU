@@ -52,6 +52,8 @@ FG, MUTED, ACCENT = "#cdd6e0", "#7b8798", "#4c9aff"
 GOOD, BAD = "#3ddc84", "#ff6b81"
 
 DEG = 180.0 / math.pi
+SYNC_RATE_SAMPLE_MS = int(comp_link.TIMESYNC_ACQUIRE_INTERVAL_S * 1000)
+SYNC_PERIOD_MS = 30000
 
 
 class App(tk.Tk):
@@ -72,7 +74,10 @@ class App(tk.Tk):
         self.clock_trip_us = None
         self.utc = UtcClock()
         self._sync_samples = []
+        self._sync_pending = set()
+        self._sync_completed = 0
         self._sync_left = 0
+        self._sync_job = None
 
         # DIRECT_CONTROL repeats on its own timer rather than riding the
         # 100 ms receive pump. The board expires a command after
@@ -389,8 +394,11 @@ class App(tk.Tk):
             # would still be showing the last command it managed.
             self._stop_drive()
             self._cancel_diagnostics()
+            self._cancel_sync()
             self.link.close()
             self.link = None
+            self.clock_offset_us = None
+            self.clock_trip_us = None
             self.open_btn.configure(text="open")
             self.state_lbl.configure(text="closed", fg=BAD)
             return
@@ -406,10 +414,14 @@ class App(tk.Tk):
 
         self.open_btn.configure(text="close")
         self.state_lbl.configure(text="open", fg=GOOD)
+        self.clock_offset_us = None
+        self.clock_trip_us = None
+        self._sync_job = self.after(250, self._sync_timer)
 
     def _close_window(self):
         self._stop_drive()
         self._cancel_diagnostics()
+        self._cancel_sync()
         if self.link:
             self.link.close()
         self.destroy()
@@ -426,11 +438,16 @@ class App(tk.Tk):
         estimate; the shortest round trip is the one with least room for
         asymmetry to hide in.
         """
-        if not self.link:
+        if not self.link or self._sync_left > 0:
             return
+
+        if self._sync_job is not None:
+            self.after_cancel(self._sync_job)
+            self._sync_job = None
 
         self._sync_samples = []
         self._sync_left = 10
+        self._sync_pending = set()
 
         # Bracket the burst so the board knows one is running and, at the
         # end, what we concluded - it cannot work the offset out itself,
@@ -440,22 +457,34 @@ class App(tk.Tk):
         self._sync_step()
 
     def _sync_step(self):
-        if not self.link or self._sync_left <= 0:
+        if not self.link:
+            self._sync_left = 0
+            return
+
+        if self._sync_left <= 0:
             self._sync_finish()
             return
 
         self._sync_left -= 1
-        self.link.send(encode_timesync_req(self.utc.now_us()))
+        host_tx_us = self.link.send_timesync(self.utc)
+        if host_tx_us is not None:
+            self._sync_pending.add(host_tx_us)
         self.after(40, self._sync_step)
 
     def _sync_finish(self):
-        if not self._sync_samples:
-            self.clock_lbl.configure(text="sync failed - no reply", fg=BAD)
-            if self.link:
-                self.link.send(encode_timesync_end(0, 0, 0))
+        self._sync_left = 0
+        if not self.link:
             return
 
-        offset, trip = min(self._sync_samples, key=lambda s: s[1])
+        if len(self._sync_samples) < 3:
+            self.clock_lbl.configure(text="sync failed - fewer than 3 usable replies", fg=BAD)
+            self.link.send(encode_timesync_end(0, 0, 0))
+            self._sync_job = self.after(SYNC_RATE_SAMPLE_MS,
+                                        self._sync_timer)
+            return
+
+        self._sync_completed += 1
+        offset, trip, sample_mono_us = min(self._sync_samples, key=lambda s: s[1])
         self.clock_offset_us = offset
         self.clock_trip_us = trip
 
@@ -463,12 +492,42 @@ class App(tk.Tk):
         # the inverse: what to add to ITS clock to reach UTC.
         if self.link:
             self.link.send(encode_timesync_end(-offset, trip,
-                                               len(self._sync_samples)))
+                                               len(self._sync_samples), sample_mono_us))
+        # The raw offset is approximately the Unix epoch minus board uptime,
+        # naturally around 1.8e15 us. Presenting it as "board is ... from
+        # UTC" looks like a huge error even when synchronization is exact.
+        # RTT and whether rate tracking has begun are the useful operator
+        # diagnostics.
+
+        acquiring = self._sync_completed < comp_link.TIMESYNC_ACQUIRE_BURSTS
+        sync_state = ("UTC phase sent; rate sample in 1.2 s"
+                      if self._sync_completed == 1 else
+                      "UTC exchange sent; refining rate" if acquiring else
+                      "UTC exchange sent; tracking")
         self.clock_lbl.configure(
-            text=(f"synced to UTC: board is {-offset / 1000.0:+.2f} ms from "
-                  f"UTC, round trip {trip / 1000.0:.2f} ms "
+            text=(f"{sync_state}, round trip {trip / 1000.0:.2f} ms "
                   f"({len(self._sync_samples)}/10)"),
             fg=GOOD)
+
+        # Bootstrap phase/rate promptly, then refine across several seconds
+        # before the steady-state cadence. A two-point noisy rate estimate
+        # must not run uncorrected for the next 30 seconds.
+
+        delay = SYNC_RATE_SAMPLE_MS if acquiring else SYNC_PERIOD_MS
+        self._sync_job = self.after(delay, self._sync_timer)
+
+    def _sync_timer(self):
+        self._sync_job = None
+        self._sync()
+
+    def _cancel_sync(self):
+        self._sync_completed = 0
+        if self._sync_job is not None:
+            self.after_cancel(self._sync_job)
+            self._sync_job = None
+
+        self._sync_left = 0
+        self._sync_samples = []
 
     def _send(self):
         if not self.link:
@@ -848,11 +907,16 @@ class App(tk.Tk):
                     self.last_pose_us = now
                 elif msg_id == comp_link.MSG_TIMESYNC_REP:
                     rep = decode_timesync_rep(body)
+                    if rep['host_tx_us'] not in getattr(self, '_sync_pending', set()):
+                        continue
+                    self._sync_pending.remove(rep['host_tx_us'])
                     # rx_us came off the reading thread, not from here, and
                     # is converted to the same UTC basis the request was
                     # sent in so both sides of the solve agree.
-                    self._sync_samples.append(
-                        timesync_solve(rep, self.utc.to_utc(rx_us)))
+                    offset, trip = timesync_solve(rep, self.utc.to_utc(rx_us))
+                    if 0 <= trip <= 20000:
+                        self._sync_samples.append((offset, trip,
+                            (rep['board_rx_us'] + rep['board_tx_us']) // 2))
                 # LINK_TEST_REP was already timestamped and consumed by the
                 # reader-thread observer. Do not measure it again here.
             elif kind == "bandwidth_done":

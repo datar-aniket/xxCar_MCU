@@ -78,18 +78,60 @@ TX to RX and connect a common ground. Check the Jetson carrier's UART voltage be
 | NSH console | T7/R7 | UART7 PE8/PE7 | `TELEM1`, 115200 baud |
 | RC input | R6 (T6 unused for receivers) | USART6_RX / TIM3_CH2 PC7 | SBUS/CRSF auto-detect; explicit PPM |
 | VESC | CAN H/L/GND | FDCAN1 PD1/PD0 | 1 Mbit/s |
-| Steering servo | S1 + servo rail/GND | TIM2_CH1 PA0 | 50 Hz PWM, 900–2100 us |
-| Optional PPS | S1 + GND | TIM5_CH1 PA0 | only when S1 steering is disabled |
+| Front steering servo | S3 + servo rail/GND | TIM2_CH1 PA0 | 50 Hz PWM, 900–2100 us |
+| Rear steering servo | S4 + servo rail/GND | TIM2_CH2 PA1 | 50 Hz PWM, 900–2100 us |
+| Reserved PPS (not implemented yet) | LED/PA8 + GND | TIM1_CH1 | deferred; never connect PPS to S3 |
 | External IST8310 | I2C1 SCL/SDA | PB6/PB7 | optional compass |
 | microSD | onboard slot | SDMMC1 | logs; optional text parameter mirror |
 
-Matek defaults to `STEER_OUT_SRC=1`, which sends steering PWM to S1 and sends
-motor-only CAN commands to VESC. `STEER_PWM_HZ` sets the S1 frame rate (default
-50 Hz); the same `VESC_STEER_MIN/TRIM/MAX/OFS` mapping and RC channel 7 trim
-used on Pixhawk are applied. A 200 ms hardware watchdog returns S1 to neutral
-if command updates stop. S1 steering and S1 PPS are physically mutually
-exclusive, so `PPS_EN` defaults to 0 on Matek and boot suppresses PPS if board
-PWM steering is selected.
+Matek defaults to `STEER_OUT_SRC=1`, which sends front/rear steering PWM to
+physical outputs S3/S4 and sends motor-only CAN commands to VESC.
+`STEER_PWM_HZ` sets the S3/S4 frame rate (default 50 Hz); `STEER_IO_CH=3`
+maps the front command to S3 and `STEER_REAR_CH=4` maps the rear command to
+S4. The same
+`VESC_STEER_MIN/TRIM/MAX/OFS` mapping and RC channel 7 trim used on Pixhawk are
+applied. A 200 ms NuttX software watchdog queues both neutral outputs if command
+updates stop; they take effect together at a subsequent PWM frame boundary.
+Watchdog scheduling/IRQ latency and up to one frame plus the short update
+critical section must be included in the response budget. It is not an
+independent hardware failsafe if the CPU/interrupts stall.
+S3 is now reserved for servos in every configuration. Matek PPS
+start/stop returns `-ENOTSUP` without touching any hardware until the PA8/TIM1
+migration is implemented. Stored `PPS_EN` settings cannot reclaim S3. Pixhawk
+6C PPS behavior is unchanged.
+
+The board pin allocation is defined in `boards/fmuv6c/include/matekh743_pins.h`:
+
+| Servo pads | Timer channels | Integration status |
+|---|---|---|
+| S1/S2 | TIM8 CH2N/CH3N, PB0/PB1 | allocated, held low; driver pending |
+| S3/S4 | TIM2 CH1/CH2, PA0/PA1 | existing steering PWM |
+| S5/S6 | TIM2 CH3/CH4, PA2/PA3 | allocated, held low; driver pending |
+| S7/S8 | TIM4 CH1/CH2, PD12/PD13 | allocated, held low; driver pending |
+| S9/S10 | TIM4 CH3/CH4, PD14/PD15 | expansion, held low |
+| S11/S12 | TIM15 CH1/CH2, PE5/PE6 | expansion, held low |
+
+This is the pin-allocation stage, **not an eight-channel PWM driver release**.
+All twelve servo pads are driven low during early application boot; only
+S3/S4 are subsequently activated by the existing steering service. TIM2 buzzer
+tones are prohibited, PA15 is held low, and PA8 is an input with pulldown.
+Other UART, CAN, I2C and SPI wiring/default roles are unchanged. The six
+board-routed ADC channels and their divider factors are defined, including
+V4 VB2 factor 21, but ADC acquisition remains disabled pending driver setup.
+USB remains device-only and `CONFIG_OTG_ID_GPIO_DISABLE=y` prevents USB
+initialization from remuxing USART1 RX (PA10). `tools/build.sh matekh743`
+also applies this setting to existing same-board configurations.
+
+PWM phase policy is **independent timer banks, aligned rising edges within
+each bank**. The active S3/S4 driver (`matekh743_pwm.c`) uses hardware PWM1 with
+positive polarity and 1 us counter resolution. Startup prepares the timer
+while pins are low; runtime paired updates inhibit shadow transfer briefly
+with UDIS, not the counter. No runtime update forces UG or resets the counter.
+Rate changes on an already running bank return `-EBUSY` (reboot to change
+`STEER_PWM_HZ`); repeated starts do not rephase the outputs. See
+[PWM qualification](matek-pwm-qualification.md) for tested behavior and the
+remaining hardware measurements. The allocated S1/S2 outputs must use N-only,
+non-inverted TIM8 configuration; their driver is still pending.
 
 R6 is RC input by default (`SER_RC_FUNC=4`). With `RC_PROT=0`, firmware
 alternates between SBUS and CRSF settings until valid frames are decoded. PPM
@@ -99,6 +141,8 @@ and treats an interval of at least 2700 us as frame sync.
 
 ```text
 param set STEER_OUT_SRC 1
+param set STEER_IO_CH 3
+param set STEER_REAR_CH 4
 param set STEER_PWM_HZ 50
 param set SER_RC_FUNC 4
 param set RC_PROT 0       # SBUS/CRSF auto; use 3 for PPM

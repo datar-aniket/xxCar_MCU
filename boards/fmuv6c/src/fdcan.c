@@ -13,10 +13,12 @@
 
 #include <arch/board/board.h>
 
+#include <nuttx/arch.h>
 #include <nuttx/clock.h>
 #include <nuttx/compiler.h>
 #include <nuttx/irq.h>
 #include <nuttx/semaphore.h>
+#include <nuttx/wdog.h>
 
 #include "arm_internal.h"
 #include "stm32_gpio.h"
@@ -51,6 +53,7 @@
  */
 
 #define FDCAN_BITRATE_SUPPORTED   1000000u
+#define FDCAN_CONFIG_TIMEOUT_US     10000u
 #define FDCAN_NBRP_1M             0u
 #ifdef CONFIG_XXCAR_BOARD_MATEKH743
 /* 8 MHz / (1 * 8 tq) = 1 Mbit/s, sample at 87.5%. */
@@ -118,6 +121,81 @@ static struct fdcan_stats_s g_stats;
 static bool g_ready;
 static bool g_irq_attached;
 static bool g_sem_initialized;
+static struct wdog_s g_maintenance;
+static uint32_t g_tx_tracked;
+static uint32_t g_tx_aborting;
+static uint64_t g_tx_deadline;
+static bool g_recovering;
+
+#define FDCAN_TX_LIFETIME_US 20000u
+#define FDCAN_MAINT_TICKS ((MSEC2TICK(10) > 0) ? MSEC2TICK(10) : 1)
+
+/* Called with interrupts masked; no waits, logging, allocation or reset of
+ * the shared FDCAN clock/RAM. Single-core H743 register ownership is shared
+ * only by this watchdog and the sole VESC owner task.
+ */
+static void fdcan_service(void)
+{
+  uint32_t pending = getreg32(STM32_FDCAN1_TXBRP);
+  uint32_t psr = getreg32(STM32_FDCAN1_PSR);
+  bool off = (psr & FDCAN_PSR_BO_MASK) != 0;
+
+  if (g_tx_tracked && !(pending & g_tx_tracked))
+    {
+      if (getreg32(STM32_FDCAN1_TXBTO) & g_tx_tracked)
+        {
+          g_stats.tx_completed++;
+        }
+      else
+        {
+          g_stats.tx_cancelled++;
+        }
+      g_tx_tracked = 0;
+      g_tx_aborting = 0;
+    }
+
+  if (pending && !g_tx_aborting &&
+      (off || fmuv6c_imu_time_now() >= g_tx_deadline))
+    {
+      putreg32(pending, STM32_FDCAN1_TXBCR);
+      g_tx_aborting = pending;
+      g_stats.tx_expired++;
+    }
+
+  if (off && !g_recovering)
+    {
+      g_stats.bus_off_count++;
+      g_recovering = true;
+      /* RM0433: software releases INIT; hardware performs the bus-off
+       * recovery sequence. Pending commands have cancellation requested
+       * first; never reset another CAN controller to recover CAN1.
+       */
+      modifyreg32(STM32_FDCAN1_CCCR, FDCAN_CCCR_INIT, 0);
+    }
+  else if (!off && g_recovering)
+    {
+      g_recovering = false;
+      g_stats.recoveries++;
+    }
+
+  if ((psr & FDCAN_PSR_LEC_MASK) != 7u)
+    {
+      g_stats.last_error = psr & FDCAN_PSR_LEC_MASK;
+    }
+  g_stats.bus_off = off;
+  g_stats.error_passive = (psr & FDCAN_PSR_EP_MASK) != 0;
+  g_stats.pending = pending;
+}
+
+static void fdcan_maintenance(wdparm_t arg)
+{
+  (void)arg;
+  if (g_ready)
+    {
+      fdcan_service();
+      wd_start(&g_maintenance, FDCAN_MAINT_TICKS, fdcan_maintenance, 0);
+    }
+}
 
 /* The receive ring. `head` belongs to the interrupt handler and `tail` to
  * the task; neither writes the other's. See fdcan_ring.h for why that is
@@ -137,6 +215,31 @@ static sem_t g_rx_sem;
 
 static int fdcan_isr(int irq, FAR void *context, FAR void *arg);
 
+static int fdcan_wait_cccr(uint32_t mask, bool asserted)
+{
+  uint32_t elapsed;
+
+  /* CCCR.INIT transitions are synchronized inside the CAN core and are not
+   * immediate. In particular, entering INIT may wait for an active frame to
+   * finish. A CPU-loop count changes with optimization and clock rate, so it
+   * is not a timeout and made boot success depend on bus timing.
+   */
+
+  for (elapsed = 0; elapsed < FDCAN_CONFIG_TIMEOUT_US; elapsed++)
+    {
+      bool state = (getreg32(STM32_FDCAN1_CCCR) & mask) != 0;
+
+      if (state == asserted)
+        {
+          return OK;
+        }
+
+      up_udelay(1);
+    }
+
+  return -ETIMEDOUT;
+}
+
 static void fdcan_ram_clear(void)
 {
   uint32_t i;
@@ -155,7 +258,7 @@ static void fdcan_ram_clear(void)
 static int fdcan_enter_config(void)
 {
   uint32_t regval;
-  int guard;
+  int ret;
 
   /* INIT is not immediate. Configuring before it latches silently does
    * nothing, which is the classic way to get a peripheral that looks
@@ -166,32 +269,26 @@ static int fdcan_enter_config(void)
   regval |= FDCAN_CCCR_INIT;
   putreg32(regval, STM32_FDCAN1_CCCR);
 
-  for (guard = 0; guard < 100000; guard++)
+  ret = fdcan_wait_cccr(FDCAN_CCCR_INIT, true);
+  if (ret < 0)
     {
-      if ((getreg32(STM32_FDCAN1_CCCR) & FDCAN_CCCR_INIT) != 0)
-        {
-          break;
-        }
-    }
-
-  if ((getreg32(STM32_FDCAN1_CCCR) & FDCAN_CCCR_INIT) == 0)
-    {
-      return -ETIMEDOUT;
+      return ret;
     }
 
   regval = getreg32(STM32_FDCAN1_CCCR);
   regval |= FDCAN_CCCR_CCE;
   putreg32(regval, STM32_FDCAN1_CCCR);
-  return OK;
+  return fdcan_wait_cccr(FDCAN_CCCR_CCE, true);
 }
 
-static void fdcan_leave_config(void)
+static int fdcan_leave_config(void)
 {
   uint32_t regval;
 
   regval = getreg32(STM32_FDCAN1_CCCR);
   regval &= ~FDCAN_CCCR_INIT;
   putreg32(regval, STM32_FDCAN1_CCCR);
+  return fdcan_wait_cccr(FDCAN_CCCR_INIT, false);
 }
 
 /* The register half of setting a filter. GFC and XIDFC are write-protected
@@ -247,11 +344,10 @@ int fdcan_set_filter(uint8_t controller_id)
     }
 
   fdcan_write_filter(controller_id);
-  fdcan_leave_config();
-  return OK;
+  return fdcan_leave_config();
 }
 
-int fdcan_init(uint32_t bitrate)
+int fdcan_init(uint32_t bitrate, uint8_t controller_id)
 {
   uint32_t regval;
   int ret;
@@ -327,7 +423,14 @@ int fdcan_init(uint32_t bitrate)
 
   putreg32(0, STM32_FDCAN1_TXESC);
 
-  fdcan_write_filter(0);
+  /* Install the requested filter before first leaving INIT. The previous
+   * sequence started the controller with accept-all, then immediately tried
+   * to stop it and re-enter configuration mode. On an already active VESC
+   * bus that redundant transition raced the first received frame and could
+   * time out during boot.
+   */
+
+  fdcan_write_filter(controller_id);
 
   /* Route both flags to interrupt line 0 (ILS = 0 selects line 0 for every
    * source) and enable that line. Enabling a source in IE without ILE is the
@@ -346,6 +449,9 @@ int fdcan_init(uint32_t bitrate)
   putreg32(UINT32_MAX, STM32_FDCAN1_IR);
 
   memset(&g_stats, 0, sizeof(g_stats));
+  g_tx_tracked = 0;
+  g_tx_aborting = 0;
+  g_recovering = false;
   g_head = 0;
   g_tail = 0;
 
@@ -385,13 +491,36 @@ int fdcan_init(uint32_t bitrate)
 
   g_ready = true;
 
-  fdcan_leave_config();
+  ret = fdcan_leave_config();
+  if (ret < 0)
+    {
+      g_ready = false;
+      irq_detach(STM32_IRQ_FDCAN1_0);
+      g_irq_attached = false;
+      nxsem_destroy(&g_rx_sem);
+      g_sem_initialized = false;
+      putreg32(0, STM32_FDCAN1_IE);
+      putreg32(0, STM32_FDCAN1_ILE);
+      return ret;
+    }
+
   up_enable_irq(STM32_IRQ_FDCAN1_0);
+  ret = wd_start(&g_maintenance, FDCAN_MAINT_TICKS, fdcan_maintenance, 0);
+  if (ret < 0)
+    {
+      fdcan_deinit();
+      return ret;
+    }
   return OK;
 }
 
 void fdcan_deinit(void)
 {
+  irqstate_t flags = enter_critical_section();
+  g_ready = false;
+  wd_cancel(&g_maintenance);
+  putreg32(getreg32(STM32_FDCAN1_TXBRP), STM32_FDCAN1_TXBCR);
+  leave_critical_section(flags);
   up_disable_irq(STM32_IRQ_FDCAN1_0);
   putreg32(0, STM32_FDCAN1_IE);
   putreg32(0, STM32_FDCAN1_ILE);
@@ -630,7 +759,7 @@ int fdcan_receive(FAR struct fdcan_frame_s *frame)
   return OK;
 }
 
-int fdcan_transmit(FAR const struct fdcan_frame_s *frame)
+static int fdcan_transmit_locked(FAR const struct fdcan_frame_s *frame)
 {
   uint32_t status;
   uint32_t index;
@@ -638,21 +767,30 @@ int fdcan_transmit(FAR const struct fdcan_frame_s *frame)
   uint32_t word;
   uint32_t i;
 
-  if (!g_ready || frame == NULL || frame->dlc > 8)
+  if (!g_ready || frame == NULL || frame->dlc > 8 || frame->id > 0x1fffffff)
     {
       return -EINVAL;
+    }
+
+  fdcan_service();
+  if (g_stats.bus_off || g_recovering)
+    {
+      return -ENETDOWN;
+    }
+
+  if (g_stats.pending)
+    {
+      /* Supersede, never append cyclic actuation behind obsolete intent. */
+      putreg32(g_stats.pending, STM32_FDCAN1_TXBCR);
+      g_tx_aborting = g_stats.pending;
+      g_stats.tx_full++;
+      return -EAGAIN;
     }
 
   status = getreg32(STM32_FDCAN1_TXFQS);
 
   if ((status & FDCAN_TXFQS_TFQF) != 0)
     {
-      /* Nothing on the bus is acknowledging, so the hardware is still
-       * retrying frames queued up to 0.6 s ago. Dropping this one is right:
-       * at 50 Hz the next carries fresher intent than anything stuck in the
-       * queue.
-       */
-
       g_stats.tx_full++;
       return -EAGAIN;
     }
@@ -701,28 +839,60 @@ int fdcan_transmit(FAR const struct fdcan_frame_s *frame)
 
   /* Add request: one bit per element index. */
 
+  g_tx_tracked = 1u << index;
+  g_tx_aborting = 0;
+  g_tx_deadline = fmuv6c_imu_time_now() + FDCAN_TX_LIFETIME_US;
+  memory_barrier();
   putreg32(1u << index, STM32_FDCAN1_TXBAR);
 
   g_stats.tx++;
   return OK;
 }
 
+int fdcan_transmit(FAR const struct fdcan_frame_s *frame)
+{
+  irqstate_t flags = enter_critical_section();
+  int ret = fdcan_transmit_locked(frame);
+  leave_critical_section(flags);
+  return ret;
+}
+
+void fdcan_abort_tx(void)
+{
+  irqstate_t flags = enter_critical_section();
+  if (g_ready)
+    {
+      fdcan_service();
+      g_tx_aborting = g_stats.pending;
+      putreg32(g_tx_aborting, STM32_FDCAN1_TXBCR);
+    }
+  leave_critical_section(flags);
+}
+
+bool fdcan_tx_idle(void)
+{
+  irqstate_t flags = enter_critical_section();
+  bool idle = true;
+  if (g_ready)
+    {
+      fdcan_service();
+      idle = g_stats.pending == 0;
+    }
+  leave_critical_section(flags);
+  return idle;
+}
+
 void fdcan_stats(FAR struct fdcan_stats_s *out)
 {
   irqstate_t flags;
-  uint32_t psr;
 
   if (out == NULL)
     {
       return;
     }
 
-  psr = getreg32(STM32_FDCAN1_PSR);
   flags = enter_critical_section();
-  g_stats.last_error = (uint8_t)(psr & FDCAN_PSR_LEC_MASK);
-  g_stats.bus_off = (psr & FDCAN_PSR_BO_MASK) != 0;
-  g_stats.error_passive = (psr & FDCAN_PSR_EP_MASK) != 0;
-
   *out = g_stats;
+  out->ready = g_ready;
   leave_critical_section(flags);
 }

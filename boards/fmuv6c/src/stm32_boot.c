@@ -53,6 +53,12 @@
 
 void stm32_boardinitialize(void)
 {
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+  /* Establish the servo/buzzer idle states before late driver startup. */
+
+  board_matek_pins_initialize();
+#endif
+
   /* Turn on the peripheral 5V rails as early as possible, so anything hanging
    * off a TELEM or GPS connector (a GPS, an RC receiver, the MTF-02) has power
    * before it is probed. Both enables are active-low and the GPIOs are defined

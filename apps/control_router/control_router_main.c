@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include "control_router.h"
+#include "../rc_in/rc_in.h"
 
 static void usage(void)
 {
@@ -27,6 +28,18 @@ static FAR const char *source_name(uint8_t source)
 static FAR const char *mode_name(uint8_t mode)
 {
   return mode == ROUTER_MODE_CURRENT ? "CURRENT" : "DUTY";
+}
+
+static FAR const char *rc_source_name(uint8_t source)
+{
+  switch (source)
+    {
+      case RC_IN_SRC_PX4IO: return "PX4IO";
+      case RC_IN_SRC_SBUS:  return "SBUS";
+      case RC_IN_SRC_CRSF:  return "CRSF/ELRS";
+      case RC_IN_SRC_PPM:   return "PPM";
+      default:              return "NONE";
+    }
 }
 
 static void print_age(FAR const char *name, uint64_t age)
@@ -55,8 +68,9 @@ static int print_status(void)
   printf("control_router: %s %s, %s, reason %s\n",
          s.armed ? "ARMED" : "disarmed", source_name(s.source),
          mode_name(s.mode), control_router_reason_name(s.reason));
-  printf("  rc      %s source=%u throttle=%+.3f steering=%+.3f\n",
+  printf("  rc      %s source=%u (%s) throttle=%+.3f steering=%+.3f\n",
          s.rc_valid ? "valid" : "INVALID", s.rc_source,
+         rc_source_name(s.rc_source),
          (double)s.rc_throttle, (double)s.rc_steering);
   printf("  auto    %s%s\n", s.auto_valid ? "valid" : "INVALID",
          s.reason == ROUTER_REASON_AUTO_CYCLE ?
@@ -73,6 +87,9 @@ static int print_status(void)
          s.disarms);
   printf("  faults  rc_loss=%" PRIu32 " auto_stale=%" PRIu32 "\n",
          s.rc_losses, s.auto_stale);
+  if (s.last_arm_error)
+    printf("  arm refusal errno=%d (3 backend stopped, 67 backend unhealthy, 1 setpoint unsafe)\n",
+           -s.last_arm_error);
   return EXIT_SUCCESS;
 }
 

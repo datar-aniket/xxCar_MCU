@@ -73,6 +73,7 @@ static void load_config(struct router_config_s *config)
   config->switch_high = (uint16_t)param_i32("RC_SW_HIGH");
   config->rc_timeout_us = (uint32_t)param_i32("RC_INPUT_TO_MS") * 1000u;
   config->auto_timeout_us = (uint32_t)param_i32("AUTO_CMD_TO_MS") * 1000u;
+  config->steering_filter_us = (uint32_t)param_i32("RC_ST_FILT_MS") * 1000u;
   config->duty_max = param_f32("VESC_DUTY_MAX");
   config->current_max = param_f32("VESC_CUR_MAX");
   config->arm_motor_max = param_f32("RC_ARM_MAX");
@@ -187,6 +188,15 @@ static int control_router_daemon(int argc, FAR char *argv[])
 
       now = router_now_us();
       input.now_us = now;
+      if (policy.actual_armed && !vesc_is_armed())
+        {
+          /* A backend fault must also invalidate the router's arm latch.
+           * Bus/telemetry recovery never constitutes permission to rearm.
+           */
+          policy.actual_armed = false;
+          policy.arm_low_seen = false;
+          policy.arm_holding = false;
+        }
       was_armed = policy.actual_armed;
       router_policy_step(&config, &policy, &input, &routed);
 
@@ -219,7 +229,8 @@ static int control_router_daemon(int argc, FAR char *argv[])
            ROUTER_ARM_RETRY_US))
         {
           last_arm_attempt = now;
-          if (vesc_arm(true) == OK)
+          status.last_arm_error = vesc_arm(true);
+          if (status.last_arm_error == OK)
             {
               policy.actual_armed = true;
               policy.arm_holding = false;

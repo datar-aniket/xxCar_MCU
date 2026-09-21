@@ -8,8 +8,8 @@
  * TIM5 is a 32-bit APB1 timer and is otherwise unused by this board. It runs
  * freely at 1 MHz. Every IMU DRDY ISR reads the same counter, avoiding the
  * 1 ms quantization of the NuttX system tick without changing the system tick
- * rate. Matek optionally adds PPS input capture on TIM5_CH1 after this base
- * clock is initialized.
+ * rate. Matek PPS is deferred to a separate TIM1 input; no servo or PPS
+ * driver may reconfigure TIM5.
  ****************************************************************************/
 
 #include <nuttx/config.h>
@@ -65,8 +65,25 @@ static uint64_t fmuv6c_monotonic_us(void)
 int fmuv6c_imu_time_initialize(void)
 {
   irqstate_t flags;
+  uint32_t d2cfgr;
   uint32_t prescaler;
   uint16_t cr1;
+
+  /* TIM5's compiled prescaler is only valid for the board's configured
+   * APB1 divider.  Fail loudly instead of allowing a bootloader-dependent
+   * RCC value to turn every high-resolution timestamp into a wrong-rate
+   * clock.  TIM3 PPM capture depends on this same APB1 timer clock.
+   */
+
+  d2cfgr = getreg32(STM32_RCC_D2CFGR);
+  if ((d2cfgr & RCC_D2CFGR_D2PPRE1_MASK) !=
+      STM32_RCC_D2CFGR_D2PPRE1)
+    {
+      syslog(LOG_ERR,
+             "fmuv6c: APB1 prescaler mismatch D2CFGR=%08lx\n",
+             (unsigned long)d2cfgr);
+      return -EIO;
+    }
 
   flags = enter_critical_section();
 
@@ -114,11 +131,7 @@ int fmuv6c_imu_time_initialize(void)
 
   syslog(LOG_INFO,
          "[sensors] TIM5 reserved as shared 1 MHz IMU timebase"
-#ifdef CONFIG_XXCAR_BOARD_MATEKH743
-         " (CH1 available for S1 PPS capture)\n"
-#else
          " (no IRQ/DMA/GPIO)\n"
-#endif
          );
   return OK;
 }

@@ -173,6 +173,7 @@ void router_policy_step(const struct router_config_s *config,
   float selected_rear = 0.0f;
   float arm_motor_fraction = 0.0f;
   uint8_t selected_mode;
+  uint64_t filter_timestamp;
 
   memset(output, 0, sizeof(*output));
   output->reason = ROUTER_REASON_INVALID;
@@ -183,6 +184,8 @@ void router_policy_step(const struct router_config_s *config,
     }
 
   required = config->map_steering;
+  filter_timestamp = state->filter_timestamp;
+  state->filter_timestamp = 0; /* Every early safety return resets smoothing. */
   if (config->map_throttle > required) required = config->map_throttle;
   if (config->map_source > required) required = config->map_source;
   if (config->map_mode > required) required = config->map_mode;
@@ -238,6 +241,7 @@ void router_policy_step(const struct router_config_s *config,
       state->arm_high = false;
       state->arm_low_seen = false;
       state->mode_initialized = false;
+      state->filter_timestamp = 0;
       output->source = state->source_auto ? ROUTER_SOURCE_AUTO
                                           : ROUTER_SOURCE_RC;
       output->mode = state->mode_current ? ROUTER_MODE_CURRENT
@@ -440,6 +444,34 @@ void router_policy_step(const struct router_config_s *config,
 
   output->motor = selected_motor;
   output->steering = selected_steering;
+  /* Keep raw channels and arm/neutral decisions unfiltered. Only smooth
+   * valid manual steering, once per fresh RC sample. Throttle, switches,
+   * source changes, disarm and failsafe never wait for a filter to settle.
+   */
+
+  if (!state->source_auto && config->steering_filter_us > 0)
+    {
+      if (filter_timestamp == 0 || source_changed ||
+          input->rc_timestamp < filter_timestamp ||
+          input->rc_timestamp - filter_timestamp >=
+            config->rc_timeout_us)
+        {
+          state->filtered_steering = selected_steering;
+        }
+      else if (input->rc_timestamp > filter_timestamp)
+        {
+          float dt = (float)(input->rc_timestamp - filter_timestamp);
+          float alpha = dt / (dt + (float)config->steering_filter_us);
+          state->filtered_steering +=
+            alpha * (selected_steering - state->filtered_steering);
+        }
+      state->filter_timestamp = input->rc_timestamp;
+      output->steering = state->filtered_steering;
+    }
+  else
+    {
+      state->filter_timestamp = 0;
+    }
   output->delta_rear = selected_rear;
   output->reason = ROUTER_REASON_OK;
 }

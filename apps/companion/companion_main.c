@@ -155,6 +155,9 @@ static void print_status(void)
           printf("             updates %" PRIu32 "  rate/step resets %"
                  PRIu32 "  CLOCK_REALTIME is not used for conversion\n",
                  s.timesync_updates, s.timesync_rate_rejected);
+          printf("             %s; startup phase correction %+.3f ms\n",
+                 s.utc_rate_acquired ? "rate acquired" : "phase provisional: awaiting rate",
+                 (double)s.timesync_acquisition_step_us / 1000.0);
         }
 
       /* A UTC stamp that arrived before a sync could not be converted to the
@@ -236,6 +239,11 @@ static void print_status(void)
 
   printf("  downlink   repeats %" PRIu32 "  sample gap %" PRIu32 "-%" PRIu32
          " us\n", s.tx_repeat, s.tx_gap_min_us, s.tx_gap_max_us);
+  printf("  sample age at enqueue %" PRIu64 " us (max %" PRIu64
+         ") -- board TIM5 only, excludes host clock/transport\n",
+         s.tx_sample_age_us, s.tx_sample_age_max_us);
+  if (s.utc_base_rate_ppb > 1000000 || s.utc_base_rate_ppb < -1000000)
+    printf("  WARNING: relative clock rate exceeds 1000 ppm; check board/host reference. UTC compensation does not calibrate PWM or sensor dt.\n");
 
   /* TIM5 against CLOCK_MONOTONIC. Corrected UTC is based only on the affine
    * TIM5 model; this remains a diagnostic and never enters that conversion.

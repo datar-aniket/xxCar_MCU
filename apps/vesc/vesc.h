@@ -88,7 +88,7 @@ struct vesc_daemon_status_s
   uint16_t last_servo_us;
   uint16_t last_rear_servo_us;
   uint8_t  steer_output_source; /* 0 VESC, 1 PX4IO */
-  uint8_t  steer_io_channel;    /* one-based PX4IO channel */
+  uint8_t  steer_io_channel;    /* one-based physical board channel */
   uint8_t  rear_steer_io_channel;
   bool     steer_io_healthy;
   uint32_t steer_io_errors;
@@ -112,5 +112,6 @@ int  vesc_arm(bool armed);
 int  vesc_start(void);
 int  vesc_stop(void);
 void vesc_status(FAR struct vesc_daemon_status_s *out);
+bool vesc_is_armed(void);
 
 #endif /* __APPS_VESC_VESC_H */

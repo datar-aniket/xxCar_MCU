@@ -48,6 +48,7 @@
 #define COMP_MSG_DIRECT_CONTROL  7
 #define COMP_MSG_DATUM_RESET     8
 #define COMP_MSG_LINK_TEST_REQ   9
+#define COMP_MSG_TIMESYNC_END2  10
 
 /* Outbound: board -> companion. */
 
@@ -336,6 +337,15 @@ struct comp_timesync_end_s
 struct comp_timesync_req_s
 {
   uint64_t host_tx_us;      /* 0: companion UTC microseconds when asked */
+};
+
+/* END2 preserves the selected exchange's board midpoint. Legacy END (6)
+ * remains accepted, but cannot distinguish measurement time from arrival.
+ */
+struct comp_timesync_end2_s
+{
+  struct comp_timesync_end_s result;
+  uint64_t sample_mono_us;
 };
 
 struct comp_timesync_rep_s

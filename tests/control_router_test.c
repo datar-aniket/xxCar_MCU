@@ -492,6 +492,33 @@ static void test_unused_channel_may_be_absent(void)
   assert(out.rc_valid);
 }
 
+static void test_steering_filter_safety(void)
+{
+  struct router_config_s c = config_default();
+  struct router_state_s s;
+  struct router_input_s in = input_default(9000000);
+  struct router_output_s out;
+  c.steering_filter_us = 20000;
+  router_state_init(&s);
+  arm_manual(&c, &s, &in, &out);
+  in.rc_channel[0] = 2000;
+  in.rc_channel[2] = 2000;
+  in.now_us += 20000;
+  step(&c, &s, &in, &out);
+  assert(fabsf(out.steering - 0.5f) < 1e-6f);
+  assert(fabsf(out.motor - 0.3f) < 1e-6f); /* Throttle not filtered. */
+  in.now_us += 1000;
+  router_policy_step(&c, &s, &in, &out); /* Repeated sample: no filter update. */
+  assert(fabsf(out.steering - 0.5f) < 1e-6f);
+  in.rc_failsafe = true;
+  step(&c, &s, &in, &out);
+  assert(out.request_disarm && out.motor == 0 && out.steering == 0);
+  assert(s.filter_timestamp == 0);
+  in.rc_failsafe = false;
+  step(&c, &s, &in, &out);
+  assert(!out.request_arm); /* Recovery requires a deliberate arm cycle. */
+}
+
 int main(void)
 {
   struct router_config_s c = config_default();
@@ -508,6 +535,7 @@ int main(void)
   test_rc_loss_disarms_and_requires_recycle();
   test_rc_safety_overrides_external_arm();
   test_unused_channel_may_be_absent();
+  test_steering_filter_safety();
   puts("control_router: mapping, selection and safety transitions - OK");
   return 0;
 }

@@ -633,24 +633,31 @@ static void comp_route(int id, FAR const struct comp_parser_s *parser,
       s->timesync_replies = 0;
       s->timesync_synced = false;
     }
-  else if (id == COMP_MSG_TIMESYNC_END)
+  else if (id == COMP_MSG_TIMESYNC_END || id == COMP_MSG_TIMESYNC_END2)
     {
       struct comp_timesync_end_s end;
       int sync_result = COMP_CLOCK_SYNC_REJECTED;
+      uint64_t sample_us = rx_us;
 
       memcpy(&end, parser->payload, sizeof(end));
+      if (id == COMP_MSG_TIMESYNC_END2)
+        memcpy(&sample_us, parser->payload + sizeof(end), sizeof(sample_us));
       s->timesync_offset_us = end.utc_offset_us;
       s->timesync_trip_us = end.trip_us;
       s->timesync_samples = end.samples;
 
-      if (end.samples > 0)
+      if (end.samples >= 3 && end.samples <= s->timesync_replies &&
+          end.trip_us <= 20000 && sample_us <= rx_us &&
+          rx_us - sample_us <= 10000000ull)
         {
           pthread_mutex_lock(&g_clock_lock);
-          sync_result = comp_clock_observe_sync(&g_clock, rx_us,
-                                                end.utc_offset_us);
+          sync_result = comp_clock_observe_sync_at(&g_clock, sample_us,
+                                                   end.utc_offset_us, rx_us);
 
           s->utc_rate_ppb = g_clock.rate_ppb;
           s->utc_base_rate_ppb = g_clock.base_rate_ppb;
+          s->utc_rate_acquired = g_clock.rate_acquired;
+          s->timesync_acquisition_step_us = g_clock.acquisition_step_us;
           s->timesync_phase_error_us = g_clock.last_phase_error_us;
           s->timesync_updates = g_clock.sync_updates;
           s->timesync_rate_rejected = g_clock.rejected_observations;
@@ -667,8 +674,8 @@ static void comp_route(int id, FAR const struct comp_parser_s *parser,
           s->utc_from_rtc = false;
 
           /* The first authoritative sync establishes absolute UTC and may
-           * replace the RTC's second-resolution seed. Later syncs change
-           * only the affine rate and are exactly continuous at rx_us.
+           * replace the RTC's seed. The first prompt rate acquisition may
+           * correct startup phase once; subsequent syncs are continuous.
            * Re-establish the PPS phase after either kind of update so its
            * next edge is compared with the new discipline, not the old one.
            */
@@ -712,12 +719,15 @@ static void comp_route(int id, FAR const struct comp_parser_s *parser,
 
       rep.host_tx_us = req.host_tx_us;
       rep.board_rx_us = rx_us;
+      pthread_mutex_lock(&g_tx_lock);
       rep.board_tx_us = comp_now_us();
 
       n = comp_encode(COMP_MSG_TIMESYNC_REP, &rep, sizeof(rep), frame,
                       sizeof(frame));
 
-      if (n > 0 && comp_send_frame(fd, frame, (size_t)n) == OK)
+      int sent = n > 0 ? comp_write_all(fd, frame, (size_t)n) : -EINVAL;
+      pthread_mutex_unlock(&g_tx_lock);
+      if (sent == OK)
         {
           s->bytes_out += (uint64_t)n;
           s->tx_frames++;
@@ -1167,6 +1177,10 @@ static void comp_transmit(int fd, int state_pub, int est_sub, int gyro_sub,
 
   pthread_mutex_lock(&g_lock);
   s->est_seen++;
+  s->tx_sample_age_us = logged.timestamp >= est.timestamp_sample ?
+    logged.timestamp - est.timestamp_sample : 0;
+  if (s->tx_sample_age_us > s->tx_sample_age_max_us)
+    s->tx_sample_age_max_us = s->tx_sample_age_us;
   s->bytes_out += (uint64_t)n;
   s->tx_frames++;
 
@@ -1764,4 +1778,8 @@ void companion_status(FAR struct companion_status_s *out)
   pthread_mutex_lock(&g_lock);
   *out = g_status;
   pthread_mutex_unlock(&g_lock);
+  /* Phase slew can expire without another sync or a timer callback. */
+  pthread_mutex_lock(&g_clock_lock);
+  out->utc_rate_ppb = comp_clock_rate_at(&g_clock, comp_now_us());
+  pthread_mutex_unlock(&g_clock_lock);
 }

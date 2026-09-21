@@ -68,16 +68,24 @@ struct fdcan_stats_s
   uint32_t tx;              /* frames queued for transmission */
   uint32_t tx_full;         /* dropped: Tx FIFO had no free element */
   uint32_t ring_full;       /* dropped: the task did not keep up */
+  uint32_t tx_completed;    /* controller reports successful transmission */
+  uint32_t tx_cancelled;    /* cancellation completed without transmission */
+  uint32_t tx_expired;      /* deadline cancellation requests */
+  uint32_t bus_off_count;
+  uint32_t recoveries;      /* observed return from bus-off */
+  uint32_t pending;         /* hardware request bitmap */
+  bool     ready;
   uint8_t  last_error;      /* PSR LEC */
   bool     bus_off;
   bool     error_passive;
 };
 
-/* Bring up the peripheral. Only 1000000 is supported today; anything else is
- * refused rather than silently mis-timed.
+/* Bring up the peripheral with its initial controller-id filter. Only
+ * 1000000 is supported today; anything else is refused rather than silently
+ * mis-timed. controller_id 0 accepts all extended frames for discovery.
  */
 
-int fdcan_init(uint32_t bitrate);
+int fdcan_init(uint32_t bitrate, uint8_t controller_id);
 
 /* Stop receive interrupts and put the peripheral back into INIT mode.
  * Safe to call after a partial initialization failure.
@@ -113,16 +121,16 @@ int fdcan_wait(uint32_t timeout_us);
  * "Queued", not "sent": this returns as soon as the element is in the FIFO
  * and the hardware has been told to send it.
  *
- * A FULL FIFO IS THE DIAGNOSTIC WORTH KNOWING. Classic CAN needs another
- * node to acknowledge, and the hardware retries a frame that is never
- * acknowledged for as long as it takes. So an absent VESC, or a missing bus
- * terminator, fills all 32 elements and every call after that returns
- * -EAGAIN - in about 80 ms at the default 400 Hz, or 0.6 s at 50. That
- * climbing tx_full is a precise symptom, and it is the first thing to look
- * at when a bench run does nothing.
+ * Cyclic-command policy: at most ONE pending frame. A new command requests
+ * cancellation of an older pending command and returns -EAGAIN; retry with
+ * fresh intent, never the old payload. A 20 ms deadline is serviced by a
+ * 10 ms NuttX watchdog, independently of the VESC task. Cancellation cannot
+ * retract a frame already on the wire. This is not a CPU-stall failsafe.
  */
 
 int fdcan_transmit(FAR const struct fdcan_frame_s *frame);
+void fdcan_abort_tx(void);
+bool fdcan_tx_idle(void);
 
 /* Narrow the HARDWARE filter to one controller id; 0 accepts any.
  *

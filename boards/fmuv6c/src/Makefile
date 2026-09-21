@@ -25,7 +25,7 @@ include $(TOPDIR)/Make.defs
 CSRCS = stm32_boot.c stm32_bringup.c
 
 ifeq ($(CONFIG_XXCAR_BOARD_MATEKH743),y)
-CSRCS += matekh743_io.c
+CSRCS += matekh743_io.c matekh743_pwm.c
 endif
 
 # DMA-capable pool for the FAT sector buffers. Exactly the arrangement every
@@ -68,7 +68,11 @@ endif
 # Exact companion PPS capture on TELEM2 CTS (PC9/TIM3_CH4).  This owns TIM3
 # directly and deliberately does not enable NuttX's timer/capture lower-half.
 ifeq ($(CONFIG_XXCAR_PPS),y)
+ifeq ($(CONFIG_XXCAR_BOARD_MATEKH743),y)
+CSRCS += matekh743_pps_pending.c
+else
 CSRCS += fmuv6c_pps.c
+endif
 endif
 
 # TIM6 raises the companion downlink tick. A basic timer with no pins, taken
@@ -78,7 +82,7 @@ CSRCS += fmuv6c_txtick.c
 endif
 
 ifeq ($(CONFIG_SENSORS),y)
-CSRCS += fmuv6c_sensors.c
+CSRCS += fmuv6c_sensors.c peripheral_health.c
 CSRCS += ist8310.c
 ifeq ($(CONFIG_XXCAR_BOARD_MATEKH743),y)
 CSRCS += dps368.c
@@ -159,3 +163,13 @@ CSRCS += stm32_mmcsd.c
 endif
 
 include $(TOPDIR)/boards/Board.mk
+
+# Upstream ARCHIVE updates members but does not remove objects dropped from
+# CSRCS. A same-board incremental build otherwise retains the old S3 PPS
+# implementation and can link it instead of the pending-port stub. Recreate
+# this small generated archive from the selected objects on each invocation.
+
+.PHONY: board_archive_refresh
+libboard$(LIBEXT): board_archive_refresh
+board_archive_refresh:
+	$(call DELFILE, libboard$(LIBEXT))

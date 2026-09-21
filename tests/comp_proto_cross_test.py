@@ -135,6 +135,10 @@ int main(void)
                   frame, sizeof(frame));
   dump(frame, n);
 
+  struct comp_timesync_end2_s sync = {{1700000000000000ll, 375, 10}, 987654321ull};
+  n = comp_encode(COMP_MSG_TIMESYNC_END2, &sync, sizeof(sync), frame, sizeof(frame));
+  dump(frame, n);
+
   return 0;
 }
 """
@@ -161,6 +165,15 @@ def main():
     c_datum_frame = bytes.fromhex(out[7])
     c_traj_frame = bytes.fromhex(out[8])
     c_link_frame = bytes.fromhex(out[9])
+    c_sync_frame = bytes.fromhex(out[10])
+    assert c_sync_frame == comp_link.encode_timesync_end(
+        1700000000000000, 375, 10, 987654321)
+    parser = comp_link.Parser()
+    decoded = None
+    for byte in c_sync_frame:
+        decoded = parser.feed(byte) or decoded
+    assert decoded == (comp_link.MSG_TIMESYNC_END2,
+                       comp_link.TIMESYNC_END2.pack(1700000000000000, 375, 10, 987654321))
 
     assert c_ext_size == comp_link.EXTERNAL_POSE.size, (
         f"external_pose: C says {c_ext_size}, "

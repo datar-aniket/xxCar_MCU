@@ -50,9 +50,9 @@ static void usage(void)
          "  VESC_STEER_*    MIN / TRIM / MAX servo pulse, us\n"
          "  REAR_ST_*       rear MIN / TRIM / MAX / OFS pulse, us\n"
          "  STEER_OUT_SRC   0 VESC CAN, 1 board PWM\n"
-         "  STEER_IO_CH     Pixhawk front PWM channel (default MAIN 1)\n"
-         "  STEER_REAR_CH   Pixhawk rear PWM channel (default MAIN 2)\n"
-         "  STEER_PWM_HZ    Matek S1 PWM frame rate\n");
+         "  STEER_IO_CH     front physical PWM output (Matek default S3)\n"
+         "  STEER_REAR_CH   rear physical PWM output (Matek default S4)\n"
+         "  STEER_PWM_HZ    Matek S3/S4 PWM frame rate\n");
 }
 
 static FAR const char *vesc_packet_name(uint8_t id)
@@ -138,6 +138,10 @@ static void print_status(void)
          "\n", s.bus.tx_full, vesc_cmd_reason_name(s.last_reason),
          (double)s.last_motor, (unsigned)s.last_servo_us,
          (unsigned)s.last_rear_servo_us);
+  printf("  can-tx  completed %" PRIu32 " cancelled %" PRIu32
+         " expired %" PRIu32 " busoff/recovered %" PRIu32 "/%" PRIu32 "\n",
+         s.bus.tx_completed, s.bus.tx_cancelled, s.bus.tx_expired,
+         s.bus.bus_off_count, s.bus.recoveries);
 
   printf("  telemetry %s  timeout %" PRIu32 " ms  watchdog disarms %"
          PRIu32 "%s\n",
@@ -171,7 +175,8 @@ static void print_status(void)
   if (s.steer_output_source == 1)
     {
 #ifdef CONFIG_XXCAR_BOARD_MATEKH743
-      printf("  steering Matek S1  link %s  errors %" PRIu32 "\n",
+      printf("  steering Matek front/rear S%u/S%u  link %s  errors %"
+             PRIu32 "\n", s.steer_io_channel, s.rear_steer_io_channel,
              s.steer_io_healthy ? "ok" : "LOST", s.steer_io_errors);
 #else
       printf("  steering PX4IO front/rear channels %u/%u  link %s  IO errors %"

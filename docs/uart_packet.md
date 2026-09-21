@@ -60,6 +60,7 @@ direction fails to route rather than half-working.
 | 7 | `DIRECT_CONTROL` | companion → board | 32 |
 | 8 | `DATUM_RESET` | companion → board | 4 |
 | 9 | `LINK_TEST_REQ` | companion → board | 16..244 |
+| 10 | `TIMESYNC_END2` | companion → board | 24 |
 | 16 | `VEHICLE_STATE` | board → companion | 104 |
 | 17 | `LINK_TEST_REP` | board → companion | same as request |
 
@@ -825,11 +826,33 @@ A bracketed exchange, all initiated by the companion:
 2. `count` × `TIMESYNC_REQ` — `{ uint64 host_tx_us }`, the companion's UTC
    when it asked. The board answers each with `TIMESYNC_REP`:
    `{ uint64 host_tx_us, uint64 board_rx_us, uint64 board_tx_us }`.
-3. `TIMESYNC_END` — `{ int64 utc_offset_us, uint32 trip_us, uint32 samples }`,
+3. `TIMESYNC_END2` — `{ int64 utc_offset_us, uint32 trip_us, uint32 samples,
+   uint64 sample_mono_us }`, where `sample_mono_us` is the midpoint of the
+   selected reply's `board_rx_us` and `board_tx_us`,
    telling the board the observed `UTC - TIM5` offset. The first completed
    sync establishes absolute UTC. Later observations estimate the scale in
-   `corrected_UTC = a * TIM5 + b`; phase error is removed by a bounded rate
-   slew, so corrected UTC never steps when a periodic sync completes.
+   `corrected_UTC = a * TIM5 + b`. The first plausible rate fit can apply one
+   startup phase correction (up to 50 ms, interval up to 10 s), immediately
+   removing error accumulated while rate was unknown. This can step wire UTC
+   in either direction; it never changes TIM5 or estimator/actuator clocks.
+   After rate acquisition, phase error is removed by bounded rate slew and
+   periodic syncs are continuous. Large/late acquisition uses slew as well.
+
+Legacy `TIMESYNC_END` (ID 6, the first 16 bytes only) is still accepted, but
+assumes the measurement was made at END arrival. Updated clients use ID 10
+to avoid mistaking burst/queue delay for clock drift. Require at least three
+returned exchanges, a selected RTT <=20 ms, and an epoch no more than 10 s
+before arrival. Old firmware does not support ID 10; update both ends or use
+the headless probe's `--legacy` option.
+
+The fitted relative-rate bound is +/-5000 ppm; status warns above +/-1000 ppm.
+Phase correction is limited to +/-200 ppm, and no running TIM5/OS timer is
+retuned. Phase slew expires after its intended interval (at most 30 s), then
+the continuous mapping proceeds at base rate. Both directions of conversion
+account for this rate transition. Large hardware/reference errors must still be investigated: correcting
+wire UTC does not correct physical PWM widths or internal sensor timing.
+`companion status` reports TIM5-only sample age at enqueue to distinguish
+estimator delay from clock/transport effects in the GUI's arrival age.
 
 With four timestamps per exchange:
 
@@ -841,6 +864,16 @@ round_trip = (host_rx - host_tx) - (board_tx - board_rx)
 Keep the exchange with the **smallest** round trip. The offset is only as
 good as the path is symmetric, and the least-delayed exchange is the least
 asymmetric one.
+
+A single burst establishes phase only; it cannot measure relative oscillator
+rate. Repeat the burst after at least one second, then periodically while the
+link is active. `tools/companion_gui.py` and the headless probe wait 1.2 seconds
+between the first six bursts, then refresh every 30 seconds. The first rate
+correction directly removes startup phase error; subsequent early bursts
+refine the initially noisy two-point rate estimate. `companion status` shows
+whether rate has been acquired and the one-time startup phase correction.
+Ordinary START messages and host reconnection do not re-enable that step in
+an already acquired clock; only a fresh companion-daemon clock does.
 
 `board_tx_us` is what makes this work — without it the board's own processing
 delay is indistinguishable from wire latency and lands entirely in the offset.
@@ -858,9 +891,12 @@ authoritative sync and then free-runs; it is not used in either conversion.
 
 ### PPS
 
-Drive **TELEM2 CTS** (PC9) with a 3.3 V rising edge on the UTC second. The
+On **Pixhawk 6C**, drive **TELEM2 CTS** (PC9) with a 3.3 V rising edge on the UTC second. The
 board captures it on TIM3 at 1 MHz and steers the affine UTC rate so the
 established pulse phase remains fixed without stepping corrected UTC.
+
+Matek PPS is currently disabled pending the separate PA8/TIM1 port. Do not
+connect PPS to S3; S1-S8 are servo outputs.
 
 Because the pulse comes *from* the companion, its edge is that machine's own
 second boundary — which makes this a direct microsecond-resolution

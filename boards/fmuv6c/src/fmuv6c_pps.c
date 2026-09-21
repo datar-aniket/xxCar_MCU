@@ -6,7 +6,7 @@
  * Hardware PPS capture for the Jetson companion link.
  *
  * On FMUv6C, TELEM2 CTS/PC9 is captured by a separate 1 MHz TIM3 channel.
- * On Matek H743-SLIM-V4, S1/PA0 is captured directly by channel 1 of the
+ * On Matek H743-SLIM-V4, S3/PA0 is captured directly by channel 1 of the
  * shared 1 MHz TIM5 IMU clock.  Hardware capture keeps ISR scheduling latency
  * out of the PPS timestamp on both boards.
  *
@@ -53,7 +53,7 @@
 #define PPS_LOCK_INTERVALS             3u
 
 #ifdef CONFIG_XXCAR_BOARD_MATEKH743
-/* S1/PA0 is TIM5_CH1.  Capturing in the existing 1 MHz IMU timer gives PPS
+/* S3/PA0 is TIM5_CH1.  Capturing in the existing 1 MHz IMU timer gives PPS
  * exactly the same clock domain without consuming UART6 RX or an SDMMC pin.
  */
 #  define PPS_GPIO       (GPIO_TIM5_CH1IN_1 | GPIO_PULLDOWN)

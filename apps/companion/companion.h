@@ -72,6 +72,8 @@ struct companion_status_s
   bool     timesync_synced;
   int64_t  utc_rate_ppb;        /* applied a-1 in UTCc=a*TIM5+b */
   int64_t  utc_base_rate_ppb;   /* regression rate before phase slew */
+  int64_t  timesync_acquisition_step_us;
+  bool     utc_rate_acquired;
   int64_t  timesync_phase_error_us; /* observation - continuous UTCc */
   uint32_t timesync_updates;
   uint32_t timesync_rate_rejected; /* implausible clock steps/rates */
@@ -94,6 +96,8 @@ struct companion_status_s
   uint32_t tick_ticks;        /* TIM6 ticks raised */
   uint32_t tick_missed;       /* the downlink did not consume one in time */
   uint32_t tx_repeat;         /* same solution sent twice */
+  uint64_t tx_sample_age_us;  /* TIM5 enqueue time minus estimator sample */
+  uint64_t tx_sample_age_max_us;
   uint32_t tx_gap_min_us;
   uint32_t tx_gap_max_us;
 

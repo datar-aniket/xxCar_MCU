@@ -113,6 +113,11 @@ static const struct param_def_s g_params[] =
     "RC protocol on an FMU UART (0=auto SBUS/CRSF 1=SBUS 2=CRSF 3=PPM)",
     PARAM_RANGE_ENUM },
 
+  { "RC_PPM_CH", PARAM_TYPE_INT32, I32(8), I32(4), I32(18),
+    "Exact Matek PPM channel count; restart RC after changing", PARAM_RANGE_ENUM },
+  { "RC_ST_FILT_MS", PARAM_TYPE_INT32, I32(0), I32(0), I32(100),
+    "Manual steering filter time constant ms; 0 off; restart router", PARAM_RANGE_CLAMP },
+
   /* RC safety router. Channel maps are one-based, matching transmitter and
    * `rc status` labels. The arm channel deliberately starts on channel 7:
    * channels 5 and 6 are source and motor-mode selection respectively.
@@ -882,10 +887,20 @@ static const struct param_def_s g_params[] =
     I32(1),
     I32(0), I32(1),
     "Steering output: 0 VESC CAN, 1 board PWM", PARAM_RANGE_ENUM },
-  { "STEER_IO_CH", PARAM_TYPE_INT32, I32(1), I32(1), I32(8),
-    "Pixhawk PX4IO steering PWM output channel (1-8)" },
-  { "STEER_REAR_CH", PARAM_TYPE_INT32, I32(2), I32(1), I32(8),
-    "Pixhawk PX4IO rear steering PWM output channel (1-8)" },
+  { "STEER_IO_CH", PARAM_TYPE_INT32,
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+    I32(3),
+#else
+    I32(1),
+#endif
+    I32(1), I32(8), "Front steering physical PWM output" },
+  { "STEER_REAR_CH", PARAM_TYPE_INT32,
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+    I32(4),
+#else
+    I32(2),
+#endif
+    I32(1), I32(8), "Rear steering physical PWM output" },
   { "REAR_ST_MIN", PARAM_TYPE_INT32, I32(1100), I32(900), I32(2100),
     "Rear servo pulse at steering -1 (us)" },
   { "REAR_ST_TRIM", PARAM_TYPE_INT32, I32(1500), I32(900), I32(2100),

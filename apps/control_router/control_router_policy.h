@@ -56,6 +56,7 @@ struct router_config_s
   uint16_t switch_high;
   uint32_t rc_timeout_us;
   uint32_t auto_timeout_us;
+  uint32_t steering_filter_us;   /* 0 disables; steering only, not safety */
   float duty_max;
   float current_max;
   float arm_motor_max;
@@ -108,6 +109,8 @@ struct router_state_s
   bool arm_holding;
   uint64_t arm_hold_until;
   uint64_t source_hold_until;
+  uint64_t filter_timestamp;
+  float filtered_steering;
 };
 
 struct router_output_s

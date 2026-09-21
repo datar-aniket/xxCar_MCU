@@ -113,7 +113,7 @@ static int serial_do_status(void)
 #ifdef CONFIG_XXCAR_BOARD_MATEKH743
   printf("\n"
          "R6/PC7 is RCIN above: SBUS/CRSF use USART6_RX; RC_PROT=3 remuxes\n"
-         "the same pad to TIM3_CH2 for PPM. S1 steering is not a serial port.\n");
+         "the same pad to TIM3_CH2 for PPM. S3/S4 steering is not serial.\n");
 #else
   /* These two are not assignable, and saying so is more useful than leaving
    * someone to wonder why RC IN is missing from the table.

@@ -1,0 +1,24 @@
+diff --git a/arch/arm/src/stm32h7/stm32h7x3xx_rcc.c b/arch/arm/src/stm32h7/stm32h7x3xx_rcc.c
+--- a/arch/arm/src/stm32h7/stm32h7x3xx_rcc.c
++++ b/arch/arm/src/stm32h7/stm32h7x3xx_rcc.c
+@@ -801,7 +801,7 @@ static inline void stm32_stdclockconfig(void)
+       /* Set PCLK1 */
+ 
+       regval = getreg32(STM32_RCC_D2CFGR);
+-      regval &= ~RCC_D2CFGR_D2PPRE2_MASK;
++      regval &= ~RCC_D2CFGR_D2PPRE1_MASK;
+       regval |= STM32_RCC_D2CFGR_D2PPRE1;
+       putreg32(regval, STM32_RCC_D2CFGR);
+ 
+diff --git a/arch/arm/src/stm32h7/stm32h7x7xx_rcc.c b/arch/arm/src/stm32h7/stm32h7x7xx_rcc.c
+--- a/arch/arm/src/stm32h7/stm32h7x7xx_rcc.c
++++ b/arch/arm/src/stm32h7/stm32h7x7xx_rcc.c
+@@ -741,7 +741,7 @@ static inline void stm32_stdclockconfig(void)
+       /* Set PCLK1 */
+ 
+       regval = getreg32(STM32_RCC_D2CFGR);
+-      regval &= ~RCC_D2CFGR_D2PPRE2_MASK;
++      regval &= ~RCC_D2CFGR_D2PPRE1_MASK;
+       regval |= STM32_RCC_D2CFGR_D2PPRE1;
+       putreg32(regval, STM32_RCC_D2CFGR);
+ 

@@ -48,6 +48,7 @@
 #include <nuttx/mutex.h>
 #include <nuttx/spi/spi.h>
 #include <nuttx/sensors/sensor.h>
+#include <arch/board/peripheral_health.h>
 
 #include "stm32_gpio.h"
 #include "fmuv6c.h"
@@ -183,6 +184,11 @@ struct icm42688_dev_s
   bool                      accel_en;
   bool                      gyro_en;
   bool                      streaming;  /* FIFO packet stream enabled */
+  unsigned                  health_index;
+  struct board_sensor_health_s health;
+  bool                      needs_config;
+  uint64_t                  next_recovery;
+  uint64_t                  next_check;
   uint64_t                  last_timestamp_q5;
   uint64_t                  sample_period_q5;
   uint64_t                  sample_count;
@@ -455,11 +461,6 @@ static int icm42688_configure(FAR struct icm42688_dev_s *dev)
     icm42688_check_bits(dev, ICM_REG_ACCEL_CONFIG1, 0x00, 0x18) &&
     icm42688_check_bits(dev, ICM_REG_TMST_CONFIG, 0x1d, 0x02);
 
-  /* Preserve the original registration gate: Step 1 reports the expanded
-   * configuration result, but only the FIFO/interrupt checks that already
-   * guarded registration are allowed to stop the driver.
-   */
-
   stream_verified =
     icm42688_check_bits(dev, ICM_REG_INT_CONFIG, 0x06, 0x01) &&
     icm42688_check_bits(dev, ICM_REG_FIFO_CONFIG, 0xc0, 0x00) &&
@@ -474,7 +475,7 @@ static int icm42688_configure(FAR struct icm42688_dev_s *dev)
 
   icm42688_log_config(dev, config_verified && stream_verified);
 
-  if (!stream_verified)
+  if (!config_verified || !stream_verified)
     {
       snerr("ERROR: ICM-42688 FIFO/interrupt configuration verification"
             " failed\n");
@@ -488,6 +489,8 @@ static int icm42688_configure(FAR struct icm42688_dev_s *dev)
 static void icm42688_fifo_flush(FAR struct icm42688_dev_s *dev)
 {
   irqstate_t flags;
+
+  dev->health.fifo_flushes++;
 
   icm42688_modify(dev, ICM_REG_SIGNAL_PATH_RESET, ICM_FIFO_FLUSH, 0x00);
   nxsig_usleep(1000);
@@ -715,6 +718,7 @@ static void icm42688_drain_fifo(FAR struct icm42688_dev_s *dev)
 
   if (count >= ICM_FIFO_HW_SIZE)
     {
+      dev->health.errors++;
       /* Overflow - discard and resync */
 
       icm42688_fifo_flush(dev);
@@ -851,9 +855,14 @@ static void icm42688_drain_fifo(FAR struct icm42688_dev_s *dev)
       uint16_t n = remaining > ICM_FIFO_MAX_READ ? ICM_FIFO_MAX_READ :
                                                    remaining;
       uint16_t decoded = 0;
-      bool accel_en = dev->accel_en;
-      bool gyro_en = dev->gyro_en;
+      bool accel_en;
+      bool gyro_en;
       int i;
+
+      nxmutex_lock(&dev->lock);
+      accel_en = dev->accel_en;
+      gyro_en = dev->gyro_en;
+      nxmutex_unlock(&dev->lock);
 
       icm42688_read_burst(dev, ICM_REG_FIFO_DATA, dev->fifobuf,
                           (size_t)n * ICM_FIFO_PACKET);
@@ -880,6 +889,7 @@ static void icm42688_drain_fifo(FAR struct icm42688_dev_s *dev)
           if (!icm42688_decode(dev, packet,
                                ts, decoded, accel_en, gyro_en))
             {
+              dev->health.errors++;
               /* Preserve the valid prefix just as per-sample publication did,
                * then flush and wait for the next watermark.
                */
@@ -890,6 +900,8 @@ static void icm42688_drain_fifo(FAR struct icm42688_dev_s *dev)
             }
 
           decoded++;
+          dev->health.samples++;
+          dev->health.last_sample_us = fmuv6c_imu_time_now();
           dev->last_timestamp_q5 = ts_q5;
 
           if (dev->drdy_gpio == 0)
@@ -943,6 +955,9 @@ static int icm42688_isr(int irq, FAR void *context, FAR void *arg)
 
   return OK;
 }
+
+static int icm42688_stream_start(FAR struct icm42688_dev_s *dev);
+static void icm42688_stream_stop(FAR struct icm42688_dev_s *dev);
 
 static int icm42688_thread(int argc, FAR char **argv)
 {
@@ -1000,10 +1015,75 @@ static int icm42688_thread(int argc, FAR char **argv)
             }
         }
 
+      bool wanted;
+      uint64_t now = fmuv6c_imu_time_now();
+      nxmutex_lock(&dev->lock);
+      wanted = dev->accel_en || dev->gyro_en;
+      nxmutex_unlock(&dev->lock);
+
+      if (!wanted && dev->streaming)
+        {
+          icm42688_stream_stop(dev);
+        }
+      else if (wanted && !dev->streaming && now >= dev->next_recovery)
+        {
+          int ret = OK;
+          if (dev->needs_config)
+            {
+              dev->health.recovery_attempts++;
+              ret = icm42688_configure(dev);
+            }
+          if (ret == OK) ret = icm42688_stream_start(dev);
+          dev->health.last_error = ret;
+          if (ret == OK)
+            {
+              if (dev->needs_config) dev->health.recoveries++;
+              dev->needs_config = false;
+              dev->next_check = fmuv6c_imu_time_now() + 100000;
+              dev->health.last_sample_us = 0;
+            }
+          else
+            {
+              dev->health.errors++;
+              dev->needs_config = true;
+              dev->next_recovery = fmuv6c_imu_time_now() + 1000000;
+            }
+        }
+
+      if (dev->streaming && now >= dev->next_check)
+        {
+          /* Timing/scale/stream corruption must not become plausible data.
+           * Runs only in this sensor's worker, never while holding a uORB
+           * or application mutex. Reconfigure this device only, at 1 Hz max.
+           */
+          bool healthy =
+            icm42688_read_reg(dev, ICM_REG_WHO_AM_I) == ICM_WHO_AM_I_VAL &&
+            icm42688_read_reg(dev, ICM_REG_PWR_MGMT0) == ICM_PWR_ALL_LOWNOISE &&
+            icm42688_read_reg(dev, ICM_REG_GYRO_CONFIG0) == 0x05 &&
+            icm42688_read_reg(dev, ICM_REG_ACCEL_CONFIG0) == 0x05 &&
+            icm42688_check_bits(dev, ICM_REG_TMST_CONFIG, 0x1d, 0x02) &&
+            icm42688_check_bits(dev, ICM_REG_FIFO_CONFIG1,
+              ICM_FIFO_WM_GT_TH | ICM_FIFO_CONFIG_BITS, 0x08);
+          bool stalled = dev->health.last_sample_us == 0 ||
+                         now - dev->health.last_sample_us > 100000;
+          dev->next_check = now + 100000;
+          if (!healthy || stalled)
+            {
+              dev->health.errors++;
+              if (!healthy) dev->health.checks_failed++;
+              dev->health.last_error = healthy ? -ETIMEDOUT : -EIO;
+              icm42688_stream_stop(dev);
+              dev->needs_config = true;
+              dev->next_recovery = now + 1000000;
+            }
+        }
+
       if (dev->streaming)
         {
           icm42688_drain_fifo(dev);
         }
+      dev->health.running = dev->streaming;
+      board_sensor_health_publish(dev->health_index, &dev->health);
     }
 
   return 0;
@@ -1109,11 +1189,8 @@ static int icm42688_activate(FAR struct sensor_lowerhalf_s *lower,
 {
   FAR struct icm42688_sensor_s *s = (FAR struct icm42688_sensor_s *)lower;
   FAR struct icm42688_dev_s *dev = s->dev;
-  int ret = OK;
 
   nxmutex_lock(&dev->lock);
-
-  bool was_idle = (!dev->accel_en && !dev->gyro_en);
 
   if (s == &dev->accel)
     {
@@ -1124,28 +1201,12 @@ static int icm42688_activate(FAR struct sensor_lowerhalf_s *lower,
       dev->gyro_en = enable;
     }
 
-  if (was_idle && (dev->accel_en || dev->gyro_en) && !dev->streaming)
-    {
-      ret = icm42688_stream_start(dev);
-      if (ret < 0)
-        {
-          if (s == &dev->accel)
-            {
-              dev->accel_en = false;
-            }
-          else
-            {
-              dev->gyro_en = false;
-            }
-        }
-    }
-  else if (!dev->accel_en && !dev->gyro_en && dev->streaming)
-    {
-      icm42688_stream_stop(dev);
-    }
-
   nxmutex_unlock(&dev->lock);
-  return ret;
+  /* Worker owns all stream/register transitions. Never hold dev->lock while
+   * push_event can acquire the upper-half lock held by this callback.
+   */
+  nxsem_post(&dev->run);
+  return OK;
 }
 
 static int icm42688_set_interval(FAR struct sensor_lowerhalf_s *lower,
@@ -1198,6 +1259,7 @@ int icm42688_register(FAR struct spi_dev_s *spi, int devno,
   dev->spi       = spi;
   dev->devid     = devid;
   dev->drdy_gpio = drdy_gpio;
+  dev->health_index = devno;
 
   dev->accel.dev            = dev;
   dev->accel.lower.ops      = &g_icm42688_ops;
@@ -1234,6 +1296,8 @@ int icm42688_register(FAR struct spi_dev_s *spi, int devno,
     }
 
   snprintf(arg1, sizeof(arg1), "%p", dev);
+  dev->health.registered = true;
+  board_sensor_health_publish(dev->health_index, &dev->health);
   argv[0] = arg1;
   argv[1] = NULL;
   ret = kthread_create(devno == 0 ? "icm42688-0" : "icm42688-1",
@@ -1250,6 +1314,9 @@ int icm42688_register(FAR struct spi_dev_s *spi, int devno,
   return OK;
 
 errout:
+  dev->health.registered = false;
+  dev->health.last_error = ret;
+  board_sensor_health_publish(dev->health_index, &dev->health);
   nxmutex_destroy(&dev->lock);
   nxsem_destroy(&dev->run);
   kmm_free(dev);

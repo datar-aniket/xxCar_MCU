@@ -1,0 +1,3 @@
+ifeq ($(CONFIG_XXCAR_DIAG),y)
+CONFIGURED_APPS += $(APPDIR)/xxcar/diag
+endif

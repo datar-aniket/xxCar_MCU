@@ -72,6 +72,10 @@ int rc_configure_port(int fd, uint8_t proto)
   cfmakeraw(&tio);
   tio.c_cflag &= ~(CSIZE | PARENB | PARODD | CSTOPB);
   tio.c_cflag |= CS8;
+  tio.c_cflag |= CLOCAL | CREAD;
+#ifdef CRTSCTS
+  tio.c_cflag &= ~CRTSCTS;
+#endif
 
   if (proto == RC_PROTO_SBUS)
     {
@@ -120,6 +124,7 @@ int rc_configure_port(int fd, uint8_t proto)
                  "CONFIG_STM32H7_USART_INVERT enabled?\n", errno);
           return -errno;
         }
+      return -errno; /* Cannot assume a previous RX inversion was cleared. */
     }
 
   tcflush(fd, TCIFLUSH);
@@ -162,11 +167,20 @@ static uint64_t rc_now_us(void)
 static int rc_ppm_daemon(int rcfd)
 {
   struct board_rc_ppm_frame_s frame;
+  struct rc_in_s held;
+  uint32_t last_attempts = 0;
   uint32_t last_sequence = 0;
-  uint64_t last_frame = 0;
+  uint64_t last_packet = 0;
+  bool have_valid = false;
+  bool link_ok = false;
+  int32_t channels = 8;
   int ret;
 
-  ret = board_matek_rc_ppm_start();
+  memset(&held, 0, sizeof(held));
+  held.source = RC_IN_SRC_PPM;
+
+  param_get_i32("RC_PPM_CH", &channels);
+  ret = board_matek_rc_ppm_start((unsigned)channels);
   if (ret < 0)
     {
       syslog(LOG_ERR, "rc: cannot capture PPM on R6/PC7: %d\n", ret);
@@ -183,46 +197,73 @@ static int rc_ppm_daemon(int rcfd)
     {
       memset(&frame, 0, sizeof(frame));
       if (board_matek_rc_ppm_latest(&frame) &&
-          frame.sequence != last_sequence)
+          frame.attempts != last_attempts)
         {
-          struct rc_in_s msg;
           unsigned i;
 
-          last_sequence = frame.sequence;
-          last_frame = frame.timestamp_us;
+          if (frame.sequence != last_sequence)
+            {
+              held.count = frame.count;
+              for (i = 0; i < frame.count; i++)
+                {
+                  held.channel[i] = frame.channel[i];
+                }
+
+              have_valid = true;
+              last_sequence = frame.sequence;
+              last_packet = rc_now_us();
+            }
+
+          last_attempts = frame.attempts;
+
+          /* frame.timestamp_us is the edge time from the dedicated TIM5
+           * sensor clock.  rc_in timestamps are consumed by the control
+           * router and its timeout logic in CLOCK_MONOTONIC.  Mixing the
+           * two made only PPM (not SBUS/CRSF) age, glitch, and eventually
+           * disarm as the clocks separated.
+           */
+
+          held.timestamp = last_packet;
+          held.frames = (uint16_t)frame.sequence;
+          held.lost_frames = (uint16_t)frame.errors;
+          held.ok = have_valid &&
+                    frame.invalid_streak < RC_INVALID_LIMIT &&
+                    rc_now_us() - last_packet < RC_TIMEOUT_US;
+          held.failsafe = false;
+          held.rssi = held.ok ? 255 : 0;
 
           pthread_mutex_lock(&g_lock);
           g_status.frames = frame.sequence;
+          g_status.last_valid_us = last_packet;
           g_status.errors = frame.errors;
-          g_status.ok = true;
+          g_status.lost_frames = (uint16_t)frame.errors;
+          g_status.invalid_streak = frame.invalid_streak;
+          g_status.ok = held.ok;
           g_status.failsafe = false;
-          g_status.last.count = frame.count;
+          g_status.last.count = held.count;
           g_status.last.failsafe = false;
-          g_status.last.frame_lost = false;
-          for (i = 0; i < frame.count; i++)
+          g_status.last.frame_lost = frame.invalid_streak != 0;
+          for (i = 0; i < held.count; i++)
             {
-              g_status.last.channel[i] = frame.channel[i];
+              g_status.last.channel[i] = held.channel[i];
             }
           pthread_mutex_unlock(&g_lock);
 
+          if (link_ok && !held.ok)
+            {
+              syslog(LOG_WARNING,
+                     "rc: R6 PPM lost after %u consecutive invalid frames\n",
+                     frame.invalid_streak);
+            }
+
+          link_ok = held.ok;
           if (rcfd >= 0)
             {
-              memset(&msg, 0, sizeof(msg));
-              msg.timestamp = frame.timestamp_us;
-              msg.count = frame.count;
-              msg.ok = true;
-              msg.frames = (uint16_t)frame.sequence;
-              msg.rssi = 255;
-              msg.source = RC_IN_SRC_PPM;
-              for (i = 0; i < frame.count; i++)
-                {
-                  msg.channel[i] = frame.channel[i];
-                }
-              rc_in_publish(rcfd, &msg);
+              rc_in_publish(rcfd, &held);
             }
         }
 
-      if (last_frame != 0 && rc_now_us() - last_frame > RC_TIMEOUT_US)
+      if (last_packet != 0 && rc_now_us() - last_packet > RC_TIMEOUT_US)
         {
           pthread_mutex_lock(&g_lock);
           if (g_status.ok)
@@ -232,12 +273,28 @@ static int rc_ppm_daemon(int rcfd)
             }
           g_status.ok = false;
           pthread_mutex_unlock(&g_lock);
+          if (held.ok)
+            {
+              held.ok = false;
+              held.rssi = 0;
+              if (rcfd >= 0)
+                {
+                  rc_in_publish(rcfd, &held);
+                }
+            }
+          link_ok = false;
         }
 
       usleep(2000);
     }
 
   board_matek_rc_ppm_stop();
+  held.ok = false;
+  held.rssi = 0;
+  if (rcfd >= 0) rc_in_publish(rcfd, &held);
+  pthread_mutex_lock(&g_lock);
+  g_status.ok = false;
+  pthread_mutex_unlock(&g_lock);
   return OK;
 }
 #endif
@@ -275,6 +332,7 @@ static bool rc_probe(int fd, uint8_t proto, FAR struct rc_frame_s *out)
 
       if (poll(&pfd, 1, 20) <= 0)
         {
+          rc_decoder_idle(&dec);
           continue;
         }
 
@@ -297,14 +355,17 @@ static int rc_daemon(int argc, FAR char *argv[])
 {
   struct rc_decoder_s dec;
   struct rc_frame_s frame;
+  struct rc_link_quality_s quality;
+  struct rc_in_s held;
   struct pollfd pfd;
-  uint64_t last_frame = 0;
   uint8_t proto;
   int rcfd;
   int fd;
 
   UNUSED(argc);
   UNUSED(argv);
+  memset(&held, 0, sizeof(held));
+  rc_link_quality_reset(&quality);
 
 #ifdef CONFIG_XXCAR_BOARD_MATEKH743
   if (g_proto_param == RC_PROT_PPM)
@@ -337,13 +398,19 @@ static int rc_daemon(int argc, FAR char *argv[])
   if (g_proto_param == RC_PROT_SBUS)
     {
       proto = RC_PROTO_SBUS;
-      rc_configure_port(fd, proto);
+      if (rc_configure_port(fd, proto) < 0)
+        {
+          goto config_failed;
+        }
       syslog(LOG_INFO, "rc: %s SBUS (forced)\n", g_devpath);
     }
   else if (g_proto_param == RC_PROT_CRSF)
     {
       proto = RC_PROTO_CRSF;
-      rc_configure_port(fd, proto);
+      if (rc_configure_port(fd, proto) < 0)
+        {
+          goto config_failed;
+        }
       syslog(LOG_INFO, "rc: %s CRSF (forced)\n", g_devpath);
     }
   else
@@ -388,6 +455,7 @@ static int rc_daemon(int argc, FAR char *argv[])
   pfd.fd     = fd;
   pfd.events = POLLIN;
 
+  uint64_t last_service = rc_now_us();
   while (!g_should_stop)
     {
       uint8_t buf[64];
@@ -395,44 +463,145 @@ static int rc_daemon(int argc, FAR char *argv[])
       int ret;
 
       ret = poll(&pfd, 1, 20);
+      uint64_t service = rc_now_us();
+      if (service - last_service >= RC_TIMEOUT_US)
+        {
+          /* UART bytes have no arrival timestamps. After task starvation,
+           * queued old channels must not be relabelled as fresh commands.
+           */
+          tcflush(fd, TCIFLUSH);
+          rc_decoder_idle(&dec);
+          quality.have_valid = false;
+          held.ok = false;
+          held.rssi = 0;
+          pthread_mutex_lock(&g_lock);
+          g_status.ok = false;
+          g_status.timeouts++;
+          pthread_mutex_unlock(&g_lock);
+          if (rcfd >= 0) rc_in_publish(rcfd, &held);
+          last_service = service;
+          continue;
+        }
+      last_service = service;
 
-      if (ret > 0)
+      if (ret == 0 && rc_decoder_idle(&dec))
+        {
+          rc_link_note_invalid(&quality, 1);
+        }
+
+      if (ret > 0 && (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)))
+        {
+          syslog(LOG_ERR, "rc: UART poll fault: %lx\n",
+                 (unsigned long)pfd.revents);
+          break;
+        }
+
+      if (ret > 0 && (pfd.revents & POLLIN))
         {
           n = read(fd, buf, sizeof(buf));
 
-          if (n > 0 && rc_decode(&dec, buf, (size_t)n, &frame))
+          /* Feed one byte at a time so every complete valid or rejected
+           * packet is observed in wire order. Feeding the whole read at once
+           * collapses multiple packets into one boolean result and can make
+           * an invalid streak depend on where the UART read was split.
+           */
+
+          for (ssize_t byte = 0; byte < n; byte++)
             {
-              struct rc_in_s msg;
-              unsigned i;
+              uint32_t errors_before = dec.errors;
 
-              last_frame = rc_now_us();
-
-              pthread_mutex_lock(&g_lock);
-              g_status.frames++;
-              g_status.errors   = dec.errors;
-              g_status.ok       = !frame.failsafe;
-              g_status.failsafe = frame.failsafe;
-              g_status.last     = frame;
-              pthread_mutex_unlock(&g_lock);
-
-              if (rcfd >= 0)
+              if (rc_decode(&dec, &buf[byte], 1, &frame))
                 {
-                  memset(&msg, 0, sizeof(msg));
-                  msg.timestamp = last_frame;
-                  msg.count     = frame.count;
-                  msg.ok        = !frame.failsafe;
-                  msg.failsafe  = frame.failsafe;
-                  msg.frames    = (uint16_t)g_status.frames;
-                  msg.rssi      = frame.failsafe ? 0 : 255;
-                  msg.source    = (proto == RC_PROTO_SBUS) ? RC_IN_SRC_SBUS
-                                                           : RC_IN_SRC_CRSF;
+                  bool packet_valid;
+                  bool link_ok;
+                  bool was_ok;
+                  uint32_t frames;
+                  unsigned i;
 
-                  for (i = 0; i < frame.count && i < RC_IN_MAX_CHANNELS; i++)
+                  packet_valid = !frame.failsafe && !frame.frame_lost;
+                  link_ok = rc_link_frame(&quality, &frame, rc_now_us());
+
+                  pthread_mutex_lock(&g_lock);
+                  was_ok = g_status.ok;
+                  g_status.frames++;
+                  frames = g_status.frames;
+                  g_status.errors = dec.errors;
+                  g_status.invalid_streak = quality.invalid_streak;
+                  g_status.ok = link_ok;
+                  g_status.failsafe = quality.failsafe;
+                  g_status.last_valid_us = quality.last_valid_us;
+                  g_status.lost_frames = quality.lost_frames;
+                  g_status.last = frame;
+                  pthread_mutex_unlock(&g_lock);
+
+                  if (packet_valid)
                     {
-                      msg.channel[i] = frame.channel[i];
+                      held.count = frame.count;
+                      for (i = 0;
+                           i < frame.count && i < RC_IN_MAX_CHANNELS;
+                           i++)
+                        {
+                          held.channel[i] = frame.channel[i];
+                        }
                     }
 
-                  rc_in_publish(rcfd, &msg);
+                  held.timestamp = quality.last_valid_us;
+                  held.ok = link_ok;
+                  held.failsafe = quality.failsafe;
+                  held.frames = (uint16_t)frames;
+                  held.lost_frames = quality.lost_frames;
+                  held.rssi = link_ok ? 255 : 0;
+                  held.source = (proto == RC_PROTO_SBUS) ? RC_IN_SRC_SBUS
+                                                         : RC_IN_SRC_CRSF;
+
+                  if (rcfd >= 0)
+                    {
+                      rc_in_publish(rcfd, &held);
+                    }
+
+                  if (was_ok && !link_ok)
+                    {
+                      syslog(LOG_WARNING,
+                             "rc: %s lost after %u consecutive invalid "
+                             "frames\n",
+                             g_devpath, quality.invalid_streak);
+                    }
+                }
+              else if (dec.errors != errors_before)
+                {
+                  bool link_ok;
+                  bool was_ok;
+
+                  rc_link_note_invalid(&quality, 1);
+                  link_ok = rc_link_ok(&quality, rc_now_us());
+                  pthread_mutex_lock(&g_lock);
+                  was_ok = g_status.ok;
+                  g_status.errors = dec.errors;
+                  g_status.lost_frames = quality.lost_frames;
+                  g_status.invalid_streak = quality.invalid_streak;
+                  g_status.ok = link_ok;
+                  g_status.failsafe = quality.failsafe;
+                  pthread_mutex_unlock(&g_lock);
+
+                  if (quality.have_valid)
+                    {
+                      held.ok = link_ok;
+                      held.failsafe = quality.failsafe;
+                      held.lost_frames = quality.lost_frames;
+                      held.rssi = link_ok ? 255 : 0;
+                      if (rcfd >= 0)
+                        {
+                          rc_in_publish(rcfd, &held);
+                        }
+                    }
+
+                  if (was_ok && !link_ok)
+                    {
+                      syslog(LOG_WARNING,
+                             "rc: %s lost after %u consecutive invalid "
+                             "frames\n",
+                             g_devpath, quality.invalid_streak);
+                    }
                 }
             }
         }
@@ -443,7 +612,7 @@ static int rc_daemon(int argc, FAR char *argv[])
        * goes quiet, so silence has to be treated as loss.
        */
 
-      if (last_frame != 0 && (rc_now_us() - last_frame) > RC_TIMEOUT_US)
+      if (!rc_link_ok(&quality, rc_now_us()))
         {
           pthread_mutex_lock(&g_lock);
 
@@ -454,14 +623,45 @@ static int rc_daemon(int argc, FAR char *argv[])
             }
 
           g_status.ok = false;
+          g_status.errors = dec.errors;
+          g_status.invalid_streak = quality.invalid_streak;
           pthread_mutex_unlock(&g_lock);
+          if (held.ok)
+            {
+              held.ok = false;
+              held.rssi = 0;
+              if (rcfd >= 0)
+                {
+                  rc_in_publish(rcfd, &held);
+                }
+            }
         }
     }
 
 out:
+  held.ok = false;
+  held.rssi = 0;
+  if (rcfd >= 0)
+    {
+      rc_in_publish(rcfd, &held);
+      orb_unadvertise(rcfd);
+    }
+  pthread_mutex_lock(&g_lock);
+  g_status.ok = false;
+  pthread_mutex_unlock(&g_lock);
   close(fd);
   g_running = false;
   return EXIT_SUCCESS;
+
+config_failed:
+  syslog(LOG_ERR, "rc: line configuration failed on %s\n", g_devpath);
+  if (rcfd >= 0)
+    {
+      orb_unadvertise(rcfd);
+    }
+  close(fd);
+  g_running = false;
+  return EXIT_FAILURE;
 }
 
 int rc_start(FAR const char *devpath, int32_t proto_param)

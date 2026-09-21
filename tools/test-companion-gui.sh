@@ -11,4 +11,5 @@
 # Skips cleanly when there is no display.
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+python3 "$REPO/tests/companion_sync_test.py"
 exec python3 "$REPO/tests/companion_gui_test.py"

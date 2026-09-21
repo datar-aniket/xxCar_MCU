@@ -18,6 +18,7 @@
 #include <nuttx/signal.h>
 #include <nuttx/i2c/i2c_master.h>
 #include <nuttx/sensors/sensor.h>
+#include <arch/board/peripheral_health.h>
 
 #include "fmuv6c.h"
 #include "dps368.h"
@@ -71,6 +72,9 @@ struct dps368_dev_s
   mutex_t lock;
   sem_t run;
   bool enabled;
+  struct board_sensor_health_s health;
+  uint64_t next_recovery;
+  unsigned failures;
 };
 
 static int dps_transfer(FAR struct dps368_dev_s *dev, uint8_t reg,
@@ -132,8 +136,11 @@ static int dps_configure(FAR struct dps368_dev_s *dev)
   nxsig_usleep(12000);
   for (retry = 0; retry < 20; retry++)
     {
-      if (dps_transfer(dev, DPS_REG_MEAS_CFG, &status, 1) >= 0 &&
-          (status & DPS_READY_MASK) == DPS_READY_MASK)
+      if (dps_transfer(dev, DPS_REG_MEAS_CFG, &status, 1) < 0)
+        {
+          return -EIO; /* Do not multiply a bus timeout by twenty retries. */
+        }
+      if ((status & DPS_READY_MASK) == DPS_READY_MASK)
         {
           break;
         }
@@ -173,10 +180,20 @@ static int dps_configure(FAR struct dps368_dev_s *dev)
     }
 
   sninfo("DPS368 ID=%02x configured 32 Hz, 16x oversampling\n", id);
+  if (dps_transfer(dev, DPS_REG_PRS_CFG, &status, 1) < 0 ||
+      status != DPS_RATE_32_OSR_16 ||
+      dps_transfer(dev, DPS_REG_TMP_CFG, &status, 1) < 0 ||
+      status != (DPS_RATE_32_OSR_16 | dev->cal.temp_source) ||
+      dps_transfer(dev, DPS_REG_CFG, &status, 1) < 0 ||
+      (status & DPS_SHIFT_PT) != DPS_SHIFT_PT)
+    {
+      dev->health.checks_failed++;
+      return -EIO;
+    }
   return OK;
 }
 
-static void dps_sample(FAR struct dps368_dev_s *dev)
+static int dps_sample(FAR struct dps368_dev_s *dev)
 {
   struct sensor_baro baro;
   uint8_t buf[6];
@@ -186,11 +203,22 @@ static void dps_sample(FAR struct dps368_dev_s *dev)
   float p;
   float t;
 
-  if (dps_transfer(dev, DPS_REG_MEAS_CFG, &ready, 1) < 0 ||
-      (ready & DPS_DATA_READY_MASK) != DPS_DATA_READY_MASK ||
-      dps_transfer(dev, DPS_REG_PRESS, buf, sizeof(buf)) < 0)
+  if (dps_transfer(dev, DPS_REG_MEAS_CFG, &ready, 1) < 0)
     {
-      return;
+      return -EIO;
+    }
+  if ((ready & 7) != DPS_CONTINUOUS_PT)
+    {
+      dev->health.checks_failed++;
+      return -EIO;
+    }
+  if ((ready & DPS_DATA_READY_MASK) != DPS_DATA_READY_MASK)
+    {
+      return -EAGAIN;
+    }
+  if (dps_transfer(dev, DPS_REG_PRESS, buf, sizeof(buf)) < 0)
+    {
+      return -EIO;
     }
 
   raw_p = dps_sign_extend(((uint32_t)buf[0] << 16) |
@@ -213,7 +241,11 @@ static void dps_sample(FAR struct dps368_dev_s *dev)
       baro.temperature >= -40.0f && baro.temperature <= 120.0f)
     {
       dev->lower.push_event(dev->lower.priv, &baro, sizeof(baro));
+      dev->health.samples++;
+      dev->health.last_sample_us = fmuv6c_imu_time_now();
+      return OK;
     }
+  return -ERANGE;
 }
 
 static int dps_thread(int argc, FAR char **argv)
@@ -223,15 +255,62 @@ static int dps_thread(int argc, FAR char **argv)
 
   for (; ; )
     {
-      if (!dev->enabled)
+      bool enabled;
+      uint32_t interval;
+      nxmutex_lock(&dev->lock);
+      enabled = dev->enabled;
+      interval = dev->interval;
+      nxmutex_unlock(&dev->lock);
+      if (!enabled)
         {
+          dev->health.running = false;
+          board_sensor_health_publish(BOARD_HEALTH_BARO, &dev->health);
           nxsem_wait(&dev->run);
         }
 
-      nxsig_usleep(dev->interval);
-      if (dev->enabled)
+      nxsig_usleep(interval);
+      nxmutex_lock(&dev->lock);
+      enabled = dev->enabled;
+      nxmutex_unlock(&dev->lock);
+      if (enabled)
         {
-          dps_sample(dev);
+          int ret = dps_sample(dev);
+          uint64_t now = fmuv6c_imu_time_now();
+          dev->health.running = true;
+          if (ret == OK)
+            {
+              dev->failures = 0;
+              dev->health.last_error = 0;
+            }
+          else if (ret != -EAGAIN)
+            {
+              dev->failures++;
+              dev->health.errors++;
+              dev->health.last_error = ret;
+            }
+          if ((dev->failures >= 3 ||
+               now - dev->health.last_sample_us > 1000000) &&
+              now >= dev->next_recovery)
+            {
+              dev->health.recovery_attempts++;
+#ifdef CONFIG_I2C_RESET
+              /* This instance owns the onboard barometer bus. Never touch
+               * the separate external I2C1 bus while recovering I2C2.
+               */
+              if (dev->failures >= 3) I2C_RESET(dev->i2c);
+#endif
+              ret = dps_configure(dev);
+              if (ret == OK) dev->health.recoveries++;
+              dev->health.last_error = ret;
+              dev->failures = 0;
+              dev->next_recovery = fmuv6c_imu_time_now() + 1000000;
+            }
+          board_sensor_health_publish(BOARD_HEALTH_BARO, &dev->health);
+        }
+      else
+        {
+          dev->health.running = false;
+          board_sensor_health_publish(BOARD_HEALTH_BARO, &dev->health);
         }
     }
 
@@ -266,7 +345,9 @@ static int dps_set_interval(FAR struct sensor_lowerhalf_s *lower,
       *period_us = DPS_MIN_INTERVAL_US;
     }
 
+  nxmutex_lock(&dev->lock);
   dev->interval = *period_us;
+  nxmutex_unlock(&dev->lock);
   return OK;
 }
 
@@ -310,6 +391,9 @@ int dps368_register(FAR struct i2c_master_s *i2c, int devno, uint8_t addr)
     }
 
   snprintf(arg1, sizeof(arg1), "%p", dev);
+  dev->health.registered = true;
+  dev->next_recovery = fmuv6c_imu_time_now() + 1000000;
+  board_sensor_health_publish(BOARD_HEALTH_BARO, &dev->health);
   argv[0] = arg1;
   argv[1] = NULL;
   ret = kthread_create("dps368", FMUV6C_SENSOR_PRIO, 2048,
@@ -323,6 +407,9 @@ int dps368_register(FAR struct i2c_master_s *i2c, int devno, uint8_t addr)
   return OK;
 
 fail:
+  dev->health.registered = false;
+  dev->health.last_error = ret;
+  board_sensor_health_publish(BOARD_HEALTH_BARO, &dev->health);
   nxmutex_destroy(&dev->lock);
   nxsem_destroy(&dev->run);
   kmm_free(dev);

@@ -872,15 +872,22 @@ int stm32_bringup(void)
 #endif
 
 #ifdef CONFIG_XXCAR_PPS
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+  /* S3 is reserved for servos even when steering is disabled. The new
+   * PA8/TIM1 capture port is deferred; a stored PPS_EN must not remux S3.
+   */
+
+  if (param_i32("PPS_EN") != 0)
+    {
+      syslog(LOG_WARNING,
+             "[pps] deferred: Matek PA8/TIM1 port pending; S3 is servo-only\n");
+    }
+#else
   /* Hardware input capture observes PPS without stepping the monotonic
    * estimator clock or UTC.
    */
 
-  if (param_i32("PPS_EN") != 0
-#ifdef CONFIG_XXCAR_BOARD_MATEKH743
-      && param_i32("STEER_OUT_SRC") != 1
-#endif
-     )
+  if (param_i32("PPS_EN") != 0)
     {
       ret = pps_start();
       if (ret < 0 && ret != -EALREADY)
@@ -891,21 +898,11 @@ int stm32_bringup(void)
       else
         {
           syslog(LOG_INFO,
-#ifdef CONFIG_XXCAR_BOARD_MATEKH743
-                 "[pps] S1 PA0/TIM5_CH1 capture ready\n"
-#else
                  "[pps] TELEM2 CTS PC9/TIM3_CH4 capture ready\n"
-#endif
                  );
         }
     }
-#ifdef CONFIG_XXCAR_BOARD_MATEKH743
-  else if (param_i32("PPS_EN") != 0 && param_i32("STEER_OUT_SRC") == 1)
-    {
-      syslog(LOG_WARNING,
-             "[pps] disabled: Matek S1 is selected for steering PWM\n");
-    }
-#endif
+#endif /* CONFIG_XXCAR_BOARD_MATEKH743 */
 #endif
 
 #ifdef CONFIG_XXCAR_COMPANION

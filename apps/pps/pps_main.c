@@ -43,7 +43,11 @@ static void pps_print_status(void)
   now_us = fmuv6c_imu_time_now();
   age_us = s.last_edge_us == 0 ? 0 : now_us - s.last_edge_us;
 
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+  printf("pps: %s, PA8/TIM1 migration deferred; S3 reserved for servos\n",
+#else
   printf("pps: %s, TELEM2 CTS PC9/TIM3_CH4 rising edge, 1 MHz\n",
+#endif
          s.running ? pps_state_name(s.state) : "stopped");
   if (!s.running)
     {
@@ -92,6 +96,9 @@ int main(int argc, FAR char *argv[])
         }
       else if (ret < 0)
         {
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+          printf("pps: unavailable until PA8/TIM1 migration is implemented\n");
+#endif
           printf("pps: start failed: %d\n", ret);
           return 1;
         }

@@ -40,18 +40,38 @@ struct board_rc_ppm_frame_s
 {
   uint16_t channel[BOARD_RC_PPM_MAX_CHANNELS];
   uint64_t timestamp_us;
+  uint32_t attempts;
   uint32_t sequence;
   uint32_t errors;
+  uint8_t  invalid_streak;
   uint8_t  count;
 };
 
-int  board_matek_s1_pwm_start(uint16_t rate_hz, uint16_t neutral_us);
-int  board_matek_s1_pwm_set(uint16_t pulse_us, uint16_t neutral_us);
-bool board_matek_s1_pwm_healthy(void);
+#define BOARD_MATEK_PWM_CHANNELS 8
+struct board_matek_pwm_status_s
+{
+  uint32_t period_us;
+  uint32_t timeouts;
+  uint16_t pulse_us[BOARD_MATEK_PWM_CHANNELS];
+  int last_error;
+  uint8_t mask;
+  bool healthy;
+};
+/* Bit 0 is physical S1. Unselected pads stay GPIO-low. One caller owns the
+ * whole vector; all configured channels must be refreshed together.
+ */
+int board_matek_pwm_start(uint16_t rate_hz, uint8_t mask,
+                         const uint16_t neutral[BOARD_MATEK_PWM_CHANNELS]);
+int board_matek_pwm_set(const uint16_t pulse[BOARD_MATEK_PWM_CHANNELS],
+                       const uint16_t neutral[BOARD_MATEK_PWM_CHANNELS]);
+void board_matek_pwm_stop(void);
+void board_matek_pwm_status(struct board_matek_pwm_status_s *status);
+bool board_matek_steering_pwm_healthy(void);
 
-int  board_matek_rc_ppm_start(void);
+int  board_matek_rc_ppm_start(unsigned channels);
 void board_matek_rc_ppm_stop(void);
 bool board_matek_rc_ppm_latest(struct board_rc_ppm_frame_s *frame);
+void board_matek_pins_initialize(void);
 #  endif
 #endif
 
@@ -481,6 +501,10 @@ bool board_matek_rc_ppm_latest(struct board_rc_ppm_frame_s *frame);
 
 /* Alternate function pin selections ****************************************/
 
+#ifdef CONFIG_XXCAR_BOARD_MATEKH743
+#  include "matekh743_pins.h"
+#else
+
 /* ADC */
 
 #define GPIO_ADC12_INP5   GPIO_ADC12_INP5_0                      /* PB1, channel 5 */
@@ -528,19 +552,11 @@ bool board_matek_rc_ppm_latest(struct board_rc_ppm_frame_s *frame);
 /* USART1 = GPS1 */
 
 #define GPIO_USART1_RX    (GPIO_USART1_RX_2 | GPIO_SPEED_100MHz) /* PA10 */
-#ifdef CONFIG_XXCAR_BOARD_MATEKH743
-#  define GPIO_USART1_TX  (GPIO_USART1_TX_2 | GPIO_SPEED_100MHz) /* PA9 */
-#else
-#  define GPIO_USART1_TX  (GPIO_USART1_TX_3 | GPIO_SPEED_100MHz) /* PB6 */
-#endif
+#define GPIO_USART1_TX    (GPIO_USART1_TX_3 | GPIO_SPEED_100MHz) /* PB6 */
 
 /* USART2 = TELEM3 */
 
-#ifdef CONFIG_XXCAR_BOARD_MATEKH743
-#  define GPIO_USART2_RX  (GPIO_USART2_RX_2 | GPIO_SPEED_100MHz) /* PD6 */
-#else
-#  define GPIO_USART2_RX  (GPIO_USART2_RX_1 | GPIO_SPEED_100MHz) /* PA3 */
-#endif
+#define GPIO_USART2_RX    (GPIO_USART2_RX_1 | GPIO_SPEED_100MHz) /* PA3 */
 #define GPIO_USART2_TX    (GPIO_USART2_TX_2 | GPIO_SPEED_100MHz) /* PD5 */
 
 /* USART3 = FMU DEBUG connector */
@@ -551,15 +567,9 @@ bool board_matek_rc_ppm_latest(struct board_rc_ppm_frame_s *frame);
 #define DMAMAP_USART3_RX DMAMAP_DMA12_USART3RX_0
 #define DMAMAP_USART3_TX DMAMAP_DMA12_USART3TX_1
 
-#ifdef CONFIG_XXCAR_BOARD_MATEKH743
-/* UART4 = spare/debug pads */
-#  define GPIO_UART4_RX   (GPIO_UART4_RX_3 | GPIO_SPEED_100MHz) /* PB8 */
-#  define GPIO_UART4_TX   (GPIO_UART4_TX_3 | GPIO_SPEED_100MHz) /* PB9 */
-#else
 /* UART5 = TELEM2 */
-#  define GPIO_UART5_RX   (GPIO_UART5_RX_3 | GPIO_SPEED_100MHz) /* PD2 */
-#  define GPIO_UART5_TX   (GPIO_UART5_TX_3 | GPIO_SPEED_100MHz) /* PC12 */
-#endif
+#define GPIO_UART5_RX     (GPIO_UART5_RX_3 | GPIO_SPEED_100MHz) /* PD2 */
+#define GPIO_UART5_TX     (GPIO_UART5_TX_3 | GPIO_SPEED_100MHz) /* PC12 */
 
 /* USART6 = link to the PX4IO co-processor (STM32F103).
  *
@@ -600,11 +610,7 @@ bool board_matek_rc_ppm_latest(struct board_rc_ppm_frame_s *frame);
  */
 
 #define DMAMAP_USART2_RX  DMAMAP_DMA12_USART2RX_1  /* DMA2 */
-#ifdef CONFIG_XXCAR_BOARD_MATEKH743
-#  define DMAMAP_UART4_RX DMAMAP_DMA12_UART4RX_1   /* DMA2 - TELEM2 */
-#else
-#  define DMAMAP_UART5_RX DMAMAP_DMA12_UART5RX_1   /* DMA2 - TELEM2 */
-#endif
+#define DMAMAP_UART5_RX   DMAMAP_DMA12_UART5RX_1   /* DMA2 - TELEM2 */
 
 #define DMAMAP_USART6_RX  DMAMAP_DMA12_USART6RX_0  /* DMA1:71 */
 #define DMAMAP_USART6_TX  DMAMAP_DMA12_USART6TX_0  /* DMA1:72 */
@@ -624,11 +630,7 @@ bool board_matek_rc_ppm_latest(struct board_rc_ppm_frame_s *frame);
 
 /* I2C1 - external / expansion bus */
 
-#ifdef CONFIG_XXCAR_BOARD_MATEKH743
-#  define GPIO_I2C1_SCL   (GPIO_I2C1_SCL_1 | GPIO_SPEED_50MHz) /* PB6 */
-#else
-#  define GPIO_I2C1_SCL   (GPIO_I2C1_SCL_2 | GPIO_SPEED_50MHz) /* PB8 */
-#endif
+#define GPIO_I2C1_SCL     (GPIO_I2C1_SCL_2 | GPIO_SPEED_50MHz) /* PB8 */
 #define GPIO_I2C1_SDA     (GPIO_I2C1_SDA_1 | GPIO_SPEED_50MHz) /* PB7 */
 
 /* I2C2 - external I2C connector (PB10/PB11) */
@@ -649,14 +651,7 @@ bool board_matek_rc_ppm_latest(struct board_rc_ppm_frame_s *frame);
 
 #define GPIO_SPI1_SCK     (GPIO_SPI1_SCK_1  | GPIO_SPEED_50MHz) /* PA5 */
 #define GPIO_SPI1_MISO    (GPIO_SPI1_MISO_1 | GPIO_SPEED_50MHz) /* PA6 */
-#ifdef CONFIG_XXCAR_BOARD_MATEKH743
-#  define GPIO_SPI1_MOSI  (GPIO_SPI1_MOSI_3 | GPIO_SPEED_50MHz) /* PD7 */
-#  define GPIO_SPI4_SCK   (GPIO_SPI4_SCK_1  | GPIO_SPEED_50MHz) /* PE12 */
-#  define GPIO_SPI4_MISO  (GPIO_SPI4_MISO_1 | GPIO_SPEED_50MHz) /* PE13 */
-#  define GPIO_SPI4_MOSI  (GPIO_SPI4_MOSI_1 | GPIO_SPEED_50MHz) /* PE14 */
-#else
-#  define GPIO_SPI1_MOSI  (GPIO_SPI1_MOSI_1 | GPIO_SPEED_50MHz) /* PA7 */
-#endif
+#define GPIO_SPI1_MOSI    (GPIO_SPI1_MOSI_1 | GPIO_SPEED_50MHz) /* PA7 */
 
 /* TIM1 - Advanced Timer 16-bit (4 channels) */
 #define GPIO_TIM1_CH1IN   (GPIO_TIM1_CH1IN_2)   /* PE9  */
@@ -731,6 +726,8 @@ bool board_matek_rc_ppm_latest(struct board_rc_ppm_frame_s *frame);
 #define GPIO_OTGFS_DM  (GPIO_OTGFS_DM_0  | GPIO_SPEED_100MHz)
 #define GPIO_OTGFS_DP  (GPIO_OTGFS_DP_0  | GPIO_SPEED_100MHz)
 #define GPIO_OTGFS_ID  (GPIO_OTGFS_ID_0  | GPIO_SPEED_100MHz)
+
+#endif /* CONFIG_XXCAR_BOARD_MATEKH743 */
 
 /* DMA **********************************************************************/
 

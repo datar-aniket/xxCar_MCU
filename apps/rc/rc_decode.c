@@ -116,8 +116,9 @@ static bool sbus_frame(FAR const uint8_t *f, FAR struct rc_frame_s *out)
    * data, and the "frame" is garbage.
    */
 
-  if (f[24] != 0x00 && f[24] != 0x04 && f[24] != 0x14 &&
-      f[24] != 0x24 && f[24] != 0x34)
+  if ((f[SBUS_FLAGS_BYTE] & 0xf0) != 0 ||
+      (f[24] != 0x00 && f[24] != 0x04 && f[24] != 0x14 &&
+       f[24] != 0x24 && f[24] != 0x34))
     {
       return false;
     }
@@ -146,6 +147,23 @@ void rc_decoder_reset(FAR struct rc_decoder_s *d, uint8_t proto)
 {
   memset(d, 0, sizeof(*d));
   d->proto = proto;
+}
+
+/* Called after an observed empty UART poll, NOT a scheduling gap between
+ * reads. Buffered UART data does not carry wire timestamps in this driver.
+ */
+
+bool rc_decoder_idle(FAR struct rc_decoder_s *d)
+{
+  if (d->nbuf == 0)
+    {
+      return false;
+    }
+
+  d->nbuf = 0;
+  d->want = 0;
+  d->errors++;
+  return true;
 }
 
 bool rc_decode(FAR struct rc_decoder_s *d, FAR const uint8_t *data, size_t len,
@@ -190,6 +208,18 @@ bool rc_decode(FAR struct rc_decoder_s *d, FAR const uint8_t *data, size_t len,
               /* Synchronised on a 0x0f that was really channel data. */
 
               d->errors++;
+              /* Preserve a possible real header inside the rejected
+               * candidate instead of throwing away the start of that frame.
+               */
+              for (unsigned start = 1; start < SBUS_FRAME_SIZE; start++)
+                {
+                  if (d->buf[start] == SBUS_START_BYTE)
+                    {
+                      d->nbuf = SBUS_FRAME_SIZE - start;
+                      memmove(d->buf, d->buf + start, d->nbuf);
+                      break;
+                    }
+                }
             }
         }
       else if (d->proto == RC_PROTO_CRSF)
@@ -219,6 +249,7 @@ bool rc_decode(FAR struct rc_decoder_s *d, FAR const uint8_t *data, size_t len,
               if (ch < 2 || ch > CRSF_PAYLOAD_MAX + 2)
                 {
                   d->nbuf = 0;
+                  d->errors++;
                   continue;
                 }
 
@@ -285,4 +316,59 @@ bool rc_decode(FAR struct rc_decoder_s *d, FAR const uint8_t *data, size_t len,
     }
 
   return got;
+}
+
+void rc_link_quality_reset(FAR struct rc_link_quality_s *quality)
+{
+  memset(quality, 0, sizeof(*quality));
+}
+
+bool rc_link_note_valid(FAR struct rc_link_quality_s *quality)
+{
+  quality->have_valid = true;
+  quality->invalid_streak = 0;
+  quality->failsafe = false;
+  return true;
+}
+
+bool rc_link_note_invalid(FAR struct rc_link_quality_s *quality,
+                          unsigned count)
+{
+  unsigned streak;
+
+  quality->lost_frames = (uint16_t)(quality->lost_frames + count);
+  streak = (unsigned)quality->invalid_streak + count;
+  quality->invalid_streak = streak > UINT8_MAX ? UINT8_MAX : (uint8_t)streak;
+
+  return quality->have_valid &&
+         !quality->failsafe && quality->invalid_streak < RC_INVALID_LIMIT;
+}
+
+bool rc_link_ok(FAR const struct rc_link_quality_s *quality, uint64_t now)
+{
+  return quality->have_valid && !quality->failsafe &&
+         quality->invalid_streak < RC_INVALID_LIMIT &&
+         now >= quality->last_valid_us &&
+         now - quality->last_valid_us < RC_TIMEOUT_US;
+}
+
+bool rc_link_frame(FAR struct rc_link_quality_s *quality,
+                   FAR const struct rc_frame_s *frame, uint64_t now)
+{
+  if (frame->failsafe || frame->frame_lost)
+    {
+      rc_link_note_invalid(quality, 1);
+      /* Explicit receiver failsafe is immediate and stays latched through
+       * corrupt/frame-lost packets. Only a good channel frame clears it.
+       */
+
+      quality->failsafe |= frame->failsafe;
+    }
+  else
+    {
+      rc_link_note_valid(quality);
+      quality->last_valid_us = now;
+    }
+
+  return rc_link_ok(quality, now);
 }

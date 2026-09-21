@@ -209,6 +209,8 @@ static int rc_do_status(void)
         {
           printf("  decoder errors=%" PRIu32 " timeouts=%" PRIu32 "\n",
                  s.errors, s.timeouts);
+          printf("  invalid streak=%u/%u\n", s.invalid_streak,
+                 RC_INVALID_LIMIT);
         }
 
       return 0;
@@ -235,6 +237,8 @@ static int rc_do_status(void)
   printf("  frames    %" PRIu32 "\n", s.frames);
   printf("  errors    %" PRIu32 "\n", s.errors);
   printf("  timeouts  %" PRIu32 "\n", s.timeouts);
+  printf("  invalid   %u/%u consecutive\n", s.invalid_streak,
+         RC_INVALID_LIMIT);
 
   for (i = 0; i < s.last.count; i++)
     {

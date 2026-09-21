@@ -183,6 +183,112 @@ static void test_extreme_remote_epoch_is_safely_slewed(void)
   assert(clock.rate_ppb == COMP_CLOCK_MAX_SLEW_PPB);
 }
 
+static void test_large_measured_rate_and_delayed_end(void)
+{
+  /* Bench reproduced approximately +2600 ppm UTC/TIM5. Old +/-1000 ppm
+   * bound reset every fit and left the age growing despite repeated syncs.
+   * END arrives 0.4 s after the selected exchange, with alternating delay.
+   */
+  for (int sign = -1; sign <= 1; sign += 2)
+    {
+      struct comp_clock_s c;
+      const int64_t offset = 1700000000000000ll;
+      const uint64_t start = 1000000;
+      uint64_t before, after, back;
+      comp_clock_init(&c);
+      assert(comp_clock_observe_sync_at(&c, start, offset, start + 400000) == COMP_CLOCK_SYNC_FIRST);
+      for (unsigned i = 1; i <= 20; i++)
+        {
+          uint64_t sample = start + (uint64_t)i * 30000000;
+          uint64_t apply = sample + (i % 2 ? 400000 : 80000);
+          int64_t observed = offset + sign * (int64_t)i * 78000;
+          assert(comp_clock_to_utc(&c, apply, &before));
+          assert(comp_clock_observe_sync_at(&c, sample, observed, apply) == COMP_CLOCK_SYNC_UPDATED);
+          assert(comp_clock_to_utc(&c, apply, &after));
+          assert(before == after);
+          assert_near(c.base_rate_ppb, sign * 2600000, 1);
+          assert(comp_clock_from_utc(&c, after, &back));
+          assert_near(back, apply, 1);
+        }
+      assert(c.rejected_observations == 0);
+      assert_near(c.last_phase_error_us, 0, 5);
+      assert_near(c.rate_ppb, sign * 2600000, 200);
+      assert(comp_clock_observe_sync_at(&c, start, offset, start - 1) == COMP_CLOCK_SYNC_REJECTED);
+    }
+}
+
+static void test_prompt_acquisition_corrects_phase_once(void)
+{
+  for (int sign = -1; sign <= 1; sign += 2)
+    {
+      struct comp_clock_s c;
+      const uint64_t t0 = 1000000;
+      const int64_t offset = 1700000000000000ll;
+      uint64_t before, after, mono;
+      comp_clock_init(&c);
+      assert(comp_clock_observe_sync_at(&c, t0, offset, t0 + 300000) == COMP_CLOCK_SYNC_FIRST);
+      assert(!c.rate_acquired);
+      /* Prompt followup: both signs of the bench's 2600 ppm rate error. */
+      uint64_t sample = t0 + 1600000;
+      uint64_t apply = sample + 300000;
+      assert(comp_clock_to_utc(&c, apply, &before));
+      assert(comp_clock_observe_sync_at(&c, sample, offset + sign * 4160,
+                                        apply) == COMP_CLOCK_SYNC_ACQUIRED);
+      assert(comp_clock_to_utc(&c, apply, &after));
+      assert_near((int64_t)after, offset + (int64_t)apply + sign * 4940, 1);
+      assert_near((int64_t)after - (int64_t)before, sign * 4940, 1);
+      assert_near(c.acquisition_step_us, sign * 4940, 1);
+      assert(c.rate_acquired && c.last_phase_error_us == 0);
+      assert_near(c.rate_ppb, sign * 2600000, 1);
+      assert(comp_clock_from_utc(&c, after, &mono));
+      assert_near(mono, apply, 1);
+      /* Already aligned immediately, not 1-2 minutes later. */
+      assert(comp_clock_to_utc(&c, apply + 1000000, &after));
+      assert_near((int64_t)after, offset + (int64_t)apply + 1000000 + sign * 7540, 1);
+      /* Subsequent noisy measurement cannot phase-step or reacquire. */
+      sample += 1600000;
+      apply = sample + 80000;
+      assert(comp_clock_to_utc(&c, apply, &before));
+      assert(comp_clock_observe_sync_at(&c, sample, offset + sign * 8320 + 100,
+                                        apply) == COMP_CLOCK_SYNC_UPDATED);
+      assert(comp_clock_to_utc(&c, apply, &after));
+      assert(before == after);
+      assert_near(c.acquisition_step_us, sign * 4940, 1);
+    }
+}
+
+static void test_short_slew_expires_before_next_slow_sync(void)
+{
+  for (int sign = -1; sign <= 1; sign += 2)
+    {
+      struct comp_clock_s c;
+      uint64_t utc, earlier, mono;
+      const uint64_t start = 1000000;
+      const int64_t offset = 1700000000000000ll;
+      comp_clock_init(&c);
+      assert(comp_clock_observe_sync(&c, start, offset) == COMP_CLOCK_SYNC_FIRST);
+      assert(comp_clock_observe_sync(&c, start + 1600000, offset + 4160) == COMP_CLOCK_SYNC_ACQUIRED);
+      assert(comp_clock_observe_sync(&c, start + 3200000, offset + 8320 + sign * 160) == COMP_CLOCK_SYNC_UPDATED);
+      assert(c.slew_duration_us == 1600000);
+      uint64_t end = c.mono_anchor_us + c.slew_duration_us;
+      assert(comp_clock_rate_at(&c, end - 1) == c.rate_ppb);
+      assert(comp_clock_rate_at(&c, end) == c.base_rate_ppb);
+      assert(comp_clock_to_utc(&c, end, &earlier));
+      assert(comp_clock_to_utc(&c, end + 30000000, &utc));
+      assert_near((int64_t)(utc - earlier), 30000000 + c.base_rate_ppb * 30 / 1000, 1);
+      /* Both sides of the rate transition must be continuous/invertible. */
+      for (int64_t d = -5; d <= 5; d++)
+        {
+          assert(comp_clock_to_utc(&c, end + d, &utc));
+          assert(comp_clock_from_utc(&c, utc, &mono));
+          assert_near(mono, end + d, 2);
+        }
+      assert(comp_clock_to_utc(&c, end + 30000000, &utc));
+      assert(comp_clock_from_utc(&c, utc, &mono));
+      assert_near(mono, end + 30000000, 2);
+    }
+}
+
 int main(void)
 {
   test_seed_and_inverse();
@@ -191,6 +297,9 @@ int main(void)
   test_host_clock_step_is_bounded_and_continuous();
   test_phase_adjustment_is_continuous();
   test_extreme_remote_epoch_is_safely_slewed();
+  test_large_measured_rate_and_delayed_end();
+  test_prompt_acquisition_corrects_phase_once();
+  test_short_slew_expires_before_next_slow_sync();
   puts("comp_clock: affine UTC rate, inverse and no-jump updates - OK");
   return 0;
 }

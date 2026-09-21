@@ -78,6 +78,14 @@
 
 #define RC_TIMEOUT_US       100000
 
+/* Do not turn an isolated corrupt packet into an RC-loss/disarm event. A good
+ * packet resets the streak; the tenth consecutive invalid packet declares the
+ * link lost. Silence is handled independently by RC_TIMEOUT_US because no
+ * packet exists to count when a receiver is unplugged.
+ */
+
+#define RC_INVALID_LIMIT    10
+
 /****************************************************************************
  * Public Types
  ****************************************************************************/
@@ -103,6 +111,15 @@ struct rc_decoder_s
   uint32_t errors;  /* frames rejected: bad CRC, or framing that did not hold */
 };
 
+struct rc_link_quality_s
+{
+  uint64_t last_valid_us;
+  uint16_t lost_frames;
+  uint8_t  invalid_streak;
+  bool     have_valid;
+  bool     failsafe;
+};
+
 /****************************************************************************
  * Public Function Prototypes
  ****************************************************************************/
@@ -113,8 +130,17 @@ struct rc_decoder_s
  */
 
 void rc_decoder_reset(FAR struct rc_decoder_s *d, uint8_t proto);
+bool rc_decoder_idle(FAR struct rc_decoder_s *d);
 bool rc_decode(FAR struct rc_decoder_s *d, FAR const uint8_t *data, size_t len,
                FAR struct rc_frame_s *out);
+
+void rc_link_quality_reset(FAR struct rc_link_quality_s *quality);
+bool rc_link_note_valid(FAR struct rc_link_quality_s *quality);
+bool rc_link_note_invalid(FAR struct rc_link_quality_s *quality,
+                          unsigned count);
+bool rc_link_ok(FAR const struct rc_link_quality_s *quality, uint64_t now);
+bool rc_link_frame(FAR struct rc_link_quality_s *quality,
+                   FAR const struct rc_frame_s *frame, uint64_t now);
 
 /* Put a port into a protocol's line settings: baud, parity, stop bits and -
  * for SBUS - RX signal inversion.
@@ -142,6 +168,9 @@ struct rc_status_s
   uint32_t frames;        /* good frames decoded */
   uint32_t errors;        /* frames rejected (bad CRC / bad framing) */
   uint32_t timeouts;      /* times the link went quiet */
+  uint64_t last_valid_us; /* MONOTONIC; never refreshed by rejected data */
+  uint16_t lost_frames;
+  uint8_t  invalid_streak; /* consecutive rejected/lost packets */
   struct rc_frame_s last;
 };
 

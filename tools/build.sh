@@ -93,6 +93,12 @@ if [ "${RECONFIGURE:-0}" = "1" ] || [ ! -f .config ] || \
     kconfig-tweak --disable CONFIG_UART5_RXDMA
     kconfig-tweak --enable CONFIG_STM32H7_UART4
     kconfig-tweak --enable CONFIG_UART4_RXDMA
+    # Device-only USB must not remux PA10 (USART1 RX) to OTG ID.
+    kconfig-tweak --enable CONFIG_OTG_ID_GPIO_DISABLE
+    # FMUv6C uses USART6 RX DMA for its 1.5 Mbaud PX4IO link. On Matek this
+    # same peripheral is the dynamically formatted/inverted R6 receiver UART;
+    # keep it interrupt-driven, matching Matek's reference USART6 NODMA map.
+    kconfig-tweak --disable CONFIG_USART6_RXDMA
     kconfig-tweak --disable CONFIG_XXCAR_PX4IO
     kconfig-tweak --enable CONFIG_STM32H7_SDMMC1
     kconfig-tweak --disable CONFIG_STM32H7_SDMMC2
@@ -113,7 +119,30 @@ if [ "${RECONFIGURE:-0}" = "1" ] || [ ! -f .config ] || \
   fi
 fi
 
+# Apply the USB pin fix to existing same-board configurations too. This
+# changes only the required option, preserving other local configuration.
+if [ "$BOARD" = "matekh743" ] && \
+   ! grep -q '^CONFIG_OTG_ID_GPIO_DISABLE=y$' .config; then
+  kconfig-tweak --enable CONFIG_OTG_ID_GPIO_DISABLE
+  make olddefconfig
+fi
+
 echo ">> building"
+# Regenerate the app Kconfig index before enabling newly added diagnostics.
+make -C "$REPO/apps" TOPDIR="$NUTTX" \
+  APPDIR="$REPO/deps/nuttx-apps" preconfig >/dev/null
+if ! grep -q '^CONFIG_XXCAR_DIAG=y$' .config; then
+  kconfig-tweak --enable CONFIG_XXCAR_DIAG
+  make olddefconfig
+fi
+if [ "$BOARD" = "matekh743" ]; then
+  I2C_TICK_US="$(sed -n 's/^CONFIG_USEC_PER_TICK=//p' .config)"
+  I2C_TIMEOUT_TICKS=$(( (50000 + I2C_TICK_US - 1) / I2C_TICK_US ))
+  kconfig-tweak --set-val CONFIG_STM32H7_I2CTIMEOMS 50
+  kconfig-tweak --set-val CONFIG_STM32H7_I2CTIMEOTICKS "$I2C_TIMEOUT_TICKS"
+  kconfig-tweak --enable CONFIG_I2C_RESET
+  make olddefconfig
+fi
 make -j"$(nproc)"
 
 echo ">> packaging .px4 (board_id $BOARD_ID)"

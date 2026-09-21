@@ -35,6 +35,10 @@ MSG_TIMESYNC_REQ = 3
 MSG_TIMESYNC_REP = 4
 MSG_TIMESYNC_START = 5
 MSG_TIMESYNC_END = 6
+MSG_TIMESYNC_END2 = 10
+# Keep acquiring rate promptly instead of waiting 30 s after a two-point fit.
+TIMESYNC_ACQUIRE_INTERVAL_S = 1.2
+TIMESYNC_ACQUIRE_BURSTS = 6
 MSG_DIRECT_CONTROL = 7
 MSG_DATUM_RESET = 8
 MSG_LINK_TEST_REQ = 9
@@ -107,6 +111,7 @@ TIMESYNC_REQ = struct.Struct("<Q")
 TIMESYNC_REP = struct.Struct("<QQQ")
 TIMESYNC_START = struct.Struct("<II")
 TIMESYNC_END = struct.Struct("<qII")
+TIMESYNC_END2 = struct.Struct("<qIIQ")
 
 assert TIMESYNC_REQ.size == 8, TIMESYNC_REQ.size
 assert TIMESYNC_REP.size == 24, TIMESYNC_REP.size
@@ -121,6 +126,7 @@ PAYLOAD_LEN = {
     MSG_TIMESYNC_REP: TIMESYNC_REP.size,
     MSG_TIMESYNC_START: TIMESYNC_START.size,
     MSG_TIMESYNC_END: TIMESYNC_END.size,
+    MSG_TIMESYNC_END2: TIMESYNC_END2.size,
     MSG_DIRECT_CONTROL: DIRECT_CONTROL.size,
     MSG_DATUM_RESET: DATUM_RESET.size,
 }
@@ -387,13 +393,16 @@ def encode_timesync_start(count: int) -> bytes:
 
 
 def encode_timesync_end(utc_offset_us: int, trip_us: int,
-                        samples: int) -> bytes:
+                        samples: int, sample_mono_us=None) -> bytes:
     """utc_offset_us: observed UTC minus board TIM5 at this sync.
 
     The board uses the first observation for absolute phase. Later calls
     estimate the affine clock rate and slew residual phase without stepping
     corrected UTC.
     """
+    if sample_mono_us is not None:
+        return encode(MSG_TIMESYNC_END2, TIMESYNC_END2.pack(
+            int(utc_offset_us), int(trip_us), int(samples), int(sample_mono_us)))
     return encode(MSG_TIMESYNC_END,
                   TIMESYNC_END.pack(int(utc_offset_us), int(trip_us),
                                     int(samples)))
@@ -611,6 +620,10 @@ class Link(threading.Thread):
     def send(self, frame: bytes):
         try:
             with self._tx_lock:
+                # A timestamped frame must be built AFTER acquiring the
+                # lock, otherwise a concurrent write contaminates its RTT.
+                if callable(frame):
+                    frame = frame()
                 written = self.ser.write(frame)
             if written != len(frame):
                 raise IOError(f"short serial write {written}/{len(frame)}")
@@ -620,6 +633,16 @@ class Link(threading.Thread):
         except Exception as exc:
             self.out.put(("error", f"write failed: {exc}"))
             return False
+
+    def send_timesync(self, utc):
+        stamp = None
+
+        def build():
+            nonlocal stamp
+            stamp = utc.now_us()
+            return encode_timesync_req(stamp)
+
+        return stamp if self.send(build) else None
 
     def close(self):
         self.stop_flag.set()

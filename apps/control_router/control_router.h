@@ -37,6 +37,7 @@ struct control_router_status_s
   uint32_t publish_errors;
   uint32_t arm_success;
   uint32_t arm_refused;
+  int last_arm_error;
   uint32_t disarms;
   uint32_t rc_losses;
   uint32_t auto_stale;
