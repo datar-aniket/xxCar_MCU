@@ -319,8 +319,8 @@ hardware timer.
 
 ### rc_status
 
-The final four bytes carry raw operator inputs and the state actually selected
-by the safety router without increasing the 96-byte packet size:
+The `rc_status` word at offset 92 carries raw operator inputs and the state
+actually selected by the safety router:
 
 | Bits | Meaning |
 |---|---|
@@ -407,9 +407,9 @@ modes, front offset to the front servo and rear to the rear. They are nudge
 switches, not knobs: each engaging edge steps the accumulated offset by
 `VESC_TRIM_STEP` us, repeating while held, bounded to ±300 us. The live
 offsets are folded into `VESC_STEER_OFS` / `REAR_ST_OFS` and saved every time
-the vehicle disarms, if they changed; `vesc trim save` does the same by hand. If RC is stale or
-in failsafe the offsets freeze where they are rather than stepping or
-resetting.
+the vehicle disarms, if they changed; `vesc trim save` does the same by hand.
+If RC is stale or in failsafe the offsets freeze where they are rather than
+stepping or resetting.
 
 All state-message scalars default to **1.0**, so until the vehicle is
 characterised these carry raw amps, raw volts and raw tachometer counts per
