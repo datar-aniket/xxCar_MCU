@@ -1,8 +1,24 @@
-# Pixhawk 6C main (if00)
-ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyACM*", ENV{ID_VENDOR_ID}=="3162", ENV{ID_MODEL_ID}=="0053", ENV{ID_USB_INTERFACE_NUM}=="00", SYMLINK+="pixhawk_6c", MODE="0666", GROUP="dialout"
+# Holybro Pixhawk 6C running the xxCar application, plus its PX4 bootloader.
+#
+# Match ID_USB_INTERFACE_NUM rather than ttyACM0/ttyACM1: those kernel numbers
+# are allocation order, not durable identities.
+#
+# ModemManager must be kept away from these ports. It tags every new ttyACM as
+# a modem candidate, then writes AT probe strings into the NSH console ("nsh:
+# AT#PORTCFG?: command not found") and holds the port open while probing, which
+# can also steal the few-second bootloader window during a flash.
 
-# Pixhawk 6C secondary (if02)
-ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyACM*", ENV{ID_VENDOR_ID}=="3162", ENV{ID_MODEL_ID}=="0053", ENV{ID_USB_INTERFACE_NUM}=="02", SYMLINK+="pixhawk_6c_io", MODE="0666", GROUP="dialout"
+# --- application: VID 3162 / PID 0053 -------------------------------------
+# CDC interface 00: USB0, NSH console by default.
+ACTION=="add|change", SUBSYSTEM=="tty", KERNEL=="ttyACM*", ENV{ID_VENDOR_ID}=="3162", ENV{ID_MODEL_ID}=="0053", ENV{ID_USB_INTERFACE_NUM}=="00", SYMLINK+="pixhawk_6c pixhawk_6c_usb0", GROUP="dialout", MODE="0660", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1", ENV{ID_MM_PORT_IGNORE}="1", ENV{ID_MM_CANDIDATE}=""
 
-# Pixhawk 6C PX4
-ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyACM*", ENV{ID_VENDOR_ID}=="3185", ENV{ID_MODEL_ID}=="0038", ENV{ID_USB_INTERFACE_NUM}=="00", SYMLINK+="pixhawk_6c", MODE="0666", GROUP="dialout"
+# CDC interface 02: USB1, CAL/companion I/O.
+ACTION=="add|change", SUBSYSTEM=="tty", KERNEL=="ttyACM*", ENV{ID_VENDOR_ID}=="3162", ENV{ID_MODEL_ID}=="0053", ENV{ID_USB_INTERFACE_NUM}=="02", SYMLINK+="pixhawk_6c_io pixhawk_6c_usb1", GROUP="dialout", MODE="0660", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1", ENV{ID_MM_PORT_IGNORE}="1", ENV{ID_MM_CANDIDATE}=""
+
+# --- bootloader: VID 3185 / PID 0038 -------------------------------------
+# Also aliased to /dev/pixhawk_6c so tools/flash.sh finds one stable path.
+ACTION=="add|change", SUBSYSTEM=="tty", KERNEL=="ttyACM*", ENV{ID_VENDOR_ID}=="3185", ENV{ID_MODEL_ID}=="0038", ENV{ID_USB_INTERFACE_NUM}=="00", SYMLINK+="pixhawk_6c", GROUP="dialout", MODE="0660", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1", ENV{ID_MM_PORT_IGNORE}="1", ENV{ID_MM_CANDIDATE}=""
+
+# --- belt-and-braces: ignore the whole composite device, not just the ports --
+ACTION=="add|change", SUBSYSTEM=="usb", ATTR{idVendor}=="3162", ATTR{idProduct}=="0053", ENV{ID_MM_DEVICE_IGNORE}="1"
+ACTION=="add|change", SUBSYSTEM=="usb", ATTR{idVendor}=="3185", ATTR{idProduct}=="0038", ENV{ID_MM_DEVICE_IGNORE}="1"
