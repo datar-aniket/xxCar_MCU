@@ -449,9 +449,8 @@ def decode_vehicle_state(payload: bytes) -> dict:
         "accel": f[15:18],             # body, m/s^2, gravity removed
         "wheel_torque_nm": f[18],
         "steering_angle": f[19],
-        # Scaled by VESC_STATE_K. At its default 1.0 this is raw filtered
-        # tachometer counts/s; it is m/s only when that parameter is the
-        # calibrated count-rate-to-speed factor.
+        # Motor ERPM scaled by VESC_STATE_K (1.0 = ERPM). The legacy field
+        # name does not imply m/s without a calibrated m/s-per-ERPM factor.
         "motor_speed_ms": f[20],
         "solution_status": f[21],
         "reset_counter": f[22],

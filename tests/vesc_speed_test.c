@@ -343,6 +343,11 @@ static void test_rejects_backwards_time(void)
 
 int main(void)
 {
+  assert(CLOSE(vesc_speed_erpm(0.0f), 0.0f));
+  assert(CLOSE(vesc_speed_erpm(12.0f), 120.0f));
+  assert(CLOSE(vesc_speed_erpm(-600.0f), -6000.0f));
+  /* A previously calibrated 0.01 m/s per count/s becomes 0.001 per ERPM. */
+  assert(CLOSE(vesc_speed_erpm(2000.0f) * 0.001f, 20.0f));
   test_first_reading_is_zero();
   test_dt_seeded_from_nominal();
   test_converges();

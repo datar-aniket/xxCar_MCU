@@ -236,7 +236,7 @@ struct comp_vehicle_state_s
 
   float    wheel_torque_nm;   /* 76: VESC current x VESC_TORQUE_K */
   float    steering_angle;    /* 80: VESC ADC x K, or mapped sent command */
-  float    motor_speed_ms;    /* 84: tachometer rate x VESC_STATE_K */
+  float    motor_speed_ms;    /* 84: motor ERPM x VESC_STATE_K */
 
   uint8_t  solution_status;   /* 88: ESTIMATOR_* validity bits */
   uint8_t  reset_counter;     /* 89: estimator reset generation */

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Host-side estimation of VESC_SPEED_K, the tachometer-to-velocity scale.
+"""Host-side estimation of VESC_SPEED_K, the motor-ERPM-to-velocity scale.
 
 The fit itself is a through-origin least squares of the estimator's forward
-speed against the tachometer rate.  Through the origin because zero counts
+speed against motor ERPM. Through the origin because zero rotation
 MUST mean zero velocity: a fitted intercept would be a standing speed offset
 at a standstill, which is not a thing a wheel can measure, and allowing one
 lets a biased sample set trade slope against it and land on neither.
@@ -108,10 +108,10 @@ def usable(sample: dict) -> bool:
 
 
 def fit(pairs) -> WheelFit:
-    """pairs: iterable of (tachometer_rate, forward_speed_ms).
+    """pairs: iterable of (motor_erpm, forward_speed_ms).
 
     The state-message rate is multiplied by VESC_STATE_K, so calibrate with
-    that parameter at 1.0 and the rate is raw counts per second. Calibrating
+    that parameter at 1.0 and the rate is motor ERPM. Calibrating
     against an already-scaled reading gives a correction rather than the
     actual VESC_SPEED_K, which is a good way to apply the same factor twice.
     """

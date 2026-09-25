@@ -213,7 +213,8 @@ def encode_state(sample):
         sample["solution_status"],
         0,                                 # reset counter
         sample["source_valid"],
-        0)                                  # packed RC/control status
+        0,                                  # packed RC/control status
+        0.0)                                # rear steering angle
     return ("frame", (comp_link.MSG_VEHICLE_STATE, payload, 0))
 
 

@@ -323,7 +323,7 @@ hardware timer.
 | 64 | `float32[3]` | `accel` | body FLU | m/s², gravity removed |
 | 76 | `float32` | `wheel_torque_nm` | — | Nm |
 | 80 | `float32` | `steering_angle` | — | selected steering feedback |
-| 84 | `float32` | `motor_speed_ms` | — | tachometer rate × `VESC_STATE_K` |
+| 84 | `float32` | `motor_speed_ms` | — | motor ERPM × `VESC_STATE_K` |
 | 88 | `uint8` | `solution_status` | — | bits below |
 | 89 | `uint8` | `reset_counter` | — | estimator reset generation |
 | 90 | `uint8` | `source_valid` | — | which inputs were fresh |
@@ -406,7 +406,7 @@ raw 9.8 m/s² as vehicle acceleration.
 | `wheel_torque_nm` | `vesc_status.current_a` | `VESC_TORQUE_K` | 1.0 |
 | `steering_angle`, `STEER_FB_SRC=0` | `vesc_status.adc_volts` | `VESC_STEER_K` | 1.0 |
 | `steering_angle`, `STEER_FB_SRC=1` | last servo pulse sent to VESC | 1000–2000 us → -0.5–+0.5 | — |
-| `motor_speed_ms` | tachometer rate | `VESC_STATE_K` | 1.0 |
+| `motor_speed_ms` | motor ERPM (filtered counts/s × 10) | `VESC_STATE_K` | 1.0 |
 | (filter cutoff) | — | `VESC_SPD_LPF` | 100 Hz |
 | (expected telemetry rate) | — | `VESC_TLM_HZ` | 400 Hz |
 
@@ -427,25 +427,36 @@ linearly to -100–+100 us. If RC is stale, in failsafe, or CH7 is unavailable,
 its contribution is zero.
 
 All state-message scalars default to **1.0**, so until the vehicle is
-characterised these carry raw amps, raw volts and raw tachometer counts per
-second. `VESC_SPEED_K` is separate and is used only by the EKF's internal
+characterised these carry raw amps, raw volts and motor ERPM.
+`VESC_SPEED_K` is separate and is used only by the EKF's internal
 wheel-velocity fusion. This allows the EKF to use calibrated m/s while the
-state message continues to carry the raw filtered rate with
+state message continues to carry filtered ERPM with
 `VESC_STATE_K=1.0`.
 
-The raw rate is tachometer counts/s, not literal ERPM. The VESC tachometer
-uses six counts per electrical revolution, so ERPM is counts/s × 10. Set
-`VESC_STATE_K=10.0` when literal ERPM is required on the state link.
+The VESC tachometer uses six counts per electrical revolution, so
+`ERPM = counts/s / 6 * 60 = counts/s * 10`. This conversion now happens
+**before both** `VESC_STATE_K` and `VESC_SPEED_K`. No pole-count setting is
+needed for electrical RPM. Internal `speed_cps` and `EK3_ZUPT_CPS` remain
+counts/s, so stopped detection is unchanged.
+
+**Upgrade note:** the packet layout and legacy `motor_speed_ms` name are
+unchanged, but its default units changed from counts/s to ERPM. Update host
+consumers together with firmware. Divide previously calibrated `VESC_SPEED_K`
+by **10** to preserve ground speed. Likewise divide an old `VESC_STATE_K` by
+10 only if preserving its previous physical output units; use **1.0** for
+ERPM (an old value of 10 used for ERPM must become 1). Stored multipliers are
+not automatically migrated. Save the revised values and reboot safely before
+using wheel fusion or autonomy; otherwise existing calibration gives 10x speed.
 
 #### Calibrating `VESC_SPEED_K`
 
 `tools/wheel_cal.py <port>` estimates it from a drive: it collects
 `VEHICLE_STATE` frames for 60 s and fits the estimator's forward speed
-against the tachometer rate, through the origin, because zero counts must
+against motor ERPM, through the origin, because zero rotation must
 mean zero velocity.
 
 ```
-param set VESC_STATE_K 1.0     # expose raw counts/s to the calibration tool
+param set VESC_STATE_K 1.0     # expose ERPM to the calibration tool
 param save                     # then reboot
 python3 tools/wheel_cal.py /dev/pixhawk_6c --seconds 60
 ```

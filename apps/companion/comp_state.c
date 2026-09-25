@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "comp_state.h"
+#include "../vesc/vesc_speed.h"
 
 /* Body-to-nav rotation from a quaternion.
  *
@@ -190,7 +191,8 @@ void comp_state_build(FAR const struct comp_state_inputs_s *in,
   if (in->vesc_valid)
     {
       out->wheel_torque_nm = in->current_a * in->torque_k;
-      out->motor_speed_ms = in->motor_counts_per_s * in->state_speed_k;
+      out->motor_speed_ms = vesc_speed_erpm(in->motor_counts_per_s) *
+                            in->state_speed_k;
       out->source_valid |= COMP_SRC_VESC;
     }
 

@@ -967,7 +967,7 @@ class App(tk.Tk):
             text=(f"torque {pose['wheel_torque_nm']:+7.3f} Nm    "
                   f"steer F/R {pose['steering_angle']:+7.3f}/"
                   f"{pose['steering_angle_rear']:+7.3f}    "
-                  f"motor rate {pose['motor_speed_ms']:+10.3f} state-units"))
+                  f"motor ERPM x K {pose['motor_speed_ms']:+10.3f}"))
 
         # The solution's own timestamp, and how stale it is by the time it
         # got here. Age needs the offset - it is the difference between two

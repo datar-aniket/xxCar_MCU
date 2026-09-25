@@ -55,6 +55,16 @@
 
 #define VESC_SPEED_MAX_FS_FRACTION 0.4f
 
+/* VESC tacho: six counts per electrical revolution, sixty seconds/minute.
+ * Keep the raw count-rate topic for diagnostics/ZUPT; convert before either
+ * user speed multiplier. No motor pole-count assumption is needed for ERPM.
+ */
+
+static inline float vesc_speed_erpm(float counts_per_second)
+{
+  return counts_per_second * (60.0f / 6.0f);
+}
+
 struct vesc_speed_s
 {
   bool     primed;

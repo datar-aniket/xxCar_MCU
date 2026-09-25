@@ -425,9 +425,16 @@ static void test_build_scalars(void)
 
   assert(CLOSE(out.wheel_torque_nm, 6.0f));
   assert(CLOSE(out.steering_angle, 16.5f));
-  assert(CLOSE(out.motor_speed_ms, 2.0f));
+  assert(CLOSE(out.motor_speed_ms, 20.0f));
   assert((out.source_valid & COMP_SRC_VESC) != 0);
   assert((out.source_valid & COMP_SRC_STEERING) != 0);
+
+  in.state_speed_k = 1.0f;
+  comp_state_build(&in, 0, &out);
+  assert(CLOSE(out.motor_speed_ms, 20000.0f));
+  in.motor_counts_per_s = -2000.0f;
+  comp_state_build(&in, 0, &out);
+  assert(CLOSE(out.motor_speed_ms, -20000.0f));
 }
 
 static void test_sent_servo_feedback(void)

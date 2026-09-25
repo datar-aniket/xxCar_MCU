@@ -27,6 +27,7 @@
 #include "ekf_extnav_time.h"
 #include "ekf_wheel.h"
 #include "../param/param.h"
+#include "../vesc/vesc_speed.h"
 #include "../uorb_msgs/uorb_msgs.h"
 #include "../../boards/fmuv6c/src/fmuv6c.h"
 
@@ -1093,7 +1094,7 @@ static void drain_wheel(int sub, FAR struct ekf3_status_s *status)
       return;
     }
 
-  speed_mps = wheel.speed_cps * status->wheel_speed_k;
+  speed_mps = vesc_speed_erpm(wheel.speed_cps) * status->wheel_speed_k;
   status->wheel_speed_mps = speed_mps;
 
   if (!ekf_wheel_accel_update(&g_wheel_accel_filter, speed_mps,

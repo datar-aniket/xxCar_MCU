@@ -237,7 +237,7 @@ struct vehicle_state_tx_s
   float    accel[3];              /*  88: body FLU, gravity removed, m/s^2 */
   float    wheel_torque_nm;       /* 100 */
   float    steering_angle;        /* 104 */
-  float    motor_speed_ms;        /* 108: rate x VESC_STATE_K */
+  float    motor_speed_ms;        /* 108: motor ERPM x VESC_STATE_K */
   uint32_t rc_status;             /* 112: exact packed wire value */
   uint8_t  solution_status;       /* 116 */
   uint8_t  reset_counter;         /* 117 */

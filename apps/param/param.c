@@ -925,9 +925,9 @@ static const struct param_def_s g_params[] =
   { "STEER_FB_SRC", PARAM_TYPE_INT32, I32(0), I32(0), I32(1),
     "Feedback: 0 VESC ADC, 1 sent servo command", PARAM_RANGE_ENUM },
   { "VESC_SPEED_K", PARAM_TYPE_FLOAT, F32(1.0f), F32(-1000.0f), F32(1000.0f),
-    "Tachometer rate to EKF ground speed (m/s per count/s)" },
+    "Motor ERPM to EKF ground speed (m/s per ERPM)" },
   { "VESC_STATE_K", PARAM_TYPE_FLOAT, F32(1.0f), F32(-1000.0f),
-    F32(1000.0f), "Tachometer rate scale in VEHICLE_STATE" },
+    F32(1000.0f), "Motor ERPM scale in VEHICLE_STATE (1 = ERPM)" },
 
   /* Motor speed filtering, applied in the VESC daemon on every STATUS_5.
    *

@@ -210,8 +210,11 @@ metrics and the number of blocked wheel-stop fusion attempts.
 ### Moving wheel odometry
 
 Set the active source set's `EK3_SRCn_VELXY` to 7 only after calibrating
-`VESC_SPEED_K`. A value of 1.0 normally still means raw tachometer counts per
-second, not metres per second, and would make the observation invalid.
+`VESC_SPEED_K` in m/s per ERPM. The filtered tachometer counts/s are multiplied
+by 10 to obtain ERPM before applying this parameter. A value of 1.0 means
+ERPM numerically, not calibrated metres per second. When upgrading from the
+count-rate convention, divide the existing calibrated multiplier by 10 before
+enabling fusion. `EK3_ZUPT_CPS` remains in counts/s and needs no conversion.
 `VESC_STATE_K` is independent and affects only the companion
 `VEHICLE_STATE` field; changing it cannot change EKF propagation or wheel
 fusion.
