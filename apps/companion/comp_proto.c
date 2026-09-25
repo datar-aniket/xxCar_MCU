@@ -155,11 +155,42 @@ static float half_to_float(uint16_t half)
   return value;
 }
 
+/* Duty must lie within the format's -1..+1. Current only has to be finite:
+ * it is clamped to VESC_CUR_MAX afterwards rather than refused. Both are
+ * tests that a NaN fails; see the comment on comp_direct_control_accept().
+ */
+
+static bool motor_in_range(float motor, bool current)
+{
+  if (current)
+    {
+      return isfinite(motor);
+    }
+
+  return motor >= -COMP_DIRECT_DUTY_MAX && motor <= COMP_DIRECT_DUTY_MAX;
+}
+
+float comp_current_clamp(float amps, float current_max)
+{
+  if (amps > current_max)
+    {
+      return current_max;
+    }
+
+  if (amps < -current_max)
+    {
+      return -current_max;
+    }
+
+  return amps;
+}
+
 bool comp_control_trajectory_decode(FAR const uint8_t *payload, size_t len,
+                                    float current_max,
                                     FAR struct comp_control_trajectory_s *out)
 {
   size_t controls_offset;
-  float limit;
+  bool current;
   uint8_t horizon;
   unsigned i;
 
@@ -192,8 +223,7 @@ bool comp_control_trajectory_decode(FAR const uint8_t *payload, size_t len,
     }
 
   controls_offset = COMP_TRAJ_DATA_OFS + (size_t)horizon * 2u * sizeof(float);
-  limit = out->control_method == COMP_THROTTLE_CURRENT ?
-          COMP_DIRECT_CURRENT_MAX : COMP_DIRECT_DUTY_MAX;
+  current = out->control_method == COMP_THROTTLE_CURRENT;
 
   for (i = 0; i < horizon; i++)
     {
@@ -211,10 +241,15 @@ bool comp_control_trajectory_decode(FAR const uint8_t *payload, size_t len,
             out->controls[i][0] <= COMP_DIRECT_STEER_MAX) ||
           !(out->controls[i][1] >= -COMP_DIRECT_STEER_MAX &&
             out->controls[i][1] <= COMP_DIRECT_STEER_MAX) ||
-          !(out->controls[i][2] >= -limit &&
-            out->controls[i][2] <= limit))
+          !motor_in_range(out->controls[i][2], current))
         {
           return false;
+        }
+
+      if (current)
+        {
+          out->controls[i][2] = comp_current_clamp(out->controls[i][2],
+                                                    current_max);
         }
     }
 
@@ -227,9 +262,10 @@ bool comp_control_trajectory_decode(FAR const uint8_t *payload, size_t len,
  * wire to the motor.
  */
 
-bool comp_direct_control_valid(FAR const struct comp_direct_control_s *cmd)
+bool comp_direct_control_accept(FAR struct comp_direct_control_s *cmd,
+                                float current_max)
 {
-  float limit;
+  bool current;
 
   if (cmd == NULL)
     {
@@ -242,10 +278,9 @@ bool comp_direct_control_valid(FAR const struct comp_direct_control_s *cmd)
       return false;
     }
 
-  limit = cmd->throttle_type == COMP_THROTTLE_CURRENT ?
-          COMP_DIRECT_CURRENT_MAX : COMP_DIRECT_DUTY_MAX;
+  current = cmd->throttle_type == COMP_THROTTLE_CURRENT;
 
-  if (!(cmd->throttle >= -limit && cmd->throttle <= limit))
+  if (!motor_in_range(cmd->throttle, current))
     {
       return false;
     }
@@ -260,6 +295,11 @@ bool comp_direct_control_valid(FAR const struct comp_direct_control_s *cmd)
         cmd->delta_rear <= COMP_DIRECT_STEER_MAX))
     {
       return false;
+    }
+
+  if (current)
+    {
+      cmd->throttle = comp_current_clamp(cmd->throttle, current_max);
     }
 
   return true;

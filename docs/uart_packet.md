@@ -660,7 +660,7 @@ time, `dt` is invalid, or any pose/control is non-finite or out of range.
 `control_method` uses the board actuator enum:
 
 - `0`: both steering values −1..+1 and duty −1..+1.
-- `1`: both steering values −1..+1 and current −50..+50 A.
+- `1`: both steering values −1..+1 and any finite current, clamped to ±`VESC_CUR_MAX` A.
 
 ```python
 frame = comp_link.encode_control_trajectory(
@@ -682,7 +682,7 @@ autonomous input; `CONTROL_TRAJ` carries a complete non-actuating plan.
 |---|---|---|---|
 | 0 | `uint64` | `timestamp_us` | UTC microseconds, when the companion sent it |
 | 8 | `float32` | `steering` | −1.0 … +1.0, left positive |
-| 12 | `float32` | `throttle` | duty −1.0 … +1.0, or amps −50.0 … +50.0 |
+| 12 | `float32` | `throttle` | duty −1.0 … +1.0, or amps (clamped to ±`VESC_CUR_MAX`) |
 | 16 | `uint8` | `throttle_type` | 0 = duty, 1 = current |
 | 17 | `uint8[7]` | `pad` | zero |
 | 24 | `float32` | `delta_rear` | −1.0 … +1.0, left positive |
@@ -710,17 +710,24 @@ wrong way round and "20 amps" arrives as "duty 20", which clamps to full
 throttle; the numbering is shared precisely so there is no translation step
 to get backwards.
 
-### Range is rejected, not clamped
+### Duty and steering are rejected; current is clamped
 
-The limits in the table above are what the **format** can mean. A value
-outside them is dropped and counted in `rx_direct_invalid`, because it says
-the sender is wrong about the units or the mode, and clamping would turn that
-into a command that looks deliberate. `NaN` and infinity are rejected the same
-way.
+Steering and duty are bounded by what the **format** can mean. A value
+outside them is dropped and counted in `rx_direct_invalid`
+(`rx_trajectory_invalid` for `CONTROL_TRAJ`), because it says the sender is
+wrong about the units or the mode, and clamping would turn that into a command
+that looks deliberate.
 
-The vehicle's real ceilings are `VESC_DUTY_MAX` (0.30 by default) and
-`VESC_CUR_MAX` (20 A), applied by the control router afterwards. A legal 50 A
-command on the wire still becomes 20 A at the motor.
+Current is always clamped to the board's `VESC_CUR_MAX` parameter (20 A by
+default), the same ceiling the control router and the VESC command stage
+apply: a 30 A command arrives as 20 A. The board reads `VESC_CUR_MAX` at
+startup, so restart it after changing the parameter.
+
+`NaN` and infinity are rejected in every field, current included.
+
+Duty is still limited separately: `VESC_DUTY_MAX` (0.30 by default) is applied
+by the control router afterwards, so a legal duty of 0.8 on the wire becomes
+0.30 at the motor.
 
 ### The timestamp is required
 

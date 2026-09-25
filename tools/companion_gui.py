@@ -55,11 +55,16 @@ DEG = 180.0 / math.pi
 
 
 class App(tk.Tk):
-    def __init__(self, port=None, baud=921600):
+    def __init__(self, port=None, baud=921600,
+                 current_max=comp_link.DIRECT_CURRENT_MAX):
         super().__init__()
         self.title("companion link")
         self.configure(bg=BG)
         self.geometry("800x960")
+
+        # The board's VESC_CUR_MAX. It clamps current commands to this, so the
+        # slider stops there rather than offering amps that will not arrive.
+        self.current_max = float(current_max)
 
         self.q = queue.Queue()
         self.link = None
@@ -519,8 +524,7 @@ class App(tk.Tk):
         who clicked the radio button meant.
         """
         current = self.throttle_mode.get() == comp_link.THROTTLE_CURRENT
-        limit = (comp_link.DIRECT_CURRENT_MAX if current
-                 else comp_link.DIRECT_DUTY_MAX)
+        limit = self.current_max if current else comp_link.DIRECT_DUTY_MAX
 
         self.throttle_var.set(0.0)
         self.throttle_scale.configure(from_=-limit, to=limit,
@@ -947,8 +951,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port")
     ap.add_argument("--baud", type=int, default=921600)
+    ap.add_argument("--current-max", type=float,
+                    default=comp_link.DIRECT_CURRENT_MAX,
+                    help="the board's VESC_CUR_MAX in amps (default "
+                         "%(default)s)")
     args = ap.parse_args()
-    App(args.port, args.baud).mainloop()
+    App(args.port, args.baud, args.current_max).mainloop()
 
 
 if __name__ == "__main__":

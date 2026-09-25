@@ -93,6 +93,13 @@ static uint16_t g_rc_switch_high;
 
 static uint32_t g_auto_timeout_us = 200000u;
 
+/* VESC_CUR_MAX: current-mode throttle from the companion is clamped to this
+ * on arrival, the same ceiling the control router applies. Zero until read,
+ * which clamps every current command to zero.
+ */
+
+static float g_current_max;
+
 /* How far ahead of its arrival a command's timestamp may be before the
  * offset, rather than the link, is the thing that is wrong. Comfortably
  * above the residual a completed timesync leaves and far below any budget an
@@ -497,7 +504,7 @@ static void comp_route(int id, FAR const struct comp_parser_s *parser,
       int64_t age_us;
 
       if (!comp_control_trajectory_decode(parser->payload, parser->len,
-                                          &wire))
+                                          g_current_max, &wire))
         {
           s->rx_trajectory_invalid++;
           return;
@@ -591,7 +598,7 @@ static void comp_route(int id, FAR const struct comp_parser_s *parser,
           return;
         }
 
-      if (!comp_direct_control_valid(&wire))
+      if (!comp_direct_control_accept(&wire, g_current_max))
         {
           s->rx_direct_invalid++;
           return;
@@ -1421,6 +1428,7 @@ static int companion_daemon(int argc, FAR char *argv[])
   status.pps_max_correction_us = (uint32_t)param_i32("PPS_MAX_COR_US");
   status.pps_absolute_phase = param_i32("PPS_ABS_PHASE") != 0;
   g_auto_timeout_us = (uint32_t)param_i32("AUTO_CMD_TO_MS") * 1000u;
+  g_current_max = param_f32("VESC_CUR_MAX");
   status.auto_timeout_us = g_auto_timeout_us;
 
   /* The tick is the downlink's clock from here on. Failing to start it is

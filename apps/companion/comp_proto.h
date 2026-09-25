@@ -121,18 +121,21 @@ struct comp_datum_reset_s
 #define COMP_THROTTLE_DUTY     0
 #define COMP_THROTTLE_CURRENT  1
 
-/* Protocol ceilings, not vehicle limits.
+/* Ceilings a command is checked against on arrival.
  *
- * The operator's ceilings are VESC_DUTY_MAX and VESC_CUR_MAX, applied by the
- * control router afterwards. These bound only what the FORMAT can mean, and a
- * value outside them is rejected rather than clamped: it says the sender is
- * wrong about the units or the mode, and clamping would turn that into a
- * command that looks deliberate.
+ * Steering and duty are bounded by what the FORMAT can mean, and a value
+ * outside them is rejected rather than clamped: it says the sender is wrong
+ * about the units or the mode, and clamping would turn that into a command
+ * that looks deliberate. The operator's duty ceiling, VESC_DUTY_MAX, is
+ * applied by the control router afterwards.
+ *
+ * Current is always clamped to VESC_CUR_MAX, which the caller passes in as
+ * current_max - the same ceiling the control router and the VESC command
+ * stage apply. Only a non-finite current is rejected.
  */
 
 #define COMP_DIRECT_STEER_MAX    1.0f
 #define COMP_DIRECT_DUTY_MAX     1.0f
-#define COMP_DIRECT_CURRENT_MAX  50.0f
 
 /* CONTROL_TRAJ has a variable payload. Its 20-byte header is followed by
  * `horizon` pose pairs and then `horizon` control triples. A control is
@@ -182,7 +185,7 @@ struct comp_direct_control_s
 {
   uint64_t timestamp_us;   /*  0: UTC us, when the companion sent it */
   float    steering;       /*  8: -1..+1, left positive */
-  float    throttle;       /* 12: duty -1..+1, or amps -50..+50 */
+  float    throttle;       /* 12: duty -1..+1, or amps +/-VESC_CUR_MAX */
   uint8_t  throttle_type;  /* 16: COMP_THROTTLE_* */
   uint8_t  pad[7];         /* 17: retain the original 24-byte prefix */
   float    delta_rear;     /* 24: rear normalised -1..+1, left positive */
@@ -393,6 +396,7 @@ uint8_t comp_payload_len(uint8_t id);
 
 size_t comp_control_trajectory_payload_size(uint8_t horizon);
 bool comp_control_trajectory_decode(FAR const uint8_t *payload, size_t len,
+                                    float current_max,
                                     FAR struct comp_control_trajectory_s *out);
 
 void comp_parser_init(FAR struct comp_parser_s *p);
@@ -415,13 +419,19 @@ int comp_parser_byte(FAR struct comp_parser_s *p, uint8_t b);
 int comp_encode(uint8_t id, FAR const void *payload, uint8_t len,
                 FAR uint8_t *out, size_t out_size);
 
-/* Is this command one the actuators may be given?
+/* Is this command one the actuators may be given? If so, a current-mode
+ * throttle is clamped in place to +/-current_max (VESC_CUR_MAX).
  *
  * Range and mode only - freshness is the caller's job, because it needs a
  * clock. Kept here, next to the format it validates, so every rule can be
  * driven on the host rather than found on a bench with the wheels turning.
  */
 
-bool comp_direct_control_valid(FAR const struct comp_direct_control_s *cmd);
+bool comp_direct_control_accept(FAR struct comp_direct_control_s *cmd,
+                                float current_max);
+
+/* amps limited to +/-current_max. */
+
+float comp_current_clamp(float amps, float current_max);
 
 #endif /* __APPS_COMPANION_COMP_PROTO_H */

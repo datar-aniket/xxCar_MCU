@@ -148,21 +148,19 @@ def main():
           comp_link.DIRECT_CURRENT_MAX,
           "the slider must rescale to the current-mode range")
 
-    app.throttle_var.set(30.0)
+    app.throttle_var.set(15.0)
     app._send_drive()
     sent = decode_last(link)
 
     check(sent["throttle_type"] == comp_link.THROTTLE_CURRENT,
           "amps mode must reach the wire as amps")
-    check(abs(sent["throttle"] - 30.0) < 1e-6,
+    check(abs(sent["throttle"] - 15.0) < 1e-6,
           "a value legal in amps must not be rejected as duty")
 
     # ---- out of range --------------------------------------------------
     #
-    # The slider is the guard: tk.Scale clamps its variable to the range set
-    # for the mode, so the panel physically cannot ask for 60 A. Worth
-    # pinning, because it is the reason the encoder's refusal path is not
-    # reachable from the UI.
+    # The slider stops at VESC_CUR_MAX's default: the board clamps current
+    # to that, so offering more would show amps that never arrive.
 
     app.throttle_var.set(60.0)
     check(app.throttle_var.get() == comp_link.DIRECT_CURRENT_MAX,
@@ -172,14 +170,18 @@ def main():
     check(app.throttle_var.get() == -comp_link.DIRECT_CURRENT_MAX,
           "the slider must clamp on the negative side too")
 
-    # And if one ever did get through - a future edit reading a text entry
+    # Current is clamped on the board, so only a duty can be out of range.
+    # If one ever got past the slider - a future edit reading a text entry
     # instead - the panel must report it rather than raise inside the pump.
+    # The mode is set without rescaling, which is how that edit would look.
 
     detached = tk.DoubleVar(value=999.0)
     attached, app.throttle_var = app.throttle_var, detached
+    app.throttle_mode.set(comp_link.THROTTLE_DUTY)
     before = len(link.frames)
     app._send_drive()
     app.throttle_var = attached
+    app.throttle_mode.set(comp_link.THROTTLE_CURRENT)
 
     check(len(link.frames) == before,
           "an out-of-range command must not be sent")

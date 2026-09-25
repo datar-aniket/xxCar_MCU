@@ -11,6 +11,10 @@
 
 #include "comp_proto.h"
 
+/* VESC_CUR_MAX's default, standing in for the parameter the daemon reads. */
+
+#define CUR_MAX 20.0f
+
 static struct comp_parser_s g_parser;
 
 /* Feed a buffer one byte at a time and return the last id produced. */
@@ -133,7 +137,7 @@ static void test_control_trajectory_round_trip(void)
   assert(feed(frame, (size_t)n) == COMP_MSG_CONTROL_TRAJ);
   assert(g_parser.len == len);
   assert(comp_control_trajectory_decode(g_parser.payload, g_parser.len,
-                                        &decoded));
+                                        CUR_MAX, &decoded));
   assert(decoded.timestamp_us == 1234567890123ull);
   assert(decoded.solution_time_us == 1234567880000ull);
   assert(decoded.horizon == 2);
@@ -162,12 +166,12 @@ static void test_control_trajectory_rejects_bad_length_and_values(void)
 
   memcpy(payload + COMP_TRAJ_DATA_OFS + 4u * sizeof(float),
          &invalid, sizeof(invalid));
-  assert(!comp_control_trajectory_decode(payload, len, &decoded));
+  assert(!comp_control_trajectory_decode(payload, len, CUR_MAX, &decoded));
 
   sample_trajectory(payload);
   payload[COMP_TRAJ_DT_OFS] = 0;
   payload[COMP_TRAJ_DT_OFS + 1] = 0;
-  assert(!comp_control_trajectory_decode(payload, len, &decoded));
+  assert(!comp_control_trajectory_decode(payload, len, CUR_MAX, &decoded));
 }
 
 static struct comp_direct_control_s sample_command(void)
@@ -226,22 +230,22 @@ static void test_direct_control_accepts_the_full_range(void)
   c.throttle_type = COMP_THROTTLE_DUTY;
   c.throttle = 0.0f;
   c.steering = 0.0f;
-  assert(comp_direct_control_valid(&c));
+  assert(comp_direct_control_accept(&c, CUR_MAX));
 
   c.throttle = 1.0f;
   c.steering = 1.0f;
-  assert(comp_direct_control_valid(&c));
+  assert(comp_direct_control_accept(&c, CUR_MAX));
 
   c.throttle = -1.0f;
   c.steering = -1.0f;
-  assert(comp_direct_control_valid(&c));
+  assert(comp_direct_control_accept(&c, CUR_MAX));
 
   c.throttle_type = COMP_THROTTLE_CURRENT;
-  c.throttle = 50.0f;
-  assert(comp_direct_control_valid(&c));
+  c.throttle = CUR_MAX;
+  assert(comp_direct_control_accept(&c, CUR_MAX));
 
-  c.throttle = -50.0f;
-  assert(comp_direct_control_valid(&c));
+  c.throttle = -CUR_MAX;
+  assert(comp_direct_control_accept(&c, CUR_MAX));
 }
 
 /* The limits are per mode, and swapping them is the mistake worth catching:
@@ -255,24 +259,91 @@ static void test_direct_control_limits_are_per_mode(void)
 
   c.throttle_type = COMP_THROTTLE_DUTY;
   c.throttle = 1.001f;
-  assert(!comp_direct_control_valid(&c));
+  assert(!comp_direct_control_accept(&c, CUR_MAX));
 
   c.throttle = -1.001f;
-  assert(!comp_direct_control_valid(&c));
+  assert(!comp_direct_control_accept(&c, CUR_MAX));
 
   /* Legal as amps, and it must not become legal as duty. */
 
   c.throttle = 12.5f;
-  assert(!comp_direct_control_valid(&c));
+  assert(!comp_direct_control_accept(&c, CUR_MAX));
 
   c.throttle_type = COMP_THROTTLE_CURRENT;
-  assert(comp_direct_control_valid(&c));
+  assert(comp_direct_control_accept(&c, CUR_MAX));
 
-  c.throttle = 50.001f;
-  assert(!comp_direct_control_valid(&c));
+  /* Past the current ceiling is clamped, not refused. */
 
-  c.throttle = -50.001f;
-  assert(!comp_direct_control_valid(&c));
+  c.throttle = CUR_MAX + 0.001f;
+  assert(comp_direct_control_accept(&c, CUR_MAX));
+  assert(c.throttle == CUR_MAX);
+
+  c.throttle = -CUR_MAX - 0.001f;
+  assert(comp_direct_control_accept(&c, CUR_MAX));
+  assert(c.throttle == -CUR_MAX);
+}
+
+/* Current is clamped to VESC_CUR_MAX, passed in rather than a constant, and
+ * values inside it pass through untouched.
+ */
+
+static void test_direct_control_current_clamps_to_the_parameter(void)
+{
+  struct comp_direct_control_s c = sample_command();
+
+  c.throttle_type = COMP_THROTTLE_CURRENT;
+
+  c.throttle = 30.0f;
+  assert(comp_direct_control_accept(&c, 20.0f));
+  assert(c.throttle == 20.0f);
+
+  c.throttle = -30.0f;
+  assert(comp_direct_control_accept(&c, 20.0f));
+  assert(c.throttle == -20.0f);
+
+  c.throttle = 30.0f;
+  assert(comp_direct_control_accept(&c, 100.0f));
+  assert(c.throttle == 30.0f);
+
+  c.throttle = 1.0e6f;
+  assert(comp_direct_control_accept(&c, 20.0f));
+  assert(c.throttle == 20.0f);
+
+  /* VESC_CUR_MAX = 0 turns every current command into zero. */
+
+  c.throttle = 0.5f;
+  assert(comp_direct_control_accept(&c, 0.0f));
+  assert(c.throttle == 0.0f);
+
+  /* Duty is not clamped by the current ceiling, nor refused because of it. */
+
+  c.throttle_type = COMP_THROTTLE_DUTY;
+  c.throttle = 0.5f;
+  assert(comp_direct_control_accept(&c, 0.0f));
+  assert(c.throttle == 0.5f);
+}
+
+static void test_control_trajectory_current_clamps_to_the_parameter(void)
+{
+  struct comp_control_trajectory_s decoded;
+  uint8_t payload[COMP_MAX_PAYLOAD];
+  size_t len = sample_trajectory(payload);
+  size_t motor = COMP_TRAJ_DATA_OFS + 2u * 2u * sizeof(float) +
+                 2u * sizeof(float);
+  float amps = 30.0f;
+  float nan_value = 0.0f / 0.0f;
+
+  payload[COMP_TRAJ_METHOD_OFS] = COMP_THROTTLE_CURRENT;
+  memcpy(payload + motor, &amps, sizeof(amps));
+  assert(comp_control_trajectory_decode(payload, len, 20.0f, &decoded));
+  assert(decoded.controls[0][2] == 20.0f);
+  assert(decoded.controls[1][2] == -0.1f);
+
+  assert(comp_control_trajectory_decode(payload, len, 50.0f, &decoded));
+  assert(decoded.controls[0][2] == 30.0f);
+
+  memcpy(payload + motor, &nan_value, sizeof(nan_value));
+  assert(!comp_control_trajectory_decode(payload, len, 20.0f, &decoded));
 }
 
 /* The throttle value here is deliberately legal in BOTH modes.
@@ -289,16 +360,16 @@ static void test_direct_control_rejects_an_unknown_mode(void)
   c.throttle = 0.5f;
 
   c.throttle_type = COMP_THROTTLE_DUTY;
-  assert(comp_direct_control_valid(&c));
+  assert(comp_direct_control_accept(&c, CUR_MAX));
 
   c.throttle_type = COMP_THROTTLE_CURRENT;
-  assert(comp_direct_control_valid(&c));
+  assert(comp_direct_control_accept(&c, CUR_MAX));
 
   c.throttle_type = 2;
-  assert(!comp_direct_control_valid(&c));
+  assert(!comp_direct_control_accept(&c, CUR_MAX));
 
   c.throttle_type = 255;
-  assert(!comp_direct_control_valid(&c));
+  assert(!comp_direct_control_accept(&c, CUR_MAX));
 }
 
 static void test_direct_control_rejects_steering_out_of_range(void)
@@ -306,10 +377,10 @@ static void test_direct_control_rejects_steering_out_of_range(void)
   struct comp_direct_control_s c = sample_command();
 
   c.steering = 1.001f;
-  assert(!comp_direct_control_valid(&c));
+  assert(!comp_direct_control_accept(&c, CUR_MAX));
 
   c.steering = -1.001f;
-  assert(!comp_direct_control_valid(&c));
+  assert(!comp_direct_control_accept(&c, CUR_MAX));
 }
 
 /* NaN compares false against everything, so the readable form of these range
@@ -324,19 +395,27 @@ static void test_direct_control_rejects_nan_and_infinity(void)
   const float inf_value = 1.0f / 0.0f;
 
   c.throttle = nan_value;
-  assert(!comp_direct_control_valid(&c));
+  assert(!comp_direct_control_accept(&c, CUR_MAX));
 
   c.throttle = inf_value;
-  assert(!comp_direct_control_valid(&c));
+  assert(!comp_direct_control_accept(&c, CUR_MAX));
 
   c = sample_command();
   c.steering = nan_value;
-  assert(!comp_direct_control_valid(&c));
+  assert(!comp_direct_control_accept(&c, CUR_MAX));
 
   c.steering = -inf_value;
-  assert(!comp_direct_control_valid(&c));
+  assert(!comp_direct_control_accept(&c, CUR_MAX));
 
-  assert(!comp_direct_control_valid(NULL));
+  assert(!comp_direct_control_accept(NULL, CUR_MAX));
+}
+
+static void test_current_clamp_edges(void)
+{
+  assert(comp_current_clamp(20.0f, 20.0f) == 20.0f);
+  assert(comp_current_clamp(-20.0f, 20.0f) == -20.0f);
+  assert(comp_current_clamp(12.5f, 20.0f) == 12.5f);
+  assert(comp_current_clamp(1.0f / 0.0f, 20.0f) == 20.0f);
 }
 
 static void test_round_trip(void)
@@ -561,6 +640,9 @@ int main(void)
   test_throttle_modes_are_the_documented_numbers();
   test_direct_control_accepts_the_full_range();
   test_direct_control_limits_are_per_mode();
+  test_direct_control_current_clamps_to_the_parameter();
+  test_control_trajectory_current_clamps_to_the_parameter();
+  test_current_clamp_edges();
   test_direct_control_rejects_an_unknown_mode();
   test_direct_control_rejects_steering_out_of_range();
   test_direct_control_rejects_nan_and_infinity();

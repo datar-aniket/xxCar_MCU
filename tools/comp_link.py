@@ -53,12 +53,14 @@ POSE_FLAG_VALID = 1 << 0
 THROTTLE_DUTY = 0
 THROTTLE_CURRENT = 1
 
-# What the FORMAT can mean, not what the vehicle will do: VESC_DUTY_MAX and
-# VESC_CUR_MAX still apply on the board, and are lower. Anything outside these
-# is rejected there rather than clamped.
+# Steering and duty are what the FORMAT can mean; the board rejects anything
+# outside them rather than clamping, and applies VESC_DUTY_MAX afterwards.
+# Current is always clamped on the board to its VESC_CUR_MAX parameter, so any
+# finite value may be sent. DIRECT_CURRENT_MAX is that parameter's default,
+# used only for the range of the GUI's current slider.
 DIRECT_STEER_MAX = 1.0
 DIRECT_DUTY_MAX = 1.0
-DIRECT_CURRENT_MAX = 50.0
+DIRECT_CURRENT_MAX = 20.0
 
 TRAJECTORY_MAX_HORIZON = 11
 CONTROL_TRAJECTORY_HEADER = struct.Struct("<QQBeB")
@@ -243,17 +245,18 @@ def encode_direct_control(steering, throttle, throttle_type, timestamp_us,
 
     Range errors are rejected by the board rather than clamped, so they are
     raised here too - finding out on the bench that half the commands were
-    silently dropped is worse than a traceback.
+    silently dropped is worse than a traceback. A current-mode throttle only
+    has to be finite: the board clamps it to VESC_CUR_MAX.
     """
     if throttle_type not in (THROTTLE_DUTY, THROTTLE_CURRENT):
         raise ValueError(f"throttle_type {throttle_type} is not 0 or 1")
 
-    limit = (DIRECT_CURRENT_MAX if throttle_type == THROTTLE_CURRENT
-             else DIRECT_DUTY_MAX)
-
-    if not abs(float(throttle)) <= limit:
-        raise ValueError(f"throttle {throttle} outside +/-{limit} for this "
-                         f"mode")
+    if throttle_type == THROTTLE_CURRENT:
+        if not math.isfinite(float(throttle)):
+            raise ValueError(f"throttle {throttle} is not a finite current")
+    elif not abs(float(throttle)) <= DIRECT_DUTY_MAX:
+        raise ValueError(f"throttle {throttle} outside +/-{DIRECT_DUTY_MAX} "
+                         f"for duty")
 
     if not abs(float(steering)) <= DIRECT_STEER_MAX:
         raise ValueError(f"steering {steering} outside +/-{DIRECT_STEER_MAX}")
@@ -278,7 +281,8 @@ def encode_control_trajectory(timestamp_us, solution_time_us, dt, poses,
     poses is [(x, y), ...]; controls is
     [(front_steering, rear_steering, duty_or_amps), ...].
     Both arrays have exactly `horizon` entries. dt is encoded as IEEE binary16
-    on the wire; all coordinates and controls remain float32.
+    on the wire; all coordinates and controls remain float32. Currents only
+    have to be finite: the board clamps them to VESC_CUR_MAX.
     """
     poses = tuple(tuple(v) for v in poses)
     controls = tuple(tuple(v) for v in controls)
@@ -293,8 +297,7 @@ def encode_control_trajectory(timestamp_us, solution_time_us, dt, poses,
     if control_method not in (THROTTLE_DUTY, THROTTLE_CURRENT):
         raise ValueError("control_method must be duty (0) or current (1)")
 
-    limit = (DIRECT_CURRENT_MAX if control_method == THROTTLE_CURRENT
-             else DIRECT_DUTY_MAX)
+    current = control_method == THROTTLE_CURRENT
     flat_poses = []
     flat_controls = []
 
@@ -309,8 +312,11 @@ def encode_control_trajectory(timestamp_us, solution_time_us, dt, poses,
             raise ValueError("trajectory steering is outside +/-1")
         if not abs(delta_rear) <= DIRECT_STEER_MAX:
             raise ValueError("trajectory rear steering is outside +/-1")
-        if not abs(motor) <= limit:
-            raise ValueError("trajectory motor value is outside mode range")
+        if current:
+            if not math.isfinite(motor):
+                raise ValueError("trajectory current must be finite")
+        elif not abs(motor) <= DIRECT_DUTY_MAX:
+            raise ValueError("trajectory duty is outside +/-1")
         flat_poses.extend((x, y))
         flat_controls.extend((steering, delta_rear, motor))
 
