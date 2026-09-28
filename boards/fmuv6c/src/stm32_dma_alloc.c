@@ -32,7 +32,7 @@
 
 #include "fmuv6c.h"
 
-#if defined(CONFIG_FAT_DMAMEMORY)
+#if defined(CONFIG_FAT_DMAMEMORY) || defined(CONFIG_USBMSC_DMAMEMORY)
 
 /****************************************************************************
  * Pre-processor Definitions
@@ -42,7 +42,7 @@
 #  error microSD DMA support requires CONFIG_GRAN
 #endif
 
-#define BOARD_DMA_ALLOC_POOL_SIZE (8*512)
+#define BOARD_DMA_ALLOC_POOL_SIZE (16*512)
 
 /****************************************************************************
  * Private Data
@@ -94,6 +94,7 @@ int stm32_dma_alloc_init(void)
 
 /* DMA-aware allocator stubs for the FAT filesystem. */
 
+#ifdef CONFIG_FAT_DMAMEMORY
 void *fat_dma_alloc(size_t size)
 {
   return gran_alloc(dma_allocator, size);
@@ -103,5 +104,24 @@ void fat_dma_free(void *memory, size_t size)
 {
   gran_free(dma_allocator, memory, size);
 }
+#endif
 
-#endif /* CONFIG_FAT_DMAMEMORY */
+/* USB MSC talks directly to the block driver rather than through FAT, so its
+ * sector buffer needs the same reachability guarantee. This is essential on
+ * Matek's SDMMC1: that IDMA cannot access SRAM1-4 even though those regions
+ * are part of the general heap.
+ */
+
+#ifdef CONFIG_USBMSC_DMAMEMORY
+void *usbmsc_dma_alloc(size_t size)
+{
+  return gran_alloc(dma_allocator, size);
+}
+
+void usbmsc_dma_free(void *memory, size_t size)
+{
+  gran_free(dma_allocator, memory, size);
+}
+#endif
+
+#endif /* CONFIG_FAT_DMAMEMORY || CONFIG_USBMSC_DMAMEMORY */

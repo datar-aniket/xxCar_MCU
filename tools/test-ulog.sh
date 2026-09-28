@@ -23,7 +23,7 @@ import sys
 from pyulog import ULog
 u = ULog(sys.argv[1])
 names = sorted(d.name for d in u.data_list)
-assert names == ['distance_sensor','estimator_diag','estimator_state','external_pose','optical_flow','rc_input','sensor_accel','sensor_baro','sensor_mag','vehicle_accel','vehicle_imu','vehicle_state_tx'], names
+assert names == ['actuator_command','control_cmd','distance_sensor','estimator_diag','estimator_state','external_pose','optical_flow','rc_input','sensor_accel','sensor_baro','sensor_mag','vehicle_accel','vehicle_imu','vehicle_state_tx','vesc_status'], names
 by = {d.name: d for d in u.data_list}
 assert by['rc_input'].data['channel[0]'][0] == 1500
 assert abs(by['sensor_baro'].data['pressure'][0] - 1013.25) < 0.01
@@ -47,5 +47,9 @@ assert abs(by['vehicle_state_tx'].data['accel[1]'][0] - 0.08) < 1e-4
 assert by['vehicle_state_tx'].data['source_valid'][0] == 0x5f
 assert abs(by['vehicle_state_tx'].data['steering_angle_rear'][0] + 0.1) < 1e-4
 assert by['vehicle_state_tx'].data['rc_status'][0] == 0x075c85f0
-print("ULog: 12 topics decoded, values verified - OK")
+assert abs(by['vesc_status'].data['speed_cps'][0] - 250.0) < 1e-4
+assert by['vesc_status'].data['servo_us'][0] == 1600
+assert abs(by['control_cmd'].data['motor'][0] - 0.25) < 1e-4
+assert abs(by['actuator_command'].data['steering'][0] + 0.15) < 1e-4
+print("ULog: 15 topics decoded, values verified - OK")
 PY

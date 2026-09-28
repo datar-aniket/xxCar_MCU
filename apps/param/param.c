@@ -966,6 +966,8 @@ static const struct param_def_s g_params[] =
 
   { "LOG_ENABLE", PARAM_TYPE_INT32, I32(0), I32(0), I32(1),
     "Start logging at boot" },
+  { "LOG_AUTO",   PARAM_TYPE_INT32, I32(0), I32(0), I32(1),
+    "Log while control source AUTO is selected" },
   { "LOG_RATE",   PARAM_TYPE_INT32, I32(0), I32(0), I32(2000),
     "Log rate cap, Hz (0 = every sample / native)" },
 
@@ -987,8 +989,8 @@ static const struct param_def_s g_params[] =
     "Log optical flow (MTF-02)" },
   { "LOG_DIST",   PARAM_TYPE_INT32, I32(0), I32(0), I32(1),
     "Log distance sensor" },
-  { "LOG_EKF",    PARAM_TYPE_INT32, I32(0), I32(0), I32(1),
-    "Log EKF inputs, horizon diagnostics and output" },
+  { "LOG_EKF",    PARAM_TYPE_INT32, I32(1), I32(0), I32(1),
+    "Log EKF, pose, wheel/VESC and control streams" },
 
   /* ---- Calibration ------------------------------------------------------
    * Written by the calibration app. Gyro offsets are rad/s, accel offsets

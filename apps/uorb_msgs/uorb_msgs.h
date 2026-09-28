@@ -208,6 +208,13 @@ struct external_pose_s
   uint8_t  pad[2];                /* 54 */
 };
 
+/* The logger can be blocked by an ordinary 50-200 ms SD-card housekeeping
+ * pause. Queue the native-rate diagnostic inputs long enough for it to catch
+ * up instead of silently replacing samples while the file write is pending.
+ */
+
+#define EXTERNAL_POSE_QUEUE_SIZE      128u
+
 #define EXTERNAL_POSE_VALID (1u << 0)
 #define EXTERNAL_POSE_RESET_DATUM (1u << 1) /* one-shot, use this pose */
 
@@ -270,17 +277,19 @@ struct vesc_status_s
 
   /* Filtered motor speed in tachometer counts per second.
    *
-   * Differentiated and filtered HERE rather than by consumers, because this
-   * topic is advertised without a queue: STATUS_5 arrives at 400 Hz and a
-   * subscriber reading at 200 sees only the newest message, so half the
-   * samples are gone before it ever runs. Anti-aliasing has to happen where
-   * every sample still exists.
+   * Differentiated and filtered HERE rather than by consumers: STATUS_5
+   * arrives at 400 Hz while the companion downlink consumes the newest sample
+   * at 200 Hz. Queuing preserves the native stream for the logger, but it does
+   * not make post-decimation filtering valid. Anti-aliasing has to happen
+   * where every sample is processed in time order.
    */
 
   float    speed_cps;             /* 32 */
   uint16_t servo_us;              /* 36: pulse actually sent to the VESC */
   uint16_t rear_servo_us;         /* 38: pulse sent to rear steering PWM */
 };
+
+#define VESC_STATUS_QUEUE_SIZE        128u
 
 /* A command for the actuators: one drive motor and one steering servo.
  *
@@ -333,6 +342,8 @@ struct actuator_command_s
   uint8_t  pad[3];                /* 21 */
 };
 
+#define ACTUATOR_COMMAND_QUEUE_SIZE    32u
+
 /* Command produced by the autonomous controller before safety/source
  * selection. It intentionally matches actuator_command's units, but remains
  * a distinct topic so the router cannot subscribe to its own output.
@@ -347,6 +358,8 @@ struct control_cmd_s
   uint8_t  mode;                  /* 20: ACTUATOR_MODE_* */
   uint8_t  pad[3];                /* 21 */
 };
+
+#define CONTROL_CMD_QUEUE_SIZE         64u
 
 /* A finite-horizon plan from the companion. It is kept separate from
  * control_cmd: receiving a plan does not actuate the first element. A future
@@ -458,6 +471,8 @@ struct estimator_state_s
   uint8_t  solution_status;       /* 126: ESTIMATOR_* validity flags */
   uint8_t  instance;              /* 127: EKF lane, currently zero */
 };
+
+#define ESTIMATOR_STATE_QUEUE_SIZE    128u
 
 /* Filter-horizon diagnostics for post-processing estimator behaviour.
  *

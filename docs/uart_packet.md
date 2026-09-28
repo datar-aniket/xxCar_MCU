@@ -478,12 +478,12 @@ Restore source 7 after installing the fitted `VESC_SPEED_K`.
 `motor_speed_ms` is the time derivative of the tachometer, and it is computed
 **in the VESC daemon, not here.** That placement is the point:
 
-`STATUS_5` arrives at **400 Hz** and this downlink runs at 200, and
-`vesc_status` is advertised without a queue — so a subscriber reading at
-200 Hz sees only the newest message and **every other sample is already gone**
-before it runs. Filtering on the consumer side cannot anti-alias a stream it
-never received. The daemon sees every decoded frame, so the derivative and
-the filter both live there and the topic carries the finished `speed_cps`.
+`STATUS_5` arrives at **400 Hz** and this downlink runs at 200. The topic is
+queued so the logger can retain every sample, while the downlink drains to the
+newest message on each tick and therefore intentionally omits intermediate
+values. Filtering after that decimation cannot anti-alias the omitted stream.
+The daemon sees every decoded frame, so the derivative and filter both live
+there and the topic carries the finished `speed_cps`.
 
 The derivative comes first, the filter second: filtering the accumulated
 count would smooth a *position*.

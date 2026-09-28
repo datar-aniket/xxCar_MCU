@@ -966,6 +966,9 @@ static void comp_transmit(int fd, int state_pub, int est_sub, int gyro_sub,
   uint32_t gap = 0;
   bool repeat = false;
   bool clamped = false;
+  bool have_est = false;
+  bool have_vesc = false;
+  unsigned drained;
   int n;
 
   memset(&in, 0, sizeof(in));
@@ -978,7 +981,22 @@ static void comp_transmit(int fd, int state_pub, int est_sub, int gyro_sub,
   in.control_auto = router.source == ROUTER_SOURCE_AUTO;
   in.control_current = router.mode == ROUTER_MODE_CURRENT;
 
-  if (orb_copy(ORB_ID(estimator_state), est_sub, &est) < 0)
+  /* These topics are queued for lossless logging. This 200 Hz downlink wants
+   * current state, not a replay of the 400 Hz backlog, so drain each reader's
+   * bounded queue and retain only its newest sample.
+   */
+
+  for (drained = 0; drained < ESTIMATOR_STATE_QUEUE_SIZE; drained++)
+    {
+      if (orb_copy(ORB_ID(estimator_state), est_sub, &est) < 0)
+        {
+          break;
+        }
+
+      have_est = true;
+    }
+
+  if (!have_est)
     {
       /* No new estimator state since the last read. Counted separately from
        * a write failure: "the companion sees nothing" has two very different
@@ -1035,15 +1053,27 @@ static void comp_transmit(int fd, int state_pub, int est_sub, int gyro_sub,
       accel_sample_time = accel.timestamp_sample;
     }
 
-  if (vesc_sub >= 0 && orb_copy(ORB_ID(vesc_status), vesc_sub, &vesc) >= 0)
+  if (vesc_sub >= 0)
+    {
+      for (drained = 0; drained < VESC_STATUS_QUEUE_SIZE; drained++)
+        {
+          if (orb_copy(ORB_ID(vesc_status), vesc_sub, &vesc) < 0)
+            {
+              break;
+            }
+
+          have_vesc = true;
+        }
+    }
+
+  if (have_vesc)
     {
       in.vesc_valid = true;
       in.current_a = vesc.current_a;
 
       /* Already differentiated and filtered by the VESC daemon, which sees
-       * every STATUS_5 at 400 Hz. Doing it here would be too late: this
-       * topic has no queue, so reading it at 200 Hz has already dropped half
-       * the samples.
+       * every STATUS_5 at 400 Hz. Doing it here would be too late; this
+       * downlink deliberately consumes the newest queued sample.
        */
 
       in.motor_counts_per_s = vesc.speed_cps;

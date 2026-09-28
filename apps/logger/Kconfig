@@ -19,8 +19,8 @@ config XXCAR_LOGGER
 		each sample is its raw record plus a 3-byte header, not a line of
 		formatted floats. Files open in pyulog / PlotJuggler / FlightPlot.
 
-		On request only: 'log start' / 'log stop', or LOG_ENABLE=1 to start at
-		boot.
+		On request: 'log start' / 'log stop'. LOG_ENABLE=1 starts at boot and
+		LOG_AUTO=1 starts/stops a session with AUTO/RC source selection.
 
 if XXCAR_LOGGER
 

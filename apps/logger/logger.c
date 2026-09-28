@@ -219,6 +219,12 @@ g_formats[] =
     "float current_a;float adc_volts;uint8_t controller_id;"
     "uint8_t[3] _padding0;float speed_cps;uint16_t servo_us;"
     "uint16_t rear_servo_us;" },
+  { "control_cmd",
+    "uint64_t timestamp;float motor;float steering;float delta_rear;"
+    "uint8_t mode;" },
+  { "actuator_command",
+    "uint64_t timestamp;float motor;float steering;float delta_rear;"
+    "uint8_t mode;" },
   { "vehicle_state_tx",
     "uint64_t timestamp;uint64_t timestamp_sample;"
     "uint64_t accel_timestamp_sample;uint64_t wire_timestamp_us;"
@@ -298,6 +304,8 @@ static const struct log_topic_s g_topics[] =
   { NULL,            ORB_ID(vehicle_mag),        0, "vehicle_mag",     0, 34, "LOG_EKF"  },
   { NULL,            ORB_ID(vehicle_baro),       0, "vehicle_baro",    0, 24, "LOG_EKF"  },
   { NULL,            ORB_ID(vesc_status),        0, "vesc_status",     0, 40, "LOG_EKF"  },
+  { NULL,            ORB_ID(control_cmd),        0, "control_cmd",     0, 21, "LOG_EKF"  },
+  { NULL,            ORB_ID(actuator_command),   0, "actuator_command",0, 21, "LOG_EKF"  },
   { NULL,            ORB_ID(vehicle_state_tx),   0, "vehicle_state_tx",0, 124,"LOG_EKF"  },
   { NULL,            ORB_ID(estimator_diag),     0, "estimator_diag",  0, 285,"LOG_EKF"  },
   { NULL,            ORB_ID(estimator_health),   0, "estimator_health",0, 165,"LOG_EKF"  },
@@ -307,6 +315,7 @@ static const struct log_topic_s g_topics[] =
 
 static pthread_mutex_t   g_lock = PTHREAD_MUTEX_INITIALIZER;
 static volatile bool     g_running;
+static volatile bool     g_starting;
 static volatile bool     g_should_stop;
 static struct logger_status_s g_status;
 
@@ -822,6 +831,7 @@ static int log_daemon(int argc, FAR char *argv[])
       syslog(LOG_WARNING,
              "logger: nothing selected (set LOG_IMU0 / LOG_EKF / ...)\n");
       g_running = false;
+      g_starting = false;
       return EXIT_FAILURE;
     }
 
@@ -837,6 +847,7 @@ static int log_daemon(int argc, FAR char *argv[])
         }
 
       g_running = false;
+      g_starting = false;
       return EXIT_FAILURE;
     }
 
@@ -872,6 +883,7 @@ static int log_daemon(int argc, FAR char *argv[])
 
   last_flush = log_now_us();
   g_running  = true;
+  g_starting = false;
 
   while (!g_should_stop)
     {
@@ -1063,6 +1075,7 @@ stop:
          g_status.samples, g_status.bytes, g_status.dropped);
 
   g_running = false;
+  g_starting = false;
   return EXIT_SUCCESS;
 }
 
@@ -1075,10 +1088,15 @@ int logger_start(void)
   int pid;
   int i;
 
-  if (g_running)
+  pthread_mutex_lock(&g_lock);
+  if (g_running || g_starting)
     {
+      pthread_mutex_unlock(&g_lock);
       return -EALREADY;
     }
+
+  g_starting = true;
+  pthread_mutex_unlock(&g_lock);
 
   g_should_stop = false;
   memset(&g_status, 0, sizeof(g_status));
@@ -1093,6 +1111,9 @@ int logger_start(void)
   pid = task_create("logger", LOG_PRIO, LOG_STACK, log_daemon, NULL);
   if (pid < 0)
     {
+      pthread_mutex_lock(&g_lock);
+      g_starting = false;
+      pthread_mutex_unlock(&g_lock);
       return -errno;
     }
 
@@ -1100,26 +1121,26 @@ int logger_start(void)
    * outcome rather than a hopeful one.
    */
 
-  for (i = 0; i < 100 && !g_running; i++)
+  for (i = 0; i < 100 && !g_running && g_starting; i++)
     {
       usleep(10000);
     }
 
-  return OK;
+  return g_running ? OK : -EIO;
 }
 
 void logger_stop(void)
 {
   int i;
 
-  if (!g_running)
+  if (!g_running && !g_starting)
     {
       return;
     }
 
   g_should_stop = true;
 
-  for (i = 0; i < 200 && g_running; i++)
+  for (i = 0; i < 200 && (g_running || g_starting); i++)
     {
       usleep(10000);
     }

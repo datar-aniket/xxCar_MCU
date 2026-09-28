@@ -592,7 +592,8 @@ int vehicle_baro_publish(int fd, FAR const struct vehicle_baro_s *msg)
 
 int external_pose_advertise(void)
 {
-  return orb_advertise(ORB_ID(external_pose), NULL);
+  return orb_advertise_queue(ORB_ID(external_pose), NULL,
+                             EXTERNAL_POSE_QUEUE_SIZE);
 }
 
 int external_pose_publish(int fd, FAR const struct external_pose_s *msg)
@@ -624,7 +625,8 @@ int vehicle_state_tx_publish(int fd,
 
 int vesc_status_advertise(void)
 {
-  return orb_advertise(ORB_ID(vesc_status), NULL);
+  return orb_advertise_queue(ORB_ID(vesc_status), NULL,
+                             VESC_STATUS_QUEUE_SIZE);
 }
 
 int vesc_status_publish(int fd, FAR const struct vesc_status_s *msg)
@@ -639,7 +641,8 @@ int vesc_status_publish(int fd, FAR const struct vesc_status_s *msg)
 
 int actuator_command_advertise(void)
 {
-  return orb_advertise(ORB_ID(actuator_command), NULL);
+  return orb_advertise_queue(ORB_ID(actuator_command), NULL,
+                             ACTUATOR_COMMAND_QUEUE_SIZE);
 }
 
 int actuator_command_publish(int fd,
@@ -655,7 +658,8 @@ int actuator_command_publish(int fd,
 
 int control_cmd_advertise(void)
 {
-  return orb_advertise(ORB_ID(control_cmd), NULL);
+  return orb_advertise_queue(ORB_ID(control_cmd), NULL,
+                             CONTROL_CMD_QUEUE_SIZE);
 }
 
 int control_cmd_publish(int fd, FAR const struct control_cmd_s *msg)
@@ -714,7 +718,8 @@ int vehicle_imu_publish(int fd, FAR const struct vehicle_imu_s *msg)
 
 int estimator_state_advertise(void)
 {
-  return orb_advertise(ORB_ID(estimator_state), NULL);
+  return orb_advertise_queue(ORB_ID(estimator_state), NULL,
+                             ESTIMATOR_STATE_QUEUE_SIZE);
 }
 
 int estimator_state_publish(int fd, FAR const struct estimator_state_s *msg)

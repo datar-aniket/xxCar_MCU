@@ -12,6 +12,14 @@ safe to re-run, and it survives a `git submodule update` reverting the tree.
 
 ## Patches
 
+### 0013-usbmsc-allow-dma-safe-sector-buffer-allocation.patch
+
+USB MSC normally allocates the sector buffer from the general heap and passes
+it directly to the backing block driver. On Matek, SDMMC1 IDMA cannot access
+the SRAM123/SRAM4 heap regions, so an allocation there makes the host detect a
+disk but fail every filesystem-sector read. The new optional board allocator
+puts the buffer in AXI SRAM and makes export deterministic.
+
 ### 0012-stm32h7-restore-i2c-after-failed-bus-reset.patch
 
 `stm32_i2c_reset()` previously jumped past GPIO/controller restoration when

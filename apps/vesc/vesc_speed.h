@@ -7,10 +7,9 @@
  *
  * THIS LIVES IN THE VESC DAEMON, not in the consumer, and that placement is
  * the whole point. STATUS_5 arrives at 400 Hz while the companion downlink
- * runs at 200, and vesc_status is advertised without a queue - so a
- * subscriber reading at 200 Hz sees only the newest message and every other
- * sample is gone before it arrives. Anti-aliasing has to happen where every
- * sample still exists, which is here.
+ * runs at 200 and deliberately drains to the newest queued sample, so every
+ * other value is omitted from that output stream. Anti-aliasing has to happen
+ * where every sample is processed in time order, which is here.
  *
  * The order matters too: the DERIVATIVE comes first and the filter second.
  * Filtering the accumulated count would smooth a position, which is not what

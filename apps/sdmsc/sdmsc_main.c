@@ -68,6 +68,13 @@ int main(int argc, FAR char *argv[])
   if (strcmp(argv[1], "on") == 0)
     {
 #ifdef CONFIG_XXCAR_LOGGER
+      /* Keep LOG_AUTO from reopening a file between logger_stop() and the
+       * unmount. The pause lasts for the entire interval in which the host
+       * owns the card.
+       */
+
+      logger_auto_suspend(true);
+
       /* The logger holds a file open on the card, which blocks the unmount that
        * export needs (nx_umount2 returns -EBUSY). Stop it first so the card can
        * be handed over cleanly - and so everything it wrote is flushed and the
@@ -84,6 +91,9 @@ int main(int argc, FAR char *argv[])
       ret = fmuv6c_msc_export();
       if (ret < 0)
         {
+#ifdef CONFIG_XXCAR_LOGGER
+          logger_auto_suspend(false);
+#endif
           fprintf(stderr, "sdmsc: export failed: %d\n", ret);
           if (ret == -EBUSY)
             {
@@ -114,6 +124,10 @@ int main(int argc, FAR char *argv[])
           fprintf(stderr, "sdmsc: release failed: %d\n", ret);
           return 1;
         }
+
+#ifdef CONFIG_XXCAR_LOGGER
+      logger_auto_suspend(false);
+#endif
 
       printf("microSD reclaimed and remounted at /fs/microsd\n");
       return 0;

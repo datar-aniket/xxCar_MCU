@@ -127,6 +127,15 @@ if [ "$BOARD" = "matekh743" ] && \
   make olddefconfig
 fi
 
+# Existing Matek configurations predate the DMA-safe USB MSC buffer option.
+# Enable it without requiring a destructive reconfigure; otherwise sdmsc can
+# still fail depending on which general-heap region supplied its sector buffer.
+if [ "$BOARD" = "matekh743" ] && \
+   ! grep -q '^CONFIG_USBMSC_DMAMEMORY=y$' .config; then
+  kconfig-tweak --enable CONFIG_USBMSC_DMAMEMORY
+  make olddefconfig
+fi
+
 echo ">> building"
 # Regenerate the app Kconfig index before enabling newly added diagnostics.
 make -C "$REPO/apps" TOPDIR="$NUTTX" \

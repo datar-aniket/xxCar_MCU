@@ -30,6 +30,7 @@
 #define ROUTER_STACK          4096
 #define ROUTER_PERIOD_MS      20
 #define ROUTER_ARM_RETRY_US   100000u
+#define ROUTER_DRAIN_MAX      CONTROL_CMD_QUEUE_SIZE
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static volatile bool g_running;
@@ -169,21 +170,32 @@ static int control_router_daemon(int argc, FAR char *argv[])
         }
 
       updated = false;
-      if (orb_check(auto_sub, &updated) == OK && updated &&
-          orb_copy(ORB_ID(control_cmd), auto_sub, &auto_cmd) == OK)
+      if (orb_check(auto_sub, &updated) == OK && updated)
         {
-          now = router_now_us();
-          if (auto_cmd.timestamp == 0 || auto_cmd.timestamp > now)
-            {
-              auto_cmd.timestamp = now;
-            }
+          unsigned drained = 0;
 
-          input.auto_timestamp = auto_cmd.timestamp;
-          input.auto_motor = auto_cmd.motor;
-          input.auto_steering = auto_cmd.steering;
-          input.auto_delta_rear = auto_cmd.delta_rear;
-          input.auto_mode = auto_cmd.mode;
-          input.auto_present = true;
+          /* control_cmd is queued so the logger sees every native-rate
+           * command through an SD stall. The router, however, must act on the
+           * newest command rather than replaying an old backlog one cycle at
+           * a time. Drain the bounded queue and retain the last value.
+           */
+
+          while (drained++ < ROUTER_DRAIN_MAX &&
+                 orb_copy(ORB_ID(control_cmd), auto_sub, &auto_cmd) == OK)
+            {
+              now = router_now_us();
+              if (auto_cmd.timestamp == 0 || auto_cmd.timestamp > now)
+                {
+                  auto_cmd.timestamp = now;
+                }
+
+              input.auto_timestamp = auto_cmd.timestamp;
+              input.auto_motor = auto_cmd.motor;
+              input.auto_steering = auto_cmd.steering;
+              input.auto_delta_rear = auto_cmd.delta_rear;
+              input.auto_mode = auto_cmd.mode;
+              input.auto_present = true;
+            }
         }
 
       now = router_now_us();

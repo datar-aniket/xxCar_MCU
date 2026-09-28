@@ -17,6 +17,8 @@ struct extpose { uint64_t t,ts; float x,y,yaw,cov[6]; uint8_t flags,rst,pad[2]; 
 struct ediag { uint64_t t,ts,ets; float sf[3],cf[3],grav[3],res[3],na[3],q[4],v[3],p[3],gb[3],ab[3],ei[2],enis[2],em[3],znis[3],gnis,anorm,avar,gdev,eratio,wheel,wmps,wacc,iacc,winnov[2],wnis[2]; uint64_t wt; uint32_t ea,er,za,zr,ga,gr,wa,wr; uint16_t rst,flags; uint8_t inst,pad[3]; };
 struct vaccel { uint64_t t,ts; float x,y,z; uint8_t inst,cal,pad[2]; };
 struct vst { uint64_t t,ts,ats,wts; float p[3],q[4],v[3],w[3],slip,a[3],torque,steer,speed; uint32_t rc; uint8_t status,rst,src,pad; float rear; uint8_t pad2[4]; };
+struct vesc { uint64_t t,ts; int32_t tach; float current,adc; uint8_t id,pad[3]; float cps; uint16_t servo,rear; };
+struct cmd { uint64_t t; float motor,steer,rear; uint8_t mode,pad[3]; };
 #pragma pack(pop)
 int main(void){
   f=fopen("all.ulg","wb");
@@ -34,11 +36,14 @@ int main(void){
     "external_pose:uint64_t timestamp;uint64_t timestamp_sample;float x;float y;float yaw;float[6] cov;uint8_t flags;uint8_t reset_counter;",
     "estimator_diag:uint64_t timestamp;uint64_t timestamp_sample;uint64_t extnav_timestamp;float[3] specific_force;float[3] corrected_force;float[3] gravity_body;float[3] residual_accel_body;float[3] nav_accel;float[4] quaternion;float[3] velocity;float[3] position;float[3] gyro_bias;float[3] accel_bias;float[2] extnav_innov;float[2] extnav_nis;float[3] extnav_measurement;float[3] zupt_nis;float gravity_nis;float accel_norm;float accel_variance;float gravity_deviation;float extnav_test_ratio;float wheel_speed_cps;float wheel_speed_mps;float wheel_accel_mps2;float imu_accel_mps2;float[2] wheel_innov;float[2] wheel_nis;uint64_t wheel_timestamp;uint32_t extnav_accept_count;uint32_t extnav_reject_count;uint32_t zupt_accept_count;uint32_t zupt_reject_count;uint32_t gravity_accept_count;uint32_t gravity_reject_count;uint32_t wheel_accept_count;uint32_t wheel_reject_count;uint16_t reset_counter;uint16_t flags;uint8_t instance;",
     "vehicle_accel:uint64_t timestamp;uint64_t timestamp_sample;float x;float y;float z;uint8_t instance;uint8_t calibrated;",
-    "vehicle_state_tx:uint64_t timestamp;uint64_t timestamp_sample;uint64_t accel_timestamp_sample;uint64_t wire_timestamp_us;float[3] position;float[4] quaternion;float[3] velocity;float[3] angular_velocity;float side_slip_rad;float[3] accel;float wheel_torque_nm;float steering_angle;float motor_speed_ms;uint32_t rc_status;uint8_t solution_status;uint8_t reset_counter;uint8_t source_valid;uint8_t _padding0;float steering_angle_rear;"};
+    "vehicle_state_tx:uint64_t timestamp;uint64_t timestamp_sample;uint64_t accel_timestamp_sample;uint64_t wire_timestamp_us;float[3] position;float[4] quaternion;float[3] velocity;float[3] angular_velocity;float side_slip_rad;float[3] accel;float wheel_torque_nm;float steering_angle;float motor_speed_ms;uint32_t rc_status;uint8_t solution_status;uint8_t reset_counter;uint8_t source_valid;uint8_t _padding0;float steering_angle_rear;",
+    "vesc_status:uint64_t timestamp;uint64_t timestamp_sample;int32_t tachometer;float current_a;float adc_volts;uint8_t controller_id;uint8_t[3] _padding0;float speed_cps;uint16_t servo_us;uint16_t rear_servo_us;",
+    "control_cmd:uint64_t timestamp;float motor;float steering;float delta_rear;uint8_t mode;",
+    "actuator_command:uint64_t timestamp;float motor;float steering;float delta_rear;uint8_t mode;"};
   if(strlen(F[4])<=256){fprintf(stderr,"optical_flow regression fixture must exceed 256 bytes\n");return 2;}
-  for(int i=0;i<12;i++) msg('F',F[i],strlen(F[i]));
-  const char*N[]={"sensor_accel","sensor_baro","sensor_mag","rc_input","optical_flow","distance_sensor","vehicle_imu","estimator_state","external_pose","estimator_diag","vehicle_accel","vehicle_state_tx"};
-  for(uint16_t id=0;id<12;id++){uint8_t a[40];size_t l=0;a[l++]=0;a[l++]=id&0xff;a[l++]=id>>8;memcpy(a+l,N[id],strlen(N[id]));l+=strlen(N[id]);msg('A',a,l);}
+  for(int i=0;i<15;i++) msg('F',F[i],strlen(F[i]));
+  const char*N[]={"sensor_accel","sensor_baro","sensor_mag","rc_input","optical_flow","distance_sensor","vehicle_imu","estimator_state","external_pose","estimator_diag","vehicle_accel","vehicle_state_tx","vesc_status","control_cmd","actuator_command"};
+  for(uint16_t id=0;id<15;id++){uint8_t a[40];size_t l=0;a[l++]=0;a[l++]=id&0xff;a[l++]=id>>8;memcpy(a+l,N[id],strlen(N[id]));l+=strlen(N[id]);msg('A',a,l);}
   for(int k=0;k<4;k++){
     struct accel a={.t=1000+k*500,.x=0.10f*k,.y=-0.20f,.z=9.81f,.temp=34.5f}; dat(0,&a,24);
     struct baro  b={.t=1000+k*500,.p=1013.25f,.temp=27.9f};                   dat(1,&b,16);
@@ -52,6 +57,9 @@ int main(void){
     struct ediag ed={.t=900+k*500,.ts=900+k*500,.ets=850+k*500,.sf={0.04f,0.08f,9.80f},.cf={0.03f,0.07f,9.79f},.grav={0.0f,0.0f,9.80665f},.res={0.03f,0.07f,-0.01665f},.na={0.03f,0.07f,-0.01665f},.q={1.0f},.v={0.1f,0.2f,0.3f},.p={1.0f,2.0f,3.0f},.em={1.2f,-0.4f,0.3f},.anorm=9.79f,.wmps=0.5f,.winnov={0.1f,-0.02f},.wt=875+k*500,.ea=3,.za=5,.ga=7,.wa=9,.flags=0x1143}; dat(9,&ed,285);
     struct vaccel va={.t=1000+k*500,.ts=990+k*500,.x=0.04f,.y=0.08f,.z=9.80f,.cal=1}; dat(10,&va,30);
     struct vst vs={.t=1010+k*500,.ts=900+k*500,.ats=990+k*500,.wts=1700000000000000ull+k*500,.p={1.0f,2.0f,3.0f},.q={1.0f},.a={0.03f,0.08f,-0.01f},.rc=0x075c85f0,.status=0x61,.src=0x5f,.rear=-0.1f}; dat(11,&vs,124);
+    struct vesc ve={.t=1010+k*500,.ts=1005+k*500,.tach=1234,.current=4.2f,.adc=1.7f,.id=1,.cps=250.0f,.servo=1600,.rear=1400}; dat(12,&ve,40);
+    struct cmd ci={.t=1010+k*500,.motor=0.25f,.steer=-0.2f,.rear=0.1f,.mode=0}; dat(13,&ci,21);
+    struct cmd co={.t=1020+k*500,.motor=0.20f,.steer=-0.15f,.rear=0.08f,.mode=0}; dat(14,&co,21);
   }
   fclose(f); return 0;
 }

@@ -25,6 +25,7 @@
  *   param set LOG_EKF 1    exact EKF deltas, residuals, innovations + state
  *   param set LOG_RATE 0    0 = every sample (native 2 kHz); N = cap to N Hz
  *   param set LOG_ENABLE 1  also start logging at boot
+ *   param set LOG_AUTO 1    start/stop logging with AUTO/RC source selection
  *   param save
  *
  * `log allan` is those settings for a noise run in one command: both IMUs on,
@@ -62,7 +63,7 @@ static int log_do_status(void)
   if (!s.running)
     {
       printf("logger: stopped\n");
-      printf("  'log start', or set LOG_ENABLE=1 to start at boot.\n");
+      printf("  'log start', LOG_ENABLE=1 for boot, or LOG_AUTO=1 for AUTO.\n");
       return 0;
     }
 
@@ -96,7 +97,7 @@ int main(int argc, FAR char *argv[])
              "  allan   set up and start an Allan-variance run: both IMUs\n"
              "          only, at [hz] (default 200), everything else off\n"
              "  ekf     log IMU0, mag, baro, external pose and synchronized\n"
-             "          EKF diagnostics at [hz] (default 400)\n"
+             "          EKF diagnostics at [hz] (default 0 = native)\n"
              "  Files split at 100 MB as log_NNN_PP.ulg.\n");
       return 1;
     }
@@ -187,7 +188,7 @@ int main(int argc, FAR char *argv[])
 
   if (strcmp(argv[1], "ekf") == 0)
     {
-      long hz = argc > 2 ? strtol(argv[2], NULL, 10) : 400;
+      long hz = argc > 2 ? strtol(argv[2], NULL, 10) : 0;
 
       if (hz < 0 || hz > 2000)
         {
@@ -197,9 +198,9 @@ int main(int argc, FAR char *argv[])
 
       /* Capture both ends of the estimator path: raw IMU0 at the sensor
        * boundary, the exact matched-LPF delta packets consumed by the EKF,
-       * every aiding input, and the horizon/output states. At 400 Hz the raw
-       * 2 kHz stream is decimated while LOG_EKF records bypass the cap, so no
-       * EKF delta packet or fusion event is discarded.
+       * every aiding input, control command, wheel/VESC status and the
+       * horizon/output states. LOG_EKF records always bypass the optional
+       * cap, so no estimator or control event is discarded.
        */
 
       param_set_i32("LOG_IMU0", 1);
@@ -221,8 +222,8 @@ int main(int argc, FAR char *argv[])
           printf("log: EKF diagnostic profile, native rate\n");
         }
       printf("  IMU0 raw + vehicle_imu + estimator_diag + estimator_state\n"
-             "  external_pose + vehicle_accel + transmitted vehicle_state\n"
-             "  magnetometer + barometer\n");
+             "  external_pose + wheel/VESC status + control_cmd + routed\n"
+             "  actuator command + transmitted state + mag + barometer\n");
 
       ret = logger_start();
 

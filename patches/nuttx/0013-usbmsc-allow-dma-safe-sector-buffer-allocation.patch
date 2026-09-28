@@ -1,0 +1,103 @@
+diff --git a/drivers/usbdev/Kconfig b/drivers/usbdev/Kconfig
+index e1ad9ddd..d2a30992 100644
+--- a/drivers/usbdev/Kconfig
++++ b/drivers/usbdev/Kconfig
+@@ -973,6 +973,14 @@ menuconfig USBMSC
+ 
+ if USBMSC
+ 
++config USBMSC_DMAMEMORY
++	bool "Board DMA-safe mass-storage sector buffer"
++	default n
++	---help---
++		Allocate the USB mass-storage block I/O buffer through board-provided
++		usbmsc_dma_alloc()/usbmsc_dma_free() hooks. Enable this when the backing
++		block device uses DMA that cannot access every general-heap region.
++
+ config USBMSC_COMPOSITE
+ 	bool "Mass storage composite support"
+ 	default n
+diff --git a/drivers/usbdev/usbmsc.c b/drivers/usbdev/usbmsc.c
+index 63b2f9b9..7862ae62 100644
+--- a/drivers/usbdev/usbmsc.c
++++ b/drivers/usbdev/usbmsc.c
+@@ -69,9 +69,18 @@
+ #include <nuttx/usb/storage.h>
+ #include <nuttx/usb/usbdev.h>
+ #include <nuttx/usb/usbdev_trace.h>
++#include <nuttx/usb/usbmsc.h>
+ 
+ #include "usbmsc.h"
+ 
++#ifdef CONFIG_USBMSC_DMAMEMORY
++#  define usbmsc_io_alloc(s)     usbmsc_dma_alloc(s)
++#  define usbmsc_io_free(p, s)   usbmsc_dma_free(p, s)
++#else
++#  define usbmsc_io_alloc(s)     kmm_malloc(s)
++#  define usbmsc_io_free(p, s)   kmm_free(p)
++#endif
++
+ #ifdef CONFIG_USBMSC_COMPOSITE
+ #  include <nuttx/usb/composite.h>
+ #  include "composite.h"
+@@ -1558,10 +1567,10 @@ int usbmsc_bindlun(FAR void *handle, FAR const char *drvrpath,
+   if (!priv->iobuffer)
+     {
+ #ifdef CONFIG_USBMSC_WRMULTIPLE
+-      priv->iobuffer = kmm_malloc(geo.geo_sectorsize *
+-                                  CONFIG_USBMSC_NWRREQS);
++      priv->iobuffer = usbmsc_io_alloc(geo.geo_sectorsize *
++                                       CONFIG_USBMSC_NWRREQS);
+ #else
+-      priv->iobuffer = kmm_malloc(geo.geo_sectorsize);
++      priv->iobuffer = usbmsc_io_alloc(geo.geo_sectorsize);
+ #endif
+       if (!priv->iobuffer)
+         {
+@@ -1580,7 +1589,11 @@ int usbmsc_bindlun(FAR void *handle, FAR const char *drvrpath,
+     {
+       FAR void *tmp;
+ 
++#ifdef CONFIG_USBMSC_DMAMEMORY
++      tmp = usbmsc_io_alloc(geo.geo_sectorsize);
++#else
+       tmp = kmm_realloc(priv->iobuffer, geo.geo_sectorsize);
++#endif
+       if (!tmp)
+         {
+           usbtrace(TRACE_CLSERROR(USBMSC_TRACEERR_REALLOCIOBUFFER),
+@@ -1588,6 +1601,9 @@ int usbmsc_bindlun(FAR void *handle, FAR const char *drvrpath,
+           return -ENOMEM;
+         }
+ 
++#ifdef CONFIG_USBMSC_DMAMEMORY
++      usbmsc_io_free(priv->iobuffer, priv->iosize);
++#endif
+       priv->iobuffer = (FAR uint8_t *)tmp;
+       priv->iosize   = geo.geo_sectorsize;
+     }
+@@ -1885,7 +1901,7 @@ void usbmsc_uninitialize(FAR void *handle)
+ 
+   if (priv->iobuffer)
+     {
+-      kmm_free(priv->iobuffer);
++      usbmsc_io_free(priv->iobuffer, priv->iosize);
+     }
+ 
+   /* Uninitialize and release the driver structure */
+diff --git a/include/nuttx/usb/usbmsc.h b/include/nuttx/usb/usbmsc.h
+index fe97bcda..3893c9f9 100644
+--- a/include/nuttx/usb/usbmsc.h
++++ b/include/nuttx/usb/usbmsc.h
+@@ -65,6 +65,11 @@ extern "C"
+ #  define EXTERN extern
+ #endif
+ 
++#ifdef CONFIG_USBMSC_DMAMEMORY
++FAR void *usbmsc_dma_alloc(size_t size);
++void usbmsc_dma_free(FAR void *memory, size_t size);
++#endif
++
+ /****************************************************************************
+  * Public Functions Definitions
+  ****************************************************************************/

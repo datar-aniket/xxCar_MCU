@@ -15,7 +15,8 @@
  * pyulog / PlotJuggler / FlightPlot.
  *
  * "On request" means it does not run unless asked. `log start` begins a
- * session; `log stop` ends it; LOG_ENABLE=1 makes it also start at boot. The
+ * session; `log stop` ends it; LOG_ENABLE=1 makes it start at boot and
+ * LOG_AUTO=1 follows AUTO/RC source selection. The
  * LOG_IMU / LOG_MAG / LOG_BARO / LOG_RC parameters choose which topics are in
  * the file, and LOG_RATE caps the per-topic rate (0 = every sample, i.e. full
  * native rate).
@@ -62,6 +63,15 @@ struct logger_status_s
 int  logger_start(void);
 void logger_stop(void);
 bool logger_is_running(void);
+
+/* Start the lightweight LOG_AUTO supervisor. When enabled it starts a log as
+ * soon as the control router selects AUTO (including the pre-arm interval) and
+ * stops only the session it owns when the operator returns to RC.
+ */
+
+int  logger_auto_start(void);
+bool logger_auto_is_running(void);
+void logger_auto_suspend(bool suspend);
 
 int  logger_get_status(FAR struct logger_status_s *status);
 

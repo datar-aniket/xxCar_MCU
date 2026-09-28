@@ -676,7 +676,7 @@ int stm32_bringup(void)
     }
 #endif
 
-#ifdef CONFIG_FAT_DMAMEMORY
+#if defined(CONFIG_FAT_DMAMEMORY) || defined(CONFIG_USBMSC_DMAMEMORY)
   /* The FAT sector buffers must come from DMA-capable, aligned memory, and the
    * pool has to exist before anything mounts the card.
    *
@@ -690,8 +690,7 @@ int stm32_bringup(void)
   ret = stm32_dma_alloc_init();
   if (ret < 0)
     {
-      syslog(LOG_ERR, "ERROR: FAT DMA pool init failed - card writes will be "
-                      "unreliable\n");
+      syslog(LOG_ERR, "ERROR: storage DMA pool init failed\n");
       fmuv6c_boot_optional_failure(&boot);
     }
 #endif
@@ -1115,8 +1114,9 @@ int stm32_bringup(void)
 #endif
 
 #ifdef CONFIG_XXCAR_LOGGER
-  /* Start logging at boot only if asked. The logger is on-request by design, so
-   * this is off unless LOG_ENABLE is set - a card should not silently fill.
+  /* Start logging at boot only if asked. LOG_AUTO runs a low-priority monitor
+   * which starts when the router selects AUTO and stops when it returns to RC;
+   * filesystem waits never run in the control loop itself.
    */
 
   if (param_i32("LOG_ENABLE") != 0)
@@ -1129,6 +1129,19 @@ int stm32_bringup(void)
       else
         {
           syslog(LOG_INFO, "[log] logging from boot (LOG_ENABLE=1)\n");
+        }
+    }
+
+  if (param_i32("LOG_AUTO") != 0)
+    {
+      if (logger_auto_start() < 0)
+        {
+          syslog(LOG_ERR, "[log] AUTO supervisor start failed\n");
+          fmuv6c_boot_optional_failure(&boot);
+        }
+      else
+        {
+          syslog(LOG_INFO, "[log] AUTO logging enabled (LOG_AUTO=1)\n");
         }
     }
 #endif

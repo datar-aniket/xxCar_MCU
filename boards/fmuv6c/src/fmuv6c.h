@@ -729,7 +729,7 @@ FAR void *board_composite_connect(int port, int configid);
  *
  ****************************************************************************/
 
-#ifdef CONFIG_FAT_DMAMEMORY
+#if defined(CONFIG_FAT_DMAMEMORY) || defined(CONFIG_USBMSC_DMAMEMORY)
 int stm32_dma_alloc_init(void);
 #endif
 
